@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QHBoxLa
                              QProgressBar, QSlider, QSplitter, QStackedWidget, QTabWidget, QToolBar, QToolButton, QTreeView,
                              QVBoxLayout, QWidget)
 
-from . import __version__, dialogs, fileops, thumbs, util
+from . import __version__, dialogs, fileops, thumbs, util, uwp
 from .overview import OVERVIEW, OVERVIEW_TITLE, OverviewPage, is_uri, mount_uri
 from .viewer import ImageViewer
 from .widgets import (FSModel, GridDelegate, InfoPanel, PathBar, PathRole, SearchModel, SearchThread, Sidebar)
@@ -1269,9 +1269,14 @@ class MainWindow(QMainWindow):
         if single and util.is_archive(single):
             m.addAction(icon("archive-extract", "package-x-generic"), "Extract Here", lambda: self.extract(single))
         m.addAction(icon("package-x-generic", "archive-insert"), "Compress…", lambda: self.compress(paths))
+        if single and (util.is_image(single) or util.is_video(single)) and uwp.editor_open():
+            m.addAction(icon("preferences-desktop-wallpaper", "video-display"), "Add to Selected UWP Monitor",
+                        lambda: self._uwp_add(single))
+        if single and util.is_video(single) and uwp.available():
+            m.addAction(icon("preferences-desktop-wallpaper"), uwp.wallpaper_label(), lambda: util.set_wallpaper(single))
         if single and util.is_image(single):
             im = m.addMenu(icon("image-x-generic"), "Image")
-            im.addAction("Set as Wallpaper", lambda: util.set_wallpaper(single))
+            im.addAction(uwp.wallpaper_label(), lambda: util.set_wallpaper(single))
             im.addAction("Use as Folder Cover", lambda: self.thumbs.set_cover(os.path.dirname(single), single))
             im.addAction("Copy Image to Clipboard", lambda: QGuiApplication.clipboard().setImage(
                 __import__("PyQt6.QtGui", fromlist=["QImage"]).QImage(single)))
@@ -1543,6 +1548,12 @@ class MainWindow(QMainWindow):
         fileops.run_task(self, f"Compressing to {os.path.basename(out)}…",
                          lambda: fileops.compress(paths, out, fmt),
                          lambda p: self.pane().select_later(p))
+
+    def _uwp_add(self, path):
+        if uwp.add_to_selected(path):
+            self.statusBar().showMessage(f"Sent {os.path.basename(path)} to the selected UWP monitor", 4000)
+        else:
+            QMessageBox.warning(self, "UWP", "Couldn't reach UWP. Is its editor window still open?")
 
     def extract(self, path):
         fileops.run_task(self, f"Extracting {os.path.basename(path)}…",

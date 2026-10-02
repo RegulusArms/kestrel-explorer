@@ -78,6 +78,7 @@ Package names are for Ubuntu (tested on 26.04). Everything else Kestrel uses is 
 | `kimageformat6-plugins` | AVIF, HEIC, JPEG XL, PSD, camera RAW and other formats (which formats are included depends on the distro's build) |
 | `7zip` (or `p7zip-full` on older releases) | Creating `.7z` archives and extracting `.7z`, `.rar` and other formats Python can't open |
 | `zfsutils-linux` | Showing a ZFS pool as one card with pool-level usage on the Overview page |
+| [UWP](https://github.com/RegulusArms/UWP) (not an apt package; install with its `install.sh`) | "Set as Wallpaper" through UWP profiles, and "Add to Selected UWP Monitor". Found as `uwp` on your PATH or in `~/.local/bin` |
 
 ```bash
 # everything at once
@@ -128,6 +129,9 @@ sudo apt install python3-pyqt6 python3-pil python3-gi gir1.2-glib-2.0 libglib2.0
 - Rename (F2). Batch rename works with templates (`[Name] ###`, `[Date]`) or find and replace with regex.
 - Duplicate, Move To…, Copy To…, Compress (zip, tar.gz, tar.xz, 7z), Extract Here.
 - Open With: shows recommended apps and lets you set the default app. You can also open a terminal in the current folder or set an image as wallpaper.
+- **UWP wallpapers** (when [UWP](https://github.com/RegulusArms/UWP) is installed):
+  - **Set as Wallpaper (UWP)** on an image or video adds it to UWP's library and shows it on every monitor as a new UWP profile named after the file. It starts UWP if needed and opens its editor. Without UWP, "Set as Wallpaper" sets the GNOME background instead.
+  - **Add to Selected UWP Monitor** appears while UWP's editor window is open. It adds the file to UWP's library and puts it on the monitors selected in the editor (or adds it to that monitor's slideshow). Press OK in UWP to keep it, just as when you pick from UWP's own library.
 - Properties window:
   - **General:** size (recursive for folders), dates, inode, the free space on the drive, and the default app.
   - **Permissions:** an editable rwx grid plus setuid, setgid and sticky bits.
@@ -155,6 +159,7 @@ Press F1 in the app for all keyboard shortcuts. Settings are in the ☰ menu und
 | `kestrel/dialogs.py` | Properties, Open With, rename, batch rename, compress, preferences |
 | `kestrel/metadata.py` | EXIF, AI-generation metadata, exiftool reading/editing, and the tag catalog for the Add Tag picker (the tag descriptions and "Accepts" types are AI-generated and may not be completely accurate) |
 | `kestrel/overview.py` | Overview page: drives, network locations, bookmarks |
+| `kestrel/uwp.py` | Integration with the UWP wallpaper manager (over D-Bus and the `uwp` command) |
 | `pyproject.toml` | PyPI packaging metadata (not ready for release yet — see [PACKAGING.md](PACKAGING.md)) |
 
 ## License

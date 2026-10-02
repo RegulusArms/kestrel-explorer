@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QColorD
                              QTableWidgetItem, QTabWidget, QTreeView, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
                              QWidget)
 
-from . import fileops, metadata, thumbs, util
+from . import fileops, metadata, thumbs, util, uwp
 
 
 def _sel_label(text=""):
@@ -450,7 +450,7 @@ class PropertiesDialog(QDialog):
                 form.addRow(k + ":", ed)
             else:
                 form.addRow(k + ":", _sel_label(v))
-        btn = QPushButton("Set as Wallpaper")
+        btn = QPushButton(uwp.wallpaper_label())
         btn.clicked.connect(lambda: util.set_wallpaper(self.path))
         form.addRow(btn)
         return w

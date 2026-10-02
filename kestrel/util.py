@@ -329,6 +329,10 @@ def open_terminal(directory):
 
 
 def set_wallpaper(path):
+    """Through UWP when it's installed (new UWP profile with the image on every monitor), else GNOME's own."""
+    from . import uwp
+    if uwp.set_wallpaper(path):
+        return
     uri = file_uri(path)
     for key in ("picture-uri", "picture-uri-dark"):
         subprocess.run(["gsettings", "set", "org.gnome.desktop.background", key, uri], timeout=5)
