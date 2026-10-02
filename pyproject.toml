@@ -1,0 +1,50 @@
+# Packaging metadata for PyPI. NOT READY FOR RELEASE yet — see PACKAGING.md for what is left.
+# The "Private :: Do Not Upload" classifier below makes PyPI reject any upload until it is removed.
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kestrel-explorer"
+dynamic = ["version"]  # from kestrel/__init__.py (__version__ "0.1.1-alpha" is published as 0.1.1a0)
+description = "A lightweight, gallery-friendly file manager for Linux with folder preview mosaics"
+readme = "README.md"
+requires-python = ">=3.11.4"  # 3.11.4 added tarfile extraction filters (used by Extract Here)
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "RegulusArms" }]
+keywords = ["file manager", "image gallery", "thumbnails", "exif", "pyqt6"]
+classifiers = [
+    "Private :: Do Not Upload",
+    "Development Status :: 3 - Alpha",
+    "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Desktop Environment :: File Managers",
+    "Topic :: Multimedia :: Graphics :: Viewers",
+]
+dependencies = [
+    "PyQt6>=6.5",
+    "Pillow>=9.0",
+]
+
+[project.optional-dependencies]
+# GIO integration (Open With, default apps, drive and network mounting). Building PyGObject from pip needs
+# system headers (libgirepository-2.0-dev, libcairo2-dev); most users should use the distro's python3-gi.
+gio = ["PyGObject>=3.42"]
+
+# [project.urls]             # TODO: fill in once the GitHub repo exists
+# Homepage = "https://github.com/<user>/kestrel-explorer"
+# Issues = "https://github.com/<user>/kestrel-explorer/issues"
+
+[project.gui-scripts]
+kes = "kestrel.app:main"
+
+[tool.setuptools]
+packages = ["kestrel"]
+
+[tool.setuptools.dynamic]
+version = { attr = "kestrel.__version__" }

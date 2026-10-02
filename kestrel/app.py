@@ -1,0 +1,1698 @@
+"""Main window and browser panes."""
+import os
+import shutil
+import sys
+
+from PyQt6.QtCore import QDir, QEvent, QItemSelectionModel, QMimeData, QSettings, QSize, QStorageInfo, Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QAction, QGuiApplication, QKeySequence
+from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QHBoxLayout, QHeaderView,
+                             QInputDialog, QLabel, QLineEdit, QListView, QMainWindow, QMenu, QMessageBox,
+                             QProgressBar, QSlider, QSplitter, QStackedWidget, QTabWidget, QToolBar, QToolButton, QTreeView,
+                             QVBoxLayout, QWidget)
+
+from . import __version__, dialogs, fileops, thumbs, util
+from .overview import OVERVIEW, OVERVIEW_TITLE, OverviewPage, is_uri, mount_uri
+from .viewer import ImageViewer
+from .widgets import (FSModel, GridDelegate, InfoPanel, PathBar, PathRole, SearchModel, SearchThread, Sidebar)
+
+SEL = QItemSelectionModel.SelectionFlag
+
+GRID_MIN, GRID_MAX = 48, 320
+LIST_MIN, LIST_MAX = 16, 128
+SORT_COLUMNS = ["Name", "Size", "Type", "Modified"]
+WINDOWS = []
+
+
+def icon(*names):
+    return util.theme_icon(*names)
+
+
+# ---------------------------------------------------------------- pane
+
+class Pane(QWidget):
+    path_changed = pyqtSignal()
+    selection_changed = pyqtSignal()
+
+    def __init__(self, win, path):
+        super().__init__()
+        self.win = win
+        self.thumbs = win.thumbs
+        self.settings = win.settings
+        self.back_stack, self.fwd_stack = [], []
+        self.path = None
+        self.in_search = False
+        self.search_thread = None
+        self._pending_select = None
+        self.grid_size = int(self.settings.value("grid_size", 160))
+        self.list_size = int(self.settings.value("list_size", 28))
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        # search bar
+        self.search_bar = QWidget()
+        sl = QHBoxLayout(self.search_bar)
+        sl.setContentsMargins(6, 4, 6, 4)
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("Search… (supports * and ? wildcards)")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_sub = QCheckBox("Include subfolders")
+        self.search_sub.setChecked(self.settings.value("search_recursive", False, type=bool))
+        close = QToolButton()
+        close.setIcon(icon("window-close-symbolic", "window-close"))
+        close.setAutoRaise(True)
+        close.clicked.connect(self.close_search)
+        sl.addWidget(self.search_edit, 1)
+        sl.addWidget(self.search_sub)
+        sl.addWidget(close)
+        self.search_bar.hide()
+        self.search_timer = QTimer(self, singleShot=True, interval=250, timeout=self._do_search)
+        self.search_edit.textChanged.connect(lambda: self.search_timer.start())
+        self.search_sub.toggled.connect(lambda v: (self.settings.setValue("search_recursive", v), self._do_search()))
+        self.search_edit.installEventFilter(self)
+        lay.addWidget(self.search_bar)
+
+        self.stack = QStackedWidget()
+        self.grid = QListView()
+        self.tree = QTreeView()
+        self._setup_grid()
+        self._setup_tree()
+        self.stack.addWidget(self.grid)
+        self.stack.addWidget(self.tree)
+        self.mode_view = self.grid  # grid or tree; stays set while the overview page is shown
+        self.overview = OverviewPage(win)
+        self.stack.addWidget(self.overview)
+        lay.addWidget(self.stack)
+        self.empty = QLabel("Folder is empty", self.stack)
+        self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty.setStyleSheet("color: palette(placeholder-text); font-size: 16px; background: transparent")
+        self.empty.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.empty.hide()
+
+        self.model = self._make_model()
+        self.search_model = SearchModel(self.thumbs, self)
+        self._attach(self.model)
+        self.set_view_mode(self.settings.value("view_mode", "grid"))
+        self.set_path(path)
+
+    # -- setup
+    def _setup_common(self, v):
+        v.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        v.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        v.setDragEnabled(True)
+        v.setAcceptDrops(True)
+        v.setDropIndicatorShown(True)
+        v.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
+        v.setDefaultDropAction(Qt.DropAction.MoveAction)
+        v.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        v.customContextMenuRequested.connect(lambda pos, v=v: self.win.context_menu(self, v, pos))
+        v.doubleClicked.connect(self._double_clicked)
+        v.clicked.connect(self._clicked)
+        v.installEventFilter(self)
+        v.viewport().installEventFilter(self)
+        v.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        v.verticalScrollBar().setSingleStep(40)
+
+    def _setup_grid(self):
+        g = self.grid
+        g.setViewMode(QListView.ViewMode.IconMode)
+        g.setMovement(QListView.Movement.Static)
+        g.setResizeMode(QListView.ResizeMode.Adjust)
+        g.setWrapping(True)
+        g.setUniformItemSizes(True)
+        g.setLayoutMode(QListView.LayoutMode.Batched)
+        g.setBatchSize(400)
+        g.setMouseTracking(True)
+        g.setFrameShape(QListView.Shape.NoFrame)
+        self.delegate = GridDelegate(self, g)
+        self.delegate.icon_size = self.grid_size
+        g.setItemDelegate(self.delegate)
+        self._setup_common(g)
+
+    def _setup_tree(self):
+        t = self.tree
+        t.setRootIsDecorated(False)
+        t.setItemsExpandable(False)
+        t.setUniformRowHeights(True)
+        t.setAlternatingRowColors(True)
+        t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        t.setSortingEnabled(True)
+        t.setFrameShape(QTreeView.Shape.NoFrame)
+        t.setIconSize(QSize(self.list_size, self.list_size))
+        col = int(self.settings.value("sort_col", 0))
+        order = Qt.SortOrder(int(self.settings.value("sort_order", 0)))
+        t.header().setSortIndicator(col, order)
+        t.header().sortIndicatorChanged.connect(self._sort_changed)
+        self._setup_common(t)
+
+    def _filters(self):
+        f = QDir.Filter.AllEntries | QDir.Filter.NoDotAndDotDot | QDir.Filter.System
+        if self.win.show_hidden:
+            f |= QDir.Filter.Hidden
+        return f
+
+    def _make_model(self):
+        m = FSModel(self.thumbs, self)
+        m.drop_handler = self.win.handle_drop
+        m.setFilter(self._filters())
+        m.setNameFilterDisables(False)
+        m.directoryLoaded.connect(self._dir_loaded)
+        m.rowsInserted.connect(self._update_empty)
+        m.rowsRemoved.connect(self._update_empty)
+        m.thumb_size = self.grid_size
+        return m
+
+    def _attach(self, model):
+        for v in (self.grid, self.tree):
+            v.setModel(model)
+        self.grid.setSelectionModel(self.tree.selectionModel())
+        self.tree.selectionModel().selectionChanged.connect(lambda *_: self.selection_changed.emit())
+        hdr = self.tree.header()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        hdr.resizeSection(0, 380)
+        hdr.setStretchLastSection(True)
+        self._apply_folder_previews()
+
+    # -- view mode / zoom
+    def is_grid(self):
+        return self.mode_view is self.grid
+
+    def view(self):
+        return self.mode_view
+
+    def is_overview(self):
+        return self.path == OVERVIEW
+
+    @property
+    def dir(self):
+        """The current folder, or None on the overview page."""
+        return None if self.is_overview() else self.path
+
+    def set_view_mode(self, mode):
+        self.mode_view = self.grid if mode == "grid" else self.tree
+        if not self.is_overview():
+            self.stack.setCurrentWidget(self.mode_view)
+        self._apply_folder_previews()
+        self._update_grid_size()
+
+    def _apply_folder_previews(self):
+        grid = self.mode_view is self.grid
+        on = self.win.folder_previews and (grid or self.settings.value("list_folder_previews", False, type=bool))
+        size = self.grid_size if grid else max(self.list_size, 96)
+        for m in (getattr(self, "model", None), getattr(self, "search_model", None)):
+            if m is not None:
+                m.folder_previews = on
+                m.thumb_size = size
+
+    def zoom(self, step=None, absolute=None):
+        if self.is_grid():
+            cur = self.grid_size
+            new = absolute if absolute is not None else int(cur * (1.15 if step > 0 else 1 / 1.15))
+            self.grid_size = max(GRID_MIN, min(GRID_MAX, new))
+            self.delegate.icon_size = self.grid_size
+            self.settings.setValue("grid_size", self.grid_size)
+            self._update_grid_size()
+        else:
+            cur = self.list_size
+            new = absolute if absolute is not None else cur + (8 if step > 0 else -8)
+            self.list_size = max(LIST_MIN, min(LIST_MAX, new))
+            self.tree.setIconSize(QSize(self.list_size, self.list_size))
+            self.settings.setValue("list_size", self.list_size)
+        self._apply_folder_previews()
+        self.view().viewport().update()
+        self.win.sync_zoom_slider()
+
+    def zoom_value(self):
+        return self.grid_size if self.is_grid() else self.list_size
+
+    def _update_grid_size(self):
+        cell = self.delegate.cell_size()
+        # Width as if the scrollbar were always shown: otherwise the scrollbar
+        # appearing/disappearing changes the column width and the grid re-flows.
+        sb = 0 if self.grid.verticalScrollBar().isVisible() else \
+            self.grid.style().pixelMetric(self.grid.style().PixelMetric.PM_ScrollBarExtent)
+        avail = self.grid.viewport().width() - sb
+        cols = max(1, avail // cell.width())
+        extra = (avail - cols * cell.width()) // cols if cols > 1 else 0
+        size = QSize(cell.width() + max(0, extra), cell.height())
+        if size != self.grid.gridSize():
+            self.grid.setGridSize(size)
+
+    # -- navigation
+    def set_path(self, path, record=True, select=None):
+        if path == OVERVIEW:
+            if self.in_search or self.search_bar.isVisible():
+                self.close_search(refocus=False)
+            if record and self.path and self.path != OVERVIEW:
+                self.back_stack.append(self.path)
+                self.fwd_stack.clear()
+            self.path = OVERVIEW
+            self.view().clearSelection()
+            self.stack.setCurrentWidget(self.overview)
+            self.empty.hide()
+            self.path_changed.emit()
+            return True
+        path = os.path.abspath(os.path.expanduser(path))
+        if os.path.isfile(path):
+            select, path = path, os.path.dirname(path)
+        if not os.path.isdir(path):
+            QMessageBox.warning(self, "Not found", f"“{path}” does not exist.")
+            return False
+        if not os.access(path, os.R_OK | os.X_OK):
+            QMessageBox.warning(self, "Permission denied", f"You don't have permission to open “{path}”.")
+            return False
+        if self.in_search or self.search_bar.isVisible():
+            self.close_search(refocus=False)
+        prev = self.path
+        if record and prev and prev != path:
+            self.back_stack.append(prev)
+            self.fwd_stack.clear()
+        self.path = path
+        self.stack.setCurrentWidget(self.mode_view)
+        self.thumbs.cancel_pending()
+        self.model.setNameFilters([])
+        root = self.model.setRootPath(path)
+        self.grid.setRootIndex(root)
+        self.tree.setRootIndex(root)
+        self._pending_select = select or (prev if prev and os.path.dirname(prev) == path else None)
+        QTimer.singleShot(0, self._try_select)
+        self.grid.scrollToTop()
+        self.tree.scrollToTop()
+        self._update_empty()
+        self.path_changed.emit()
+        return True
+
+    def _dir_loaded(self, p):
+        if p == self.path:
+            self._update_empty()
+            if self.win.pane() is self:
+                self.win.update_status()
+            QTimer.singleShot(30, self._try_select)
+
+    def _try_select(self):
+        if not self._pending_select or self.in_search or self.is_overview():
+            return
+        idx = self.model.index(self._pending_select)
+        if idx.isValid():
+            self.select_paths([self._pending_select])
+            self._pending_select = None
+
+    def select_later(self, path):
+        """Select path once it shows up in the model (after create/rename/paste)."""
+        self._pending_select = path
+        for ms in (60, 300, 1000, 2500):
+            QTimer.singleShot(ms, self._try_select)
+
+    def select_paths(self, paths):
+        if self.is_overview():
+            return
+        sm = self.view().selectionModel()
+        sm.clearSelection()
+        first = None
+        for p in paths:
+            idx = self._index_for(p)
+            if idx is not None and idx.isValid():
+                sm.select(idx, SEL.Select | SEL.Rows)
+                first = first or idx
+        if first is not None:
+            sm.setCurrentIndex(first, SEL.NoUpdate)
+            self.view().scrollTo(first)
+
+    def _index_for(self, p):
+        if self.in_search:
+            item = self.search_model.rows.get(p)
+            return item.index() if item else None
+        return self.model.index(p)
+
+    def go_back(self):
+        if self.back_stack:
+            self.fwd_stack.append(self.path)
+            self.set_path(self.back_stack.pop(), record=False)
+
+    def go_forward(self):
+        if self.fwd_stack:
+            self.back_stack.append(self.path)
+            self.set_path(self.fwd_stack.pop(), record=False)
+
+    def go_up(self):
+        if self.is_overview():
+            return
+        parent = os.path.dirname(self.path)
+        if parent != self.path:
+            self.set_path(parent, select=self.path)
+
+    def refresh(self):
+        if self.is_overview():
+            self.overview.refresh()
+            return
+        for p in self.all_paths():
+            if os.path.isdir(p):
+                self.thumbs.invalidate(p)
+        sel = self.selected_paths()
+        self.model.deleteLater()
+        self.model = self._make_model()
+        if not self.in_search:
+            self._attach(self.model)
+            root = self.model.setRootPath(self.path)
+            self.grid.setRootIndex(root)
+            self.tree.setRootIndex(root)
+            self._pending_select = sel[0] if sel else None
+        self._update_grid_size()
+
+    def apply_hidden(self):
+        self.model.setFilter(self._filters())
+
+    def _update_empty(self, *a):
+        if self.is_overview():
+            self.empty.hide()
+            return
+        if self.in_search:
+            n = self.search_model.rowCount()
+            text = "No results" if n == 0 and not (self.search_thread and self.search_thread.isRunning()) else ""
+        else:
+            n = self.model.rowCount(self.model.index(self.path)) if self.path else 0
+            text = "Folder is empty" if n == 0 else ""
+        self.empty.setText(text)
+        self.empty.setVisible(bool(text))
+        self.empty.setGeometry(self.stack.rect())
+
+    # -- search
+    def start_search(self):
+        if self.is_overview():
+            return
+        self.search_bar.show()
+        self.search_edit.setFocus()
+        self.search_edit.selectAll()
+
+    def close_search(self, refocus=True):
+        self.search_edit.blockSignals(True)
+        self.search_edit.clear()
+        self.search_edit.blockSignals(False)
+        self.search_bar.hide()
+        self._stop_search()
+        self.model.setNameFilters([])
+        if self.in_search:
+            self.in_search = False
+            self._attach(self.model)
+            root = self.model.index(self.path)
+            self.grid.setRootIndex(root)
+            self.tree.setRootIndex(root)
+        self._update_empty()
+        if refocus:
+            self.view().setFocus()
+        self.path_changed.emit()
+
+    def _stop_search(self):
+        if self.search_thread:
+            self.search_thread.stop = True
+            self.search_thread.wait(2000)
+            self.search_thread = None
+
+    def _do_search(self):
+        text = self.search_edit.text().strip()
+        self._stop_search()
+        if not text:
+            self.model.setNameFilters([])
+            if self.in_search:
+                self.in_search = False
+                self._attach(self.model)
+                root = self.model.index(self.path)
+                self.grid.setRootIndex(root)
+                self.tree.setRootIndex(root)
+            self._update_empty()
+            return
+        if self.search_sub.isChecked():
+            if not self.in_search:
+                self.in_search = True
+                self._attach(self.search_model)
+                self.grid.setRootIndex(self.search_model.index(-1, -1))
+                self.tree.setRootIndex(self.search_model.index(-1, -1))
+            self.search_model.clear_results()
+            t = SearchThread(self.path, text, self.win.show_hidden, self)
+            t.found.connect(self.search_model.add_paths)
+            t.found.connect(self._update_empty)
+            t.finished.connect(self._update_empty)
+            t.finished.connect(lambda: self.win.update_status())
+            self.search_thread = t
+            t.start()
+        else:
+            if self.in_search:
+                self.in_search = False
+                self._attach(self.model)
+                root = self.model.index(self.path)
+                self.grid.setRootIndex(root)
+                self.tree.setRootIndex(root)
+            pattern = text if any(c in text for c in "*?[") else f"*{text}*"
+            self.model.setNameFilters([pattern])
+        self._update_empty()
+        self.win.update_status()
+
+    # -- selection helpers
+    def selected_paths(self):
+        if self.is_overview():
+            return []
+        sm = self.view().selectionModel()
+        if sm is None:
+            return []
+        idxs = sorted({(i.row(), i.parent()) for i in sm.selectedIndexes()}, key=lambda t: t[0])
+        model = self.view().model()
+        out = []
+        for row, parent in idxs:
+            p = model.index(row, 0, parent).data(PathRole)
+            if p:
+                out.append(p)
+        return out
+
+    def all_paths(self):
+        if self.is_overview():
+            return []
+        if self.in_search:
+            return [self.search_model.item(r, 0).data(PathRole) for r in range(self.search_model.rowCount())]
+        root = self.model.index(self.path)
+        return [self.model.filePath(self.model.index(r, 0, root)) for r in range(self.model.rowCount(root))]
+
+    def current_path(self):
+        idx = self.view().currentIndex()
+        return idx.siblingAtColumn(0).data(PathRole) if idx.isValid() else None
+
+    def invert_selection(self):
+        sel = set(self.selected_paths())
+        self.select_paths([p for p in self.all_paths() if p not in sel])
+
+    def _sort_changed(self, col, order):
+        self.settings.setValue("sort_col", col)
+        self.settings.setValue("sort_order", order.value)
+
+    def sort_by(self, col, order=None):
+        if order is None:
+            order = self.tree.header().sortIndicatorOrder()
+        self.tree.header().setSortIndicator(col, order)
+        self.tree.model().sort(col, order)
+
+    # -- activation
+    def _clicked(self, idx):
+        if self.settings.value("single_click", False, type=bool) and not QGuiApplication.keyboardModifiers():
+            self.win.open_paths(self, [idx.siblingAtColumn(0).data(PathRole)])
+
+    def _double_clicked(self, idx):
+        if not self.settings.value("single_click", False, type=bool):
+            self.win.open_paths(self, [idx.siblingAtColumn(0).data(PathRole)])
+
+    def eventFilter(self, obj, ev):
+        t = ev.type()
+        if obj is self.search_edit and t == QEvent.Type.KeyPress:
+            if ev.key() == Qt.Key.Key_Escape:
+                self.close_search()
+                return True
+            if ev.key() in (Qt.Key.Key_Down, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                self.view().setFocus()
+                if self.view().model().rowCount(self.view().rootIndex()):
+                    first = self.view().model().index(0, 0, self.view().rootIndex())
+                    if not self.view().currentIndex().isValid():
+                        self.view().setCurrentIndex(first)
+                return True
+            return False
+        if obj in (self.grid, self.tree) and t == QEvent.Type.KeyPress:
+            k, mods = ev.key(), ev.modifiers()
+            if k in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not (mods & Qt.KeyboardModifier.AltModifier):
+                paths = self.selected_paths()
+                if paths:
+                    self.win.open_paths(self, paths, new_tab=bool(mods & Qt.KeyboardModifier.ControlModifier))
+                return True
+            if k == Qt.Key.Key_Space and not mods:
+                paths = self.selected_paths()
+                if paths:
+                    self.win.quick_view(self, paths)
+                return True
+            if k == Qt.Key.Key_Escape and self.search_bar.isVisible():
+                self.close_search()
+                return True
+        if obj in (self.grid.viewport(), self.tree.viewport()):
+            if t == QEvent.Type.Wheel and ev.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                self.zoom(1 if ev.angleDelta().y() > 0 else -1)
+                return True
+            if t == QEvent.Type.MouseButtonPress:
+                b = ev.button()
+                if b == Qt.MouseButton.BackButton:
+                    self.go_back()
+                    return True
+                if b == Qt.MouseButton.ForwardButton:
+                    self.go_forward()
+                    return True
+            if t == QEvent.Type.MouseButtonRelease and ev.button() == Qt.MouseButton.MiddleButton:
+                idx = self.view().indexAt(ev.position().toPoint())
+                p = idx.siblingAtColumn(0).data(PathRole) if idx.isValid() else None
+                if p and os.path.isdir(p):
+                    self.win.new_tab(p, activate=False)
+                    return True
+            if t == QEvent.Type.Resize:
+                if obj is self.grid.viewport():
+                    QTimer.singleShot(0, self._update_grid_size)
+                self.empty.setGeometry(self.stack.rect())
+        return super().eventFilter(obj, ev)
+
+    @property
+    def cut_paths(self):
+        return self.win.cut_paths
+
+    def title(self):
+        if self.is_overview():
+            return OVERVIEW_TITLE
+        if self.in_search:
+            return f"Search: {self.search_edit.text()}"
+        return os.path.basename(self.path.rstrip("/")) or "/"
+
+
+# ---------------------------------------------------------------- main window
+
+class MainWindow(QMainWindow):
+    def __init__(self, paths, thumb_mgr, settings):
+        super().__init__()
+        self.settings = settings
+        self.thumbs = thumb_mgr
+        self.cut_paths = set()
+        self.show_hidden = self.settings.value("show_hidden", False, type=bool)
+        self.folder_previews = self.settings.value("folder_previews", True, type=bool)
+        self.viewers = []
+        self.setWindowTitle(util.APP_NAME)
+        self.setWindowIcon(icon("folder"))
+        self.resize(1280, 820)
+
+        self._build_toolbar()
+        self.sidebar = Sidebar()
+        self.sidebar.open_path.connect(lambda p, new: self.open_location(p, new_tab=new))
+        self.sidebar.dropped.connect(self.handle_drop)
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.setTabsClosable(True)
+        self.tabs.setMovable(True)
+        self.tabs.setTabBarAutoHide(True)
+        self.tabs.tabCloseRequested.connect(self.close_tab)
+        self.tabs.currentChanged.connect(self._tab_changed)
+        self.info = InfoPanel(self.thumbs)
+        self.info.folder_previews = self.folder_previews
+        self.split = QSplitter()
+        self.split.addWidget(self.sidebar)
+        self.split.addWidget(self.tabs)
+        self.split.addWidget(self.info)
+        self.split.setStretchFactor(1, 1)
+        self.split.setSizes([220, 900, 300])
+        self.split.setCollapsible(1, False)
+        self.setCentralWidget(self.split)
+        self.sidebar.setVisible(self.settings.value("sidebar", True, type=bool))
+        self.info.setVisible(self.settings.value("info_panel", False, type=bool))
+
+        self.status_label = QLabel()
+        self.free_label = QLabel()
+        self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
+        self.zoom_slider.setFixedWidth(140)
+        self.zoom_slider.setToolTip("Zoom (Ctrl+scroll)")
+        self.zoom_slider.valueChanged.connect(lambda v: self.pane() and self.pane().zoom_value() != v and self.pane().zoom(absolute=v))
+        self.thumb_progress = QProgressBar()
+        self.thumb_progress.setFixedWidth(220)
+        self.thumb_progress.setMaximumHeight(16)
+        self.thumb_progress.setFormat("Thumbnails %v / %m")
+        self.thumb_progress.setToolTip("Generating thumbnails and folder previews in the background")
+        keep = self.thumb_progress.sizePolicy()
+        keep.setRetainSizeWhenHidden(True)  # showing/hiding must not shift the layout
+        self.thumb_progress.setSizePolicy(keep)
+        self.thumb_progress.hide()
+        self.thumbs.progress.connect(self._thumb_progress)
+        self.builder = None
+        self.build_box = QWidget()
+        bl = QHBoxLayout(self.build_box)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.setSpacing(4)
+        self.build_label = QLabel()
+        self.build_label.setMaximumWidth(260)
+        self.build_bar = QProgressBar()
+        self.build_bar.setFixedWidth(200)
+        self.build_bar.setMaximumHeight(16)
+        self.build_stop = QToolButton()
+        self.build_stop.setText("✕")
+        self.build_stop.setAutoRaise(True)
+        self.build_stop.setToolTip("Stop building previews")
+        self.build_stop.clicked.connect(self.stop_build)
+        for wdg in (self.build_label, self.build_bar, self.build_stop):
+            bl.addWidget(wdg)
+        self.build_box.hide()
+        self.statusBar().addWidget(self.status_label, 1)
+        self.statusBar().addPermanentWidget(self.build_box)
+        self.statusBar().addPermanentWidget(self.thumb_progress)
+        self.statusBar().addPermanentWidget(self.free_label)
+        self.statusBar().addPermanentWidget(self.zoom_slider)
+
+        self._build_actions()
+        geo = self.settings.value("geometry")
+        if geo is not None:
+            self.restoreGeometry(geo)
+        st = self.settings.value("splitter")
+        if st is not None:
+            self.split.restoreState(st)
+        for p in paths or [self.homepage()]:
+            self.open_location(p, new_tab=True)
+        if not self.tabs.count():  # e.g. homepage was an unreachable network share
+            self.new_tab(OVERVIEW)
+
+    # -- toolbar & actions
+    def _build_toolbar(self):
+        tb = QToolBar()
+        tb.setMovable(False)
+        tb.setIconSize(QSize(18, 18))
+        self.addToolBar(tb)
+        self.toolbar = tb
+        self.a_back = tb.addAction(icon("go-previous-symbolic", "go-previous"), "Back", lambda: self.pane().go_back())
+        self.a_fwd = tb.addAction(icon("go-next-symbolic", "go-next"), "Forward", lambda: self.pane().go_forward())
+        self.a_up = tb.addAction(icon("go-up-symbolic", "go-up"), "Parent Folder", lambda: self.pane().go_up())
+        self.a_home = tb.addAction(icon("go-home-symbolic", "go-home"), "Homepage (Alt+Home)", self.go_home)
+        self.pathbar = PathBar()
+        self.pathbar.navigate.connect(self.navigate)
+        tb.addWidget(self.pathbar)
+        self.preview_box = QCheckBox("Folder previews")
+        self.preview_box.setToolTip("Show image mosaics on folder icons (Ctrl+Shift+P).\n"
+                                    "Turn off in large or slow folders to speed things up.")
+        self.preview_box.setChecked(self.folder_previews)
+        self.preview_box.toggled.connect(self.set_folder_previews)
+        tb.addWidget(self.preview_box)
+        self.a_search = tb.addAction(icon("system-search-symbolic", "edit-find"), "Search (Ctrl+F)",
+                                     lambda: self.pane().start_search())
+        self.view_btn = QToolButton()
+        self.view_btn.setAutoRaise(True)
+        self.view_btn.clicked.connect(self.toggle_view)
+        tb.addWidget(self.view_btn)
+        self.sort_btn = QToolButton()
+        self.sort_btn.setAutoRaise(True)
+        self.sort_btn.setIcon(icon("view-sort-ascending-symbolic", "view-sort-ascending"))
+        self.sort_btn.setToolTip("Sort")
+        self.sort_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.sort_menu = QMenu(self)
+        self.sort_menu.aboutToShow.connect(self._fill_sort_menu)
+        self.sort_btn.setMenu(self.sort_menu)
+        tb.addWidget(self.sort_btn)
+        self.menu_btn = QToolButton()
+        self.menu_btn.setAutoRaise(True)
+        self.menu_btn.setIcon(icon("open-menu-symbolic", "application-menu", "preferences-system"))
+        self.menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        tb.addWidget(self.menu_btn)
+
+    def _fill_sort_menu(self):
+        m = self.sort_menu
+        m.clear()
+        p = self.pane()
+        col = p.tree.header().sortIndicatorSection()
+        order = p.tree.header().sortIndicatorOrder()
+        for i, name in enumerate(SORT_COLUMNS):
+            a = m.addAction(name, lambda i=i: p.sort_by(i))
+            a.setCheckable(True)
+            a.setChecked(i == col)
+        m.addSeparator()
+        for o, name in ((Qt.SortOrder.AscendingOrder, "Ascending"), (Qt.SortOrder.DescendingOrder, "Descending")):
+            a = m.addAction(name, lambda o=o: p.sort_by(p.tree.header().sortIndicatorSection(), o))
+            a.setCheckable(True)
+            a.setChecked(o == order)
+
+    def _act(self, text, keys, fn, icon_names=None, checkable=False, menu=None):
+        a = QAction(text, self)
+        if keys:
+            a.setShortcuts([QKeySequence(k) for k in (keys if isinstance(keys, list) else [keys])])
+        if icon_names:
+            a.setIcon(icon(*icon_names))
+        a.setCheckable(checkable)
+        a.triggered.connect(fn)
+        self.addAction(a)
+        if menu is not None:
+            menu.addAction(a)
+        return a
+
+    def _build_actions(self):
+        menu = QMenu(self)
+        self.menu_btn.setMenu(menu)
+        A = self._act
+        fm = menu.addMenu("File")
+        A("New Window", "Ctrl+N", lambda: open_window([self.pane().path]), menu=fm)
+        A("New Tab", "Ctrl+T", lambda: self.new_tab(self.pane().path), menu=fm)
+        A("Close Tab", "Ctrl+W", lambda: self.close_tab(self.tabs.currentIndex()), menu=fm)
+        fm.addSeparator()
+        A("New Folder…", "Ctrl+Shift+N", self.new_folder, ["folder-new"], menu=fm)
+        A("New Empty File…", "Ctrl+Alt+N", lambda: self.new_file(), ["document-new"], menu=fm)
+        A("Open Terminal Here", "Ctrl+Alt+T", lambda: self.cur_dir() and util.open_terminal(self.cur_dir()), ["utilities-terminal"], menu=fm)
+        fm.addSeparator()
+        A("Bookmark This Location", "Ctrl+D", lambda: self.cur_dir() and self.sidebar.add_bookmark(self.cur_dir()), ["bookmark-new"], menu=fm)
+        A("Properties of This Folder", None, lambda: self.cur_dir() and self.properties([self.cur_dir()]), menu=fm)
+        fm.addSeparator()
+        A("Quit", "Ctrl+Q", QApplication.quit, menu=fm)
+
+        em = menu.addMenu("Edit")
+        A("Cut", "Ctrl+X", lambda: self.clip(True), ["edit-cut"], menu=em)
+        A("Copy", "Ctrl+C", lambda: self.clip(False), ["edit-copy"], menu=em)
+        A("Paste", "Ctrl+V", lambda: self.paste(), ["edit-paste"], menu=em)
+        A("Paste as Link", "Ctrl+Shift+V", lambda: self.paste(as_link=True), menu=em)
+        em.addSeparator()
+        A("Select All", "Ctrl+A", lambda: self.pane().view().selectAll(), menu=em)
+        A("Invert Selection", "Ctrl+Shift+I", lambda: self.pane().invert_selection(), menu=em)
+        em.addSeparator()
+        A("Rename…", "F2", lambda: self.rename(self.pane().selected_paths()), menu=em)
+        A("Duplicate", "Ctrl+Shift+D", lambda: self.duplicate(self.pane().selected_paths()), menu=em)
+        A("Move to Trash", "Delete", lambda: self.trash_paths(self.pane().selected_paths()), ["user-trash"], menu=em)
+        A("Delete Permanently", "Shift+Delete", lambda: self.delete_paths(self.pane().selected_paths()), menu=em)
+        A("Copy Path", "Ctrl+Shift+C", lambda: self.copy_text(self.pane().selected_paths() or [self.cur_dir()] if self.cur_dir() else []), menu=em)
+        em.addSeparator()
+        A("Properties", ["Alt+Return", "Ctrl+I"], lambda: self.properties(self.pane().selected_paths() or ([self.cur_dir()] if self.cur_dir() else [])),
+          ["document-properties"], menu=em)
+
+        vm = menu.addMenu("View")
+        A("Grid View", "Ctrl+1", lambda: self.set_view("grid"), menu=vm)
+        A("List View", "Ctrl+2", lambda: self.set_view("list"), menu=vm)
+        vm.addSeparator()
+        A("Zoom In", ["Ctrl++", "Ctrl+="], lambda: self.pane().zoom(1), menu=vm)
+        A("Zoom Out", "Ctrl+-", lambda: self.pane().zoom(-1), menu=vm)
+        A("Reset Zoom", "Ctrl+0", lambda: self.pane().zoom(absolute=160 if self.pane().is_grid() else 28), menu=vm)
+        vm.addSeparator()
+        A("Toggle Folder Previews", "Ctrl+Shift+P", self.preview_box.toggle, menu=vm)
+        self.a_hidden = A("Show Hidden Files", "Ctrl+H", self.toggle_hidden, checkable=True, menu=vm)
+        self.a_hidden.setChecked(self.show_hidden)
+        self.a_sidebar = A("Sidebar", "F9", lambda v: self._toggle_panel(self.sidebar, "sidebar", v), checkable=True, menu=vm)
+        self.a_sidebar.setChecked(self.sidebar.isVisible())
+        self.a_info = A("Info Panel", "F3", lambda v: self._toggle_panel(self.info, "info_panel", v), checkable=True, menu=vm)
+        self.a_info.setChecked(self.info.isVisible())
+        A("Fullscreen", "F11", lambda: self.showNormal() if self.isFullScreen() else self.showFullScreen(), menu=vm)
+        A("Reload", ["F5", "Ctrl+R"], lambda: self.pane().refresh(), ["view-refresh"], menu=vm)
+
+        gm = menu.addMenu("Go")
+        A("Back", ["Alt+Left", "Backspace"], lambda: self.pane().go_back(), menu=gm)
+        A("Forward", "Alt+Right", lambda: self.pane().go_forward(), menu=gm)
+        A("Parent Folder", "Alt+Up", lambda: self.pane().go_up(), menu=gm)
+        A("Open Selected", "Alt+Down", lambda: self.open_paths(self.pane(), self.pane().selected_paths()), menu=gm)
+        A("Homepage", "Alt+Home", self.go_home, menu=gm)
+        A("Home Folder", None, lambda: self.navigate(util.HOME), menu=gm)
+        A("Overview (Drives && Bookmarks)", None, lambda: self.navigate(OVERVIEW), menu=gm)
+        A("Enter Location…", ["Ctrl+L", "F6"], lambda: self.pathbar.start_edit(), menu=gm)
+        A("Search", ["Ctrl+F"], lambda: self.pane().start_search(), menu=gm)
+        A("Next Tab", ["Ctrl+PgDown", "Ctrl+Tab"], lambda: self.tabs.setCurrentIndex((self.tabs.currentIndex() + 1) % self.tabs.count()), menu=gm)
+        A("Previous Tab", ["Ctrl+PgUp", "Ctrl+Shift+Tab"], lambda: self.tabs.setCurrentIndex((self.tabs.currentIndex() - 1) % self.tabs.count()), menu=gm)
+
+        menu.addSeparator()
+        A("Preferences…", "Ctrl+,", self.preferences, ["preferences-system"], menu=menu)
+        A("Clear Folder Preview Cache", None, self.clear_cache, menu=menu)
+        A("Delete All Thumbnails…", None, self.purge_thumbnails, ["edit-clear-all", "edit-delete"], menu=menu)
+        A("Keyboard Shortcuts", "F1", self.show_shortcuts, menu=menu)
+        A("About", None, lambda: QMessageBox.about(
+            self, util.APP_NAME, f"<b>{util.APP_NAME}</b> {__version__}<br>"
+                                 "A lightweight image-gallery-oriented file manager."), menu=menu)
+
+    # -- tabs
+    def pane(self):
+        return self.tabs.currentWidget()
+
+    def panes(self):
+        return [self.tabs.widget(i) for i in range(self.tabs.count())]
+
+    def new_tab(self, path, activate=True):
+        pane = Pane(self, path)
+        if pane.path is None:
+            pane.deleteLater()
+            return None
+        i = self.tabs.addTab(pane, pane.title())
+        pane.path_changed.connect(lambda p=pane: self._pane_path_changed(p))
+        pane.selection_changed.connect(lambda p=pane: p is self.pane() and self.update_status())
+        if activate:
+            self.tabs.setCurrentIndex(i)
+            pane.view().setFocus()
+        return pane
+
+    def close_tab(self, i):
+        if self.tabs.count() <= 1:
+            self.close()
+            return
+        w = self.tabs.widget(i)
+        w._stop_search()
+        self.tabs.removeTab(i)
+        w.deleteLater()
+
+    def _tab_changed(self, i):
+        if self.pane():
+            self._pane_path_changed(self.pane())
+            self.pane().view().setFocus()
+
+    def _pane_path_changed(self, pane):
+        i = self.tabs.indexOf(pane)
+        if i >= 0:
+            self.tabs.setTabText(i, pane.title())
+            self.tabs.setTabToolTip(i, pane.path)
+        if pane is not self.pane():
+            return
+        self.pathbar.set_path(pane.path)
+        self.sidebar.select_path(pane.path)
+        self.setWindowTitle(f"{pane.title()} — {util.APP_NAME}")
+        self.a_back.setEnabled(bool(pane.back_stack))
+        self.a_fwd.setEnabled(bool(pane.fwd_stack))
+        self.a_up.setEnabled(not pane.is_overview() and pane.path != "/")
+        self._sync_view_btn()
+        self.sync_zoom_slider()
+        vol = QStorageInfo(pane.dir) if pane.dir else None
+        self.free_label.setText(f"{util.human_size(vol.bytesAvailable())} free" if vol and vol.isValid() else "")
+        self.update_status()
+
+    def navigate(self, path):
+        self.open_location(path)
+
+    # -- locations: folders, the overview page, network URIs
+    def homepage(self):
+        hp = self.settings.value("homepage", "overview")
+        if hp == "overview":
+            return OVERVIEW
+        if hp == "home":
+            return util.HOME
+        return hp
+
+    def go_home(self):
+        self.navigate(self.homepage())
+
+    def cur_dir(self):
+        """Current folder of the active tab, or None on the overview page."""
+        return self.pane().dir if self.pane() else None
+
+    def open_location(self, target, new_tab=False):
+        """Open a folder path, OVERVIEW, or a network URI (mounted via gvfs first)."""
+        if not target:
+            return
+        if target.startswith("file://"):
+            target = util.uri_to_path(target)
+        if is_uri(target):
+            self.statusBar().showMessage(f"Connecting to {target}…")
+
+            def done(path, err):
+                self.statusBar().clearMessage()
+                if err:
+                    QMessageBox.warning(self, "Connect to Server", f"Could not open {target}:\n\n{err}")
+                elif path:
+                    self._remember_server(target)
+                    self.sidebar.refresh()
+                    self.open_location(path, new_tab=new_tab)
+            mount_uri(self, target, done)
+            return
+        if new_tab or not self.pane():
+            self.new_tab(target)
+        else:
+            self.pane().set_path(target)
+            if not self.pane().is_overview():
+                self.pane().view().setFocus()
+
+    def _remember_server(self, uri):
+        recents = [u for u in (self.settings.value("recent_servers", [], type=list) or []) if u != uri]
+        self.settings.setValue("recent_servers", [uri] + recents[:9])
+
+    # -- view
+    def set_view(self, mode):
+        self.settings.setValue("view_mode", mode)
+        self.pane().set_view_mode(mode)
+        self._sync_view_btn()
+        self.sync_zoom_slider()
+
+    def toggle_view(self):
+        self.set_view("list" if self.pane().is_grid() else "grid")
+
+    def _sync_view_btn(self):
+        grid = self.pane().is_grid()
+        self.view_btn.setIcon(icon("view-list-symbolic", "view-list-details") if grid else
+                              icon("view-grid-symbolic", "view-grid", "view-list-icons"))
+        self.view_btn.setToolTip("Switch to list view (Ctrl+2)" if grid else "Switch to grid view (Ctrl+1)")
+
+    def sync_zoom_slider(self):
+        p = self.pane()
+        if not p:
+            return
+        self.zoom_slider.blockSignals(True)
+        if p.is_grid():
+            self.zoom_slider.setRange(GRID_MIN, GRID_MAX)
+        else:
+            self.zoom_slider.setRange(LIST_MIN, LIST_MAX)
+        self.zoom_slider.setValue(p.zoom_value())
+        self.zoom_slider.blockSignals(False)
+
+    def set_folder_previews(self, on):
+        """Global switch for folder mosaics; off means no directory scanning at all."""
+        for w in set(WINDOWS) | {self}:
+            w.folder_previews = on
+            w.info.folder_previews = on
+            if w.info.path:
+                w.info.show_path(w.info.path)
+            w.preview_box.blockSignals(True)
+            w.preview_box.setChecked(on)
+            w.preview_box.blockSignals(False)
+            for p in w.panes():
+                p._apply_folder_previews()
+                p.view().viewport().update()
+        self.settings.setValue("folder_previews", on)
+        if not on:
+            self.thumbs.cancel_pending()
+
+    # -- recursive preview build
+    def build_previews(self, root):
+        if self.builder is not None:
+            QMessageBox.information(self, "Generate Previews",
+                                    "A preview build is already running. Stop it first (✕ in the status bar).")
+            return
+        size = self.pane().grid_size if self.pane() else 160
+        b = thumbs.RecursiveBuilder(root, size, self.thumbs, self)
+        b.progress.connect(self._build_progress)
+        b.finished_build.connect(self._build_finished)
+        b.finished.connect(b.deleteLater)
+        self.builder = b
+        self.build_root = root
+        self.build_label.setText(f"Previews: {os.path.basename(root.rstrip('/')) or root}")
+        self.build_label.setToolTip(root)
+        self.build_bar.setRange(0, 0)  # busy while scanning
+        self.build_bar.setFormat("Scanning…")
+        self.build_box.show()
+        b.start()
+
+    def _build_progress(self, done, total, scanning, current):
+        if total == 0:
+            self.build_bar.setRange(0, 0)
+        else:
+            self.build_bar.setRange(0, total)
+            self.build_bar.setValue(done)
+            # total keeps growing while the folder tree is still being walked
+            self.build_bar.setFormat(f"{done:,} / {total:,}+ scanning…" if scanning else "%v / %m  (%p%)")
+        self.build_bar.setToolTip(current)
+
+    def stop_build(self):
+        if self.builder:
+            self.builder.cancel()
+            self.build_label.setText("Stopping…")
+            self.build_stop.setEnabled(False)
+
+    def _build_finished(self, done, total, cancelled):
+        self.builder = None
+        self.build_box.hide()
+        self.build_stop.setEnabled(True)
+        self.thumbs.failed.clear()  # items that failed earlier may exist on disk now
+        for w in WINDOWS:
+            for p in w.panes():
+                p.view().viewport().update()
+        what = "Stopped" if cancelled else "Finished"
+        self.statusBar().showMessage(f"{what} building previews: {done:,} of {total:,} items", 8000)
+
+    def _thumb_progress(self, done, total):
+        # small batches (a few visible items) finish too fast to be worth showing
+        if total < 4 or done >= total:
+            self.thumb_progress.hide()
+            return
+        self.thumb_progress.setMaximum(total)
+        self.thumb_progress.setValue(done)
+        self.thumb_progress.show()
+
+    def toggle_hidden(self, on):
+        self.show_hidden = on
+        self.settings.setValue("show_hidden", on)
+        for p in self.panes():
+            p.apply_hidden()
+
+    def _toggle_panel(self, w, key, on):
+        w.setVisible(on)
+        self.settings.setValue(key, on)
+        if on and w is self.info:
+            self.update_status()
+
+    def update_status(self):
+        p = self.pane()
+        if not p:
+            return
+        if p.is_overview():
+            self.status_label.setText("Drives, network locations and bookmarks")
+            if self.info.isVisible():
+                self.info.show_path(None)
+            return
+        sel = p.selected_paths()
+        total = len(p.all_paths())
+        if sel:
+            size = 0
+            dirs = 0
+            for s in sel:
+                try:
+                    if os.path.isdir(s):
+                        dirs += 1
+                    else:
+                        size += os.lstat(s).st_size
+                except OSError:
+                    pass
+            files = len(sel) - dirs
+            parts = []
+            if dirs:
+                parts.append(f"{dirs} folder{'s' if dirs != 1 else ''}")
+            if files:
+                parts.append(f"{files} file{'s' if files != 1 else ''} ({util.human_size(size)})")
+            text = f"{' and '.join(parts)} selected of {total}"
+        else:
+            text = f"{total} item{'s' if total != 1 else ''}"
+        if p.in_search and p.search_thread and p.search_thread.isRunning():
+            text += "  — searching…"
+        self.status_label.setText(text)
+        if self.info.isVisible():
+            self.info.show_path(sel[0] if len(sel) == 1 else (p.path if not sel else None))
+
+    # -- opening
+    def open_paths(self, pane, paths, new_tab=False):
+        paths = [p for p in paths if p]
+        if not paths:
+            return
+        dirs = [p for p in paths if os.path.isdir(p)]
+        files = [p for p in paths if not os.path.isdir(p)]
+        if dirs:
+            if len(dirs) == 1 and not new_tab and not files:
+                pane.set_path(dirs[0])
+            else:
+                for d in dirs:
+                    self.new_tab(d, activate=False)
+        images = [f for f in files if util.is_image(f)]
+        videos = [f for f in files if util.is_video(f)]
+        others = [f for f in files if f not in images and f not in videos]
+        img_choice = self.settings.value("image_opener", "system")
+        if images and img_choice == "builtin":
+            if len(images) == 1:
+                all_imgs = [p for p in pane.all_paths() if util.is_image(p)]
+                idx = all_imgs.index(images[0]) if images[0] in all_imgs else 0
+                self.open_viewer(pane, all_imgs or images, idx)
+            else:
+                self.open_viewer(pane, images, 0)
+        elif images:
+            others += self._open_with_choice(images, img_choice)
+        if videos:
+            others += self._open_with_choice(videos, self.settings.value("video_opener", "system"))
+        for f in others:
+            if not self.open_file(f):
+                QMessageBox.warning(self, "Open", f"Could not open {f}")
+
+    def _open_with_choice(self, files, choice):
+        """Launch `files` with the app chosen in Preferences; returns files left for the system default."""
+        app = util.app_by_id(choice) if choice != "system" else None
+        if app is None:
+            return files
+        try:
+            util.launch_app(app, files)
+            return []
+        except Exception as e:
+            QMessageBox.warning(self, "Open", f"Could not open with {app.get_name()}: {e}")
+            return files
+
+    def open_file(self, path):
+        if path.endswith(".desktop") and shutil.which("gio"):
+            import subprocess
+            try:
+                text = open(path, errors="ignore").read()
+            except OSError:
+                text = ""
+            if "Type=Link" in text:
+                for line in text.splitlines():
+                    if line.startswith("URL="):
+                        target = util.uri_to_path(line[4:].strip()) or line[4:].strip()
+                        if os.path.isdir(target):
+                            self.navigate(target)
+                            return True
+                        return util.open_default(target)
+            subprocess.Popen(["gio", "launch", path], start_new_session=True)
+            return True
+        return util.open_default(path)
+
+    def quick_view(self, pane, paths):
+        imgs = [p for p in paths if util.is_image(p)]
+        if imgs:
+            if len(paths) == 1:
+                all_imgs = [p for p in pane.all_paths() if util.is_image(p)]
+                self.open_viewer(pane, all_imgs, all_imgs.index(imgs[0]) if imgs[0] in all_imgs else 0)
+            else:
+                self.open_viewer(pane, imgs, 0)
+        elif paths:
+            self.properties(paths)
+
+    def open_viewer(self, pane, images, idx):
+        def on_delete(path):
+            try:
+                util.trash(path)
+                self.sidebar.refresh()
+                return True
+            except OSError as e:
+                QMessageBox.warning(self, "Move to Trash", str(e))
+                return False
+
+        def on_close(path):
+            if pane in self.panes() and os.path.dirname(path) == pane.path:
+                pane.select_paths([path])
+            self.viewers = [v for v in self.viewers if v.isVisible()]
+
+        v = ImageViewer(images, idx, self.settings, on_delete=on_delete,
+                        on_properties=lambda p: self.properties([p], parent=v),
+                        on_close=on_close, on_open_with=lambda p: dialogs.OpenWithDialog(v, [p]).exec())
+        self.viewers.append(v)
+        if self.settings.value("viewer_fullscreen", False, type=bool):
+            v.showFullScreen()
+        else:
+            v.show()
+        v.activateWindow()
+
+    # -- context menu
+    def context_menu(self, pane, view, pos):
+        idx = view.indexAt(pos)
+        if idx.isValid():
+            p = idx.siblingAtColumn(0).data(PathRole)
+            if p not in pane.selected_paths():
+                pane.select_paths([p])
+            paths = pane.selected_paths()
+        else:
+            view.clearSelection()
+            paths = []
+        m = self.build_menu(pane, paths)
+        m.exec(view.viewport().mapToGlobal(pos))
+
+    def build_menu(self, pane, paths):
+        m = QMenu(self)
+        cur = pane.path
+        if not paths:
+            m.addAction(icon("folder-new"), "New Folder…", self.new_folder)
+            nd = m.addMenu(icon("document-new"), "New Document")
+            nd.addAction("Empty File…", lambda: self.new_file())
+            tdir = util.xdg_user_dir("TEMPLATES")
+            if os.path.isdir(tdir):
+                for t in sorted(os.listdir(tdir), key=util.natural_key):
+                    nd.addAction(util.icon_for_path(os.path.join(tdir, t)), util.split_ext(t)[0],
+                                 lambda t=t: self.new_file(os.path.join(tdir, t)))
+            m.addSeparator()
+            pa = m.addAction(icon("edit-paste"), "Paste", lambda: self.paste())
+            pa.setEnabled(bool(self.read_clipboard()[1]) or QGuiApplication.clipboard().mimeData().hasImage())
+            pl = m.addAction("Paste as Link", lambda: self.paste(as_link=True))
+            pl.setEnabled(bool(self.read_clipboard()[1]))
+            m.addAction("Select All", lambda: pane.view().selectAll())
+            m.addSeparator()
+            sm = m.addMenu("Sort By")
+            for i, name in enumerate(SORT_COLUMNS):
+                sm.addAction(name, lambda i=i: pane.sort_by(i))
+            sm.addSeparator()
+            sm.addAction("Ascending", lambda: pane.sort_by(pane.tree.header().sortIndicatorSection(), Qt.SortOrder.AscendingOrder))
+            sm.addAction("Descending", lambda: pane.sort_by(pane.tree.header().sortIndicatorSection(), Qt.SortOrder.DescendingOrder))
+            a = m.addAction("Show Hidden Files", lambda: self.a_hidden.trigger())
+            a.setCheckable(True)
+            a.setChecked(self.show_hidden)
+            m.addSeparator()
+            m.addAction(icon("utilities-terminal"), "Open in Terminal", lambda: util.open_terminal(cur))
+            m.addAction(icon("bookmark-new"), "Bookmark This Folder", lambda: self.sidebar.add_bookmark(cur))
+            m.addAction(icon("view-refresh"), "Generate Previews Recursively", lambda: self.build_previews(cur))
+            if util.in_trash(os.path.join(cur, "x")):
+                m.addAction(icon("user-trash"), "Empty Trash", self.empty_trash)
+            m.addSeparator()
+            m.addAction(icon("document-properties"), "Properties", lambda: self.properties([cur]))
+            return m
+
+        single = paths[0] if len(paths) == 1 else None
+        is_dir = bool(single and os.path.isdir(single))
+        in_trash = util.in_trash(paths[0])
+        if in_trash:
+            m.addAction(icon("edit-undo"), "Restore", lambda: self.restore(paths))
+            m.addAction(icon("edit-delete"), "Delete Permanently", lambda: self.delete_paths(paths))
+            m.addSeparator()
+            m.addAction(icon("document-properties"), "Properties", lambda: self.properties(paths))
+            return m
+
+        m.addAction(icon("document-open"), "Open", lambda: self.open_paths(pane, paths))
+        if is_dir or all(os.path.isdir(p) for p in paths):
+            m.addAction(icon("tab-new"), "Open in New Tab", lambda: [self.new_tab(p, activate=False) for p in paths])
+            m.addAction("Open in New Window", lambda: open_window(paths))
+        if any(util.is_image(p) for p in paths):
+            imgs = [p for p in paths if util.is_image(p)]
+            m.addAction(icon("image-x-generic"), "View Images" if len(imgs) > 1 else "View Image",
+                        lambda: self.quick_view(pane, imgs))
+        if pane.in_search:
+            m.addAction(icon("folder-open"), "Show in Folder", lambda: self.reveal(paths[0]))
+        if not is_dir and single:
+            ow = m.addMenu("Open With")
+            rec, _ = util.apps_for(single)
+            for app in rec[:8]:
+                ow.addAction(util.gicon_to_qicon(app.get_icon()), app.get_name(),
+                             lambda app=app: util.launch_app(app, paths))
+            ow.addSeparator()
+            ow.addAction("Other Application…", lambda: dialogs.OpenWithDialog(self, paths).exec())
+        m.addSeparator()
+        m.addAction(icon("edit-cut"), "Cut", lambda: self.clip(True, paths))
+        m.addAction(icon("edit-copy"), "Copy", lambda: self.clip(False, paths))
+        if is_dir:
+            pa = m.addAction(icon("edit-paste"), "Paste Into Folder", lambda: self.paste(target=single))
+            pa.setEnabled(bool(self.read_clipboard()[1]))
+        m.addAction("Move To…", lambda: self.transfer_to(paths, "move"))
+        m.addAction("Copy To…", lambda: self.transfer_to(paths, "copy"))
+        m.addAction("Duplicate", lambda: self.duplicate(paths))
+        m.addAction(icon("edit-rename"), "Rename…" if single else f"Rename {len(paths)} Items…",
+                    lambda: self.rename(paths))
+        cp = m.addMenu(icon("edit-copy"), "Copy Path / Name")
+        cp.addAction("Copy Full Path", lambda: self.copy_text(paths))
+        cp.addAction("Copy Name", lambda: self.copy_text([os.path.basename(p) for p in paths]))
+        cp.addAction("Copy URI", lambda: self.copy_text([util.file_uri(p) for p in paths]))
+
+        lm = m.addMenu(icon("emblem-symbolic-link", "insert-link"), "Links && Shortcuts")
+        lm.addAction("Create Symbolic Link Here", lambda: self.make_links(paths, cur, "sym"))
+        lm.addAction("Create Relative Symbolic Link Here", lambda: self.make_links(paths, cur, "rel"))
+        if all(os.path.isfile(p) and not os.path.islink(p) for p in paths):
+            lm.addAction("Create Hard Link Here", lambda: self.make_links(paths, cur, "hard"))
+        lm.addAction("Create Symbolic Link In…", lambda: self.make_links(paths, None, "sym"))
+        lm.addSeparator()
+        desktop = util.xdg_user_dir("DESKTOP")
+        lm.addAction("Send Link to Desktop", lambda: self.make_links(paths, desktop, "sym"))
+        lm.addAction("Create Desktop Shortcut (.desktop) Here", lambda: self.make_links(paths, cur, "desktop"))
+        lm.addAction("Send Shortcut (.desktop) to Desktop", lambda: self.make_links(paths, desktop, "desktop"))
+        if any(os.path.islink(p) for p in paths):
+            lm.addSeparator()
+            lm.addAction("Open Link Target Location", lambda: self.reveal(os.path.realpath(paths[0])))
+        if is_dir:
+            lm.addSeparator()
+            lm.addAction(icon("bookmark-new"), "Add to Bookmarks", lambda: self.sidebar.add_bookmark(single))
+
+        m.addSeparator()
+        if single and util.is_archive(single):
+            m.addAction(icon("archive-extract", "package-x-generic"), "Extract Here", lambda: self.extract(single))
+        m.addAction(icon("package-x-generic", "archive-insert"), "Compress…", lambda: self.compress(paths))
+        if single and util.is_image(single):
+            im = m.addMenu(icon("image-x-generic"), "Image")
+            im.addAction("Set as Wallpaper", lambda: util.set_wallpaper(single))
+            im.addAction("Use as Folder Cover", lambda: self.thumbs.set_cover(os.path.dirname(single), single))
+            im.addAction("Copy Image to Clipboard", lambda: QGuiApplication.clipboard().setImage(
+                __import__("PyQt6.QtGui", fromlist=["QImage"]).QImage(single)))
+        if is_dir and single in self.thumbs.covers:
+            m.addAction("Reset Folder Cover", lambda: self.thumbs.set_cover(single, None))
+        if is_dir:
+            m.addAction("Regenerate Preview", lambda: self.thumbs.invalidate(single))
+            m.addAction(icon("view-refresh"), "Generate Previews Recursively",
+                        lambda: self.build_previews(single))
+            m.addAction(icon("utilities-terminal"), "Open in Terminal", lambda: util.open_terminal(single))
+        m.addSeparator()
+        m.addAction(icon("user-trash"), "Move to Trash", lambda: self.trash_paths(paths))
+        m.addAction(icon("edit-delete"), "Delete Permanently…", lambda: self.delete_paths(paths))
+        m.addSeparator()
+        m.addAction(icon("document-properties"), "Properties", lambda: self.properties(paths))
+        return m
+
+    # -- file actions
+    def reveal(self, path):
+        pane = self.new_tab(os.path.dirname(path))
+        if pane:
+            pane.select_later(path)
+
+    def copy_text(self, items):
+        QGuiApplication.clipboard().setText("\n".join(items))
+
+    def clip(self, cut, paths=None):
+        paths = paths if paths is not None else self.pane().selected_paths()
+        if not paths:
+            return
+        md = QMimeData()
+        md.setUrls(util.url_list(paths))
+        md.setData("x-special/gnome-copied-files",
+                   (("cut" if cut else "copy") + "\n" + "\n".join(util.file_uri(p) for p in paths)).encode())
+        md.setData("application/x-kde-cutselection", b"1" if cut else b"0")
+        md.setText("\n".join(paths))
+        QGuiApplication.clipboard().setMimeData(md)
+        self.cut_paths = set(paths) if cut else set()
+        for p in self.panes():
+            p.view().viewport().update()
+        self.statusBar().showMessage(f"{len(paths)} item(s) {'cut' if cut else 'copied'}", 3000)
+
+    def read_clipboard(self):
+        md = QGuiApplication.clipboard().mimeData()
+        if md is None:
+            return "copy", []
+        if md.hasFormat("x-special/gnome-copied-files"):
+            lines = bytes(md.data("x-special/gnome-copied-files")).decode(errors="ignore").splitlines()
+            if lines:
+                op = lines[0].strip()
+                paths = [util.uri_to_path(u) for u in lines[1:] if u.strip()]
+                return ("cut" if op == "cut" else "copy"), [p for p in paths if p]
+        if md.hasUrls():
+            cut = bytes(md.data("application/x-kde-cutselection")) == b"1"
+            return ("cut" if cut else "copy"), [u.toLocalFile() for u in md.urls() if u.isLocalFile()]
+        if md.hasText():
+            paths = [l.strip() for l in md.text().splitlines() if l.strip().startswith("/")]
+            if paths and all(os.path.exists(p) for p in paths):
+                return "copy", paths
+        return "copy", []
+
+    def paste(self, target=None, as_link=False):
+        target = target or self.cur_dir()
+        if not target:
+            return
+        op, paths = self.read_clipboard()
+        if not paths:
+            md = QGuiApplication.clipboard().mimeData()
+            if md is not None and md.hasImage():
+                dst = util.unique_path(target, "Pasted image.png", "num")
+                QGuiApplication.clipboard().image().save(dst, "PNG")
+                self.pane().select_later(dst)
+            return
+        if as_link:
+            self.make_links(paths, target, "sym")
+            return
+        if op == "cut":
+            def done():
+                self.cut_paths = set()
+                QGuiApplication.clipboard().clear()
+            fileops.transfer(self, paths, target, "move", done)
+        else:
+            fileops.transfer(self, paths, target, "copy")
+
+    def handle_drop(self, paths, target):
+        if not paths:
+            return
+        mods = QGuiApplication.keyboardModifiers()
+        ctrl = bool(mods & Qt.KeyboardModifier.ControlModifier)
+        shift = bool(mods & Qt.KeyboardModifier.ShiftModifier)
+        alt = bool(mods & Qt.KeyboardModifier.AltModifier)
+        if alt:
+            m = QMenu(self)
+            m.addAction("Move Here", lambda: fileops.transfer(self, paths, target, "move"))
+            m.addAction("Copy Here", lambda: fileops.transfer(self, paths, target, "copy"))
+            m.addAction("Link Here", lambda: self.make_links(paths, target, "sym"))
+            m.exec(self.cursor().pos())
+            return
+        if ctrl and shift:
+            self.make_links(paths, target, "sym")
+            return
+        if ctrl:
+            op = "copy"
+        elif shift:
+            op = "move"
+        else:
+            try:
+                same = os.lstat(paths[0]).st_dev == os.stat(target).st_dev
+            except OSError:
+                same = False
+            op = "move" if same else "copy"
+        fileops.transfer(self, paths, target, op)
+
+    def transfer_to(self, paths, op):
+        d = dialogs.choose_dir(self, "Move To" if op == "move" else "Copy To", self.cur_dir() or util.HOME)
+        if d:
+            fileops.transfer(self, paths, d, op)
+
+    def duplicate(self, paths):
+        if paths:
+            fileops.start_ops(self, [("copy", p, util.unique_path(os.path.dirname(p), os.path.basename(p)))
+                                     for p in paths], "Duplicating")
+
+    def new_folder(self):
+        cur = self.cur_dir()
+        if not cur:
+            return
+        default = os.path.basename(util.unique_path(cur, "New Folder", "num"))
+        name, ok = QInputDialog.getText(self, "New Folder", "Folder name:", text=default)
+        if ok and name.strip():
+            p = os.path.join(cur, name.strip())
+            try:
+                os.makedirs(p)
+                self.pane().select_later(p)
+            except OSError as e:
+                QMessageBox.warning(self, "New Folder", str(e))
+
+    def new_file(self, template=None):
+        cur = self.cur_dir()
+        if not cur:
+            return
+        base = os.path.basename(template) if template else "Untitled.txt"
+        default = os.path.basename(util.unique_path(cur, base, "num"))
+        name, ok = QInputDialog.getText(self, "New File", "File name:", text=default)
+        if ok and name.strip():
+            p = os.path.join(cur, name.strip())
+            if os.path.lexists(p):
+                QMessageBox.warning(self, "New File", "A file with that name already exists.")
+                return
+            try:
+                if template:
+                    shutil.copyfile(template, p)
+                else:
+                    open(p, "x").close()
+                self.pane().select_later(p)
+            except OSError as e:
+                QMessageBox.warning(self, "New File", str(e))
+
+    def rename(self, paths):
+        if not paths:
+            return
+        if len(paths) > 1:
+            dialogs.BatchRenameDialog(self, paths).exec()
+            return
+        new = dialogs.ask_rename(self, paths[0])
+        if new:
+            err = dialogs.do_rename(paths[0], new)
+            if err:
+                QMessageBox.warning(self, "Rename", err)
+            else:
+                self.pane().select_later(os.path.join(os.path.dirname(paths[0]), new))
+                QTimer.singleShot(150, self.pane()._try_select)
+
+    def trash_paths(self, paths):
+        if not paths:
+            return
+        if util.in_trash(paths[0]):
+            self.delete_paths(paths)
+            return
+        failed = []
+        for p in paths:
+            try:
+                util.trash(p)
+            except OSError as e:
+                failed.append((p, str(e)))
+        self.sidebar.refresh()
+        if failed:
+            r = QMessageBox.question(
+                self, "Cannot move to trash",
+                f"{len(failed)} item(s) could not be moved to the trash:\n{failed[0][1]}\n\nDelete them permanently?")
+            if r == QMessageBox.StandardButton.Yes:
+                fileops.start_ops(self, [("delete", p, None) for p, _ in failed], "Deleting")
+        else:
+            self.statusBar().showMessage(f"Moved {len(paths)} item(s) to the trash", 4000)
+
+    def delete_paths(self, paths):
+        if not paths:
+            return
+        what = f"“{os.path.basename(paths[0])}”" if len(paths) == 1 else f"these {len(paths)} items"
+        r = QMessageBox.warning(self, "Delete Permanently",
+                                f"Permanently delete {what}?\n\nThis cannot be undone.",
+                                QMessageBox.StandardButton.Delete | QMessageBox.StandardButton.Cancel,
+                                QMessageBox.StandardButton.Cancel)
+        if r == QMessageBox.StandardButton.Delete:
+            def done():
+                for p in paths:
+                    if util.in_trash(p):
+                        try:
+                            (util.TRASH_DIR / "info" / (os.path.basename(p) + ".trashinfo")).unlink()
+                        except OSError:
+                            pass
+                self.sidebar.refresh()
+            fileops.start_ops(self, [("delete", p, None) for p in paths], "Deleting", done)
+
+    def restore(self, paths):
+        errors = []
+        for p in paths:
+            orig = util.trash_original_path(p)
+            if not orig:
+                errors.append(f"{os.path.basename(p)}: original location unknown")
+                continue
+            dest = orig if not os.path.lexists(orig) else util.unique_path(os.path.dirname(orig), os.path.basename(orig), "num")
+            try:
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                shutil.move(p, dest)
+                (util.TRASH_DIR / "info" / (os.path.basename(p) + ".trashinfo")).unlink(missing_ok=True)
+            except OSError as e:
+                errors.append(f"{os.path.basename(p)}: {e}")
+        self.sidebar.refresh()
+        if errors:
+            QMessageBox.warning(self, "Restore", "\n".join(errors))
+
+    def empty_trash(self):
+        r = QMessageBox.warning(self, "Empty Trash", "Permanently delete all items in the trash?",
+                                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        if r == QMessageBox.StandardButton.Yes:
+            fileops.run_task(self, "Emptying trash…", util.empty_trash, lambda _: self.sidebar.refresh())
+
+    def make_links(self, paths, dest, kind):
+        if dest is None:
+            dest = dialogs.choose_dir(self, "Create Links In", self.cur_dir() or util.HOME)
+            if not dest:
+                return
+        os.makedirs(dest, exist_ok=True)
+        made, errors = [], []
+        for p in paths:
+            try:
+                if kind == "hard":
+                    made.append(fileops.make_hardlink(p, dest))
+                elif kind == "desktop":
+                    made.append(fileops.make_desktop_shortcut(p, dest))
+                else:
+                    made.append(fileops.make_symlink(p, dest, relative=kind == "rel"))
+            except OSError as e:
+                errors.append(f"{os.path.basename(p)}: {e}")
+        if errors:
+            QMessageBox.warning(self, "Create Link", "\n".join(errors))
+        if made:
+            self.statusBar().showMessage(f"Created {len(made)} link(s) in {dest}", 4000)
+            if dest == self.cur_dir():
+                self.pane().select_later(made[0])
+
+    def compress(self, paths):
+        res = dialogs.ask_compress(self, paths)
+        if not res:
+            return
+        name, fmt = res
+        out = util.unique_path(os.path.dirname(paths[0]), f"{name}.{fmt}", "num")
+        fileops.run_task(self, f"Compressing to {os.path.basename(out)}…",
+                         lambda: fileops.compress(paths, out, fmt),
+                         lambda p: self.pane().select_later(p))
+
+    def extract(self, path):
+        fileops.run_task(self, f"Extracting {os.path.basename(path)}…",
+                         lambda: fileops.extract(path, os.path.dirname(path)),
+                         lambda p: self.pane().select_later(p))
+
+    def properties(self, paths, parent=None):
+        if paths:
+            dialogs.PropertiesDialog(parent or self, paths).exec()
+            self.update_status()
+
+    # -- settings
+    def preferences(self):
+        if dialogs.PreferencesDialog(self, self.settings).exec():
+            apply_thumb_settings(self.thumbs, self.settings)
+            self.thumbs.clear_memory()
+            for w in WINDOWS:
+                for p in w.panes():
+                    p._apply_folder_previews()
+                    p.view().viewport().update()
+
+    def clear_cache(self):
+        shutil.rmtree(util.APP_CACHE / "folders", ignore_errors=True)
+        self.thumbs.clear_memory()
+        for p in self.panes():
+            p.view().viewport().update()
+        self.statusBar().showMessage("Folder preview cache cleared", 3000)
+
+    def purge_thumbnails(self):
+        box = QMessageBox(QMessageBox.Icon.Warning, "Delete All Thumbnails",
+                          f"Delete every thumbnail and folder preview {util.APP_NAME} has made?\n\n"
+                          f"• Folder mosaics in {util.APP_CACHE / 'folders'}\n"
+                          f"• Image/video thumbnails it wrote to {util.THUMB_DIR}\n\n"
+                          "They will be regenerated as you browse.",
+                          QMessageBox.StandardButton.Cancel, self)
+        go = box.addButton("Delete", QMessageBox.ButtonRole.DestructiveRole)
+        shared = QCheckBox("Also delete thumbnails made by other apps (GNOME Files, etc.)")
+        box.setCheckBox(shared)
+        box.exec()
+        if box.clickedButton() is not go:
+            return
+        self.thumbs.cancel_pending()
+        include = shared.isChecked()
+
+        def done(res):
+            files, size = res
+            self.thumbs.clear_memory()
+            for w in WINDOWS:
+                for p in w.panes():
+                    p.view().viewport().update()
+            self.statusBar().showMessage(f"Deleted {files:,} thumbnails ({util.human_size(size)})", 6000)
+        fileops.run_task(self, "Deleting thumbnails…", lambda: thumbs.purge_thumbnails(include), done)
+
+    def show_shortcuts(self):
+        text = """
+<table cellpadding=3>
+<tr><td><b>Enter / double-click</b></td><td>Open</td></tr>
+<tr><td><b>Space</b></td><td>Quick view selection</td></tr>
+<tr><td><b>Backspace, Alt+Left / Alt+Right</b></td><td>Back / Forward</td></tr>
+<tr><td><b>Alt+Up</b></td><td>Parent folder</td></tr>
+<tr><td><b>Ctrl+L</b></td><td>Type a location</td></tr>
+<tr><td><b>Ctrl+F</b></td><td>Search (filter or recursive)</td></tr>
+<tr><td><b>Ctrl+T / Ctrl+W</b></td><td>New tab / close tab (middle-click folder: open in tab)</td></tr>
+<tr><td><b>Ctrl+1 / Ctrl+2</b></td><td>Grid / list view</td></tr>
+<tr><td><b>Ctrl+scroll, Ctrl+= / Ctrl+-</b></td><td>Zoom thumbnails</td></tr>
+<tr><td><b>Ctrl+H</b></td><td>Show hidden files</td></tr>
+<tr><td><b>F2</b></td><td>Rename (batch rename with multiple selected)</td></tr>
+<tr><td><b>Ctrl+X / C / V</b></td><td>Cut / copy / paste (works with GNOME Files)</td></tr>
+<tr><td><b>Ctrl+Shift+V</b></td><td>Paste as symbolic link</td></tr>
+<tr><td><b>Delete / Shift+Delete</b></td><td>Trash / delete permanently</td></tr>
+<tr><td><b>Alt+Enter</b></td><td>Properties</td></tr>
+<tr><td><b>F3 / F9</b></td><td>Info panel / sidebar</td></tr>
+<tr><td><b>Drag + Ctrl / Shift / Ctrl+Shift / Alt</b></td><td>Copy / move / link / ask</td></tr>
+<tr><td colspan=2><br><b>Image viewer</b></td></tr>
+<tr><td><b>←/→, scroll wheel</b></td><td>Previous / next</td></tr>
+<tr><td><b>Ctrl+scroll, +/-, 0, 1</b></td><td>Zoom, fit, 100%</td></tr>
+<tr><td><b>F / double-click</b></td><td>Fullscreen</td></tr>
+<tr><td><b>S</b></td><td>Slideshow</td></tr>
+<tr><td><b>R / L / H</b></td><td>Rotate right / left, flip</td></tr>
+<tr><td><b>I</b></td><td>Toggle info overlay</td></tr>
+<tr><td><b>Delete</b></td><td>Move to trash</td></tr>
+</table>"""
+        QMessageBox.information(self, "Keyboard Shortcuts", text)
+
+    def closeEvent(self, ev):
+        self.settings.setValue("geometry", self.saveGeometry())
+        self.settings.setValue("splitter", self.split.saveState())
+        for p in self.panes():
+            p._stop_search()
+        if self.builder:
+            self.builder.cancel()
+            self.builder.wait(5000)
+        for v in list(self.viewers):
+            v.close()
+        if self in WINDOWS:
+            WINDOWS.remove(self)
+        super().closeEvent(ev)
+
+
+# ---------------------------------------------------------------- entry
+
+_thumbs = None
+_settings = None
+
+
+def apply_thumb_settings(t, s):
+    t.folder_count = int(s.value("folder_count", 4))
+    t.folder_order = s.value("folder_order", "name")
+    t.folder_color = s.value("folder_color", "#d9652f")
+    t.max_file_mb = int(s.value("thumb_max_mb", 200))
+
+
+def open_window(paths):
+    w = MainWindow(paths, _thumbs, _settings)
+    WINDOWS.append(w)
+    w.show()
+    return w
+
+
+def main(argv=None):
+    global _thumbs, _settings
+    # LibRaw (RAW image plugin) uses OpenMP; by default each decode spawns one
+    # busy-waiting thread per core, which starves the UI. Must be set before the
+    # plugin is loaded.
+    os.environ.setdefault("OMP_NUM_THREADS", "2")
+    os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+    argv = sys.argv if argv is None else argv
+    if "--version" in argv[1:]:
+        print(f"{util.APP_NAME} {__version__}")
+        return 0
+    QApplication.setApplicationName(util.APP_ID)
+    QApplication.setApplicationVersion(__version__)
+    QApplication.setApplicationDisplayName(util.APP_NAME)
+    QApplication.setDesktopFileName(util.APP_ID)
+    app = QApplication(argv)
+    util.setup_icon_theme()
+    app.setWindowIcon(util.theme_icon("folder"))
+    util.migrate_legacy()
+    util.ensure_desktop_entry()
+    from PyQt6.QtGui import QImageReader
+    QImageReader.setAllocationLimit(2048)
+    _settings = QSettings(util.APP_ID, util.APP_ID)
+    _thumbs = thumbs.ThumbnailManager()
+    apply_thumb_settings(_thumbs, _settings)
+    paths = []
+    for a in argv[1:]:
+        if a.startswith("-"):
+            continue
+        if a.startswith("file://"):
+            a = util.uri_to_path(a)
+        paths.append(os.path.abspath(os.path.expanduser(a)))
+    open_window(paths)
+    return app.exec()

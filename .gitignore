@@ -1,0 +1,45 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Packaging / build output
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local environment / secrets
+.env
+.env.*
+
+# Editors and IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Claude Code per-user settings (shared .claude/settings.json is fine to commit)
+.claude/settings.local.json
+
+# OS clutter
+.DS_Store
+Thumbs.db
+.directory
+.Trash-*/
+
+# Logs and scratch files
+*.log
+*.tmp
+*.bak
