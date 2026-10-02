@@ -360,36 +360,99 @@ def mark_trusted(path):
             pass
 
 
-def trash_original_path(trashed_file):
-    """For a file in ~/.local/share/Trash/files return its original path (or None)."""
-    name = os.path.basename(trashed_file)
-    info = TRASH_DIR / "info" / (name + ".trashinfo")
+# Filesystems that never hold a trash folder, or that could hang when probed (network mounts)
+_NO_TRASH_FS = {"proc", "sysfs", "devtmpfs", "devpts", "tmpfs", "ramfs", "cgroup", "cgroup2", "securityfs",
+                "debugfs", "tracefs", "pstore", "bpf", "mqueue", "hugetlbfs", "configfs", "fusectl", "autofs",
+                "squashfs", "overlay", "nsfs", "binfmt_misc", "efivarfs", "rpc_pipefs", "fuse.portal",
+                "fuse.gvfsd-fuse", "fuse.snapfuse", "cifs", "smb3", "smbfs", "nfs", "nfs4", "fuse.sshfs", "sshfs",
+                "davfs", "fuse.davfs2", "fuse.rclone", "9p", "afs", "ceph", "glusterfs"}
+
+
+def trash_dirs():
+    """Every trash folder (containing files/ and info/) for this user: the home trash, plus the per-drive
+    $topdir/.Trash-$uid and $topdir/.Trash/$uid folders that files deleted on other drives go to."""
+    uid = os.getuid()
+    out = [str(TRASH_DIR)] if (TRASH_DIR / "files").is_dir() else []
     try:
-        for line in info.read_text().splitlines():
-            if line.startswith("Path="):
-                return unquote(line[5:])
+        with open("/proc/self/mounts") as f:
+            mounts = [line.split() for line in f]
+    except OSError:
+        mounts = []
+    seen = set(out)
+    for fields in mounts:
+        if len(fields) < 3 or fields[2] in _NO_TRASH_FS:
+            continue
+        top = fields[1].replace("\\040", " ").replace("\\011", "\t").replace("\\134", "\\")
+        for d in (os.path.join(top, f".Trash-{uid}"), os.path.join(top, ".Trash", str(uid))):
+            if d not in seen and os.path.isdir(os.path.join(d, "files")):
+                seen.add(d)
+                out.append(d)
+    return out
+
+
+def trash_root(path):
+    """The trash folder a trashed item belongs to (parent of its files/ folder), or None if not in a trash."""
+    files = os.path.dirname(path)
+    if os.path.basename(files) != "files":
+        return None
+    root = os.path.dirname(files)
+    name = os.path.basename(root)
+    if root == str(TRASH_DIR) or name.startswith(".Trash-") or \
+            (os.path.basename(os.path.dirname(root)) == ".Trash" and name == str(os.getuid())):
+        return root
+    return None
+
+
+def in_trash(path):
+    return trash_root(path) is not None
+
+
+def trash_info_path(trashed_file):
+    root = trash_root(trashed_file)
+    return os.path.join(root, "info", os.path.basename(trashed_file) + ".trashinfo") if root else None
+
+
+def trash_original_path(trashed_file):
+    """Where a trashed item was deleted from (or None). Per-drive trash stores paths relative to the drive."""
+    info = trash_info_path(trashed_file)
+    if not info:
+        return None
+    try:
+        with open(info) as f:
+            for line in f:
+                if line.startswith("Path="):
+                    orig = unquote(line[5:].strip())
+                    if os.path.isabs(orig):
+                        return orig
+                    root = trash_root(trashed_file)
+                    top = os.path.dirname(root) if os.path.basename(root).startswith(".Trash-") \
+                        else os.path.dirname(os.path.dirname(root))
+                    return os.path.join(top, orig)
     except OSError:
         pass
     return None
 
 
-def in_trash(path):
-    return os.path.dirname(path) == str(TRASH_DIR / "files")
-
-
-def empty_trash():
-    for sub in ("files", "info", "expunged"):
-        d = TRASH_DIR / sub
-        if not d.is_dir():
+def trashed_items():
+    """[(path inside a trash files/ folder, original path or None)] across every trash folder."""
+    out = []
+    for root in trash_dirs():
+        try:
+            entries = list(os.scandir(os.path.join(root, "files")))
+        except OSError:
             continue
-        for entry in os.scandir(d):
-            try:
-                if entry.is_dir(follow_symlinks=False):
-                    shutil.rmtree(entry.path)
-                else:
-                    os.unlink(entry.path)
-            except OSError:
-                pass
+        out += [(e.path, trash_original_path(e.path)) for e in entries]
+    return out
+
+
+def trash_is_empty():
+    for root in trash_dirs():
+        try:
+            if any(os.scandir(os.path.join(root, "files"))):
+                return False
+        except OSError:
+            pass
+    return True
 
 
 def read_bookmarks():

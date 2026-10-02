@@ -9,6 +9,7 @@ A lightweight file manager for Ubuntu, written in Python and PyQt6. It is built 
 ```bash
 ./install.sh             # adds the `kes` command to ~/.local/bin and the app to the app grid
 ./install.sh --default   # ...and makes it the default app for opening folders
+./install.sh --install-recommended   # ...and installs the recommended packages (RAW/HEIC previews etc.)
 ./install.sh --uninstall
 
 ./kes ~/Pictures                 # or run it in place without installing
@@ -16,7 +17,7 @@ A lightweight file manager for Ubuntu, written in Python and PyQt6. It is built 
 kes ~/Pictures                   # once installed
 ```
 
-It uses the system Python (`/usr/bin/python3`), not a virtualenv or conda Python. `install.sh` installs the required packages.
+It uses the system Python (`/usr/bin/python3`), not a virtualenv or conda Python. `install.sh` installs the required packages and lists any recommended ones that are missing; add `--install-recommended` to install those too. The options can be combined, for example `./install.sh --install-recommended --default`.
 
 ### Updating and reinstalling
 
@@ -56,7 +57,7 @@ Package names are for Ubuntu (tested on 26.04). Everything else Kestrel uses is 
 | `python3-pil` | Image sizes, EXIF summary, AI-prompt metadata, and a fallback image decoder |
 | `python3-gi` + `gir1.2-glib-2.0` | GIO: default and "Open With" apps, file type detection, drive and network mounting |
 
-**Recommended** (included in a standard Ubuntu desktop)
+**Recommended** (installed by `./install.sh --install-recommended`; all but `kimageformat6-plugins` come with a standard Ubuntu desktop)
 
 | Package | Used for |
 |---|---|
@@ -66,8 +67,9 @@ Package names are for Ubuntu (tested on 26.04). Everything else Kestrel uses is 
 | `udisks2` | Mounting, unlocking and ejecting drives from the Overview page |
 | `qt6-image-formats-plugins` | WebP, TIFF, TGA, ICNS and MNG images |
 | `qt6-svg-plugins` | SVG images |
+| `kimageformat6-plugins` | Camera RAW (`.raf`, `.cr2`, `.cr3`, `.nef`, `.arw`, `.dng`…), HEIC, AVIF, JPEG XL and PSD. Without it these files get no preview and don't open in the viewer |
 | `adwaita-icon-theme` | Fallback icons when your icon theme is missing one |
-| A terminal (`ptyxis`, `gnome-terminal`, `kgx`, `konsole` or `xfce4-terminal`) | "Open in Terminal" |
+| A terminal (`ptyxis`, `gnome-terminal`, `kgx`, `konsole` or `xfce4-terminal`) | "Open in Terminal" (not installed by `install.sh`; any one of these works) |
 
 **Optional** (features are hidden or fall back when missing)
 
@@ -75,7 +77,6 @@ Package names are for Ubuntu (tested on 26.04). Everything else Kestrel uses is 
 |---|---|
 | `libimage-exiftool-perl` | The full Metadata tab, plus editing, adding and clearing metadata |
 | `ffmpeg` | Video thumbnails and video stills in folder previews (`ffmpeg` and `ffprobe`) |
-| `kimageformat6-plugins` | AVIF, HEIC, JPEG XL, PSD, camera RAW and other formats (which formats are included depends on the distro's build) |
 | `7zip` (or `p7zip-full` on older releases) | Creating `.7z` archives and extracting `.7z`, `.rar` and other formats Python can't open |
 | `zfsutils-linux` | Showing a ZFS pool as one card with pool-level usage on the Overview page |
 | [UWP](https://github.com/RegulusArms/UWP) (not an apt package; install with its `install.sh`) | "Set as Wallpaper" through UWP profiles, and "Add to Selected UWP Monitor". Found as `uwp` on your PATH or in `~/.local/bin` |
@@ -120,8 +121,9 @@ sudo apt install python3-pyqt6 python3-pil python3-gi gir1.2-glib-2.0 libglib2.0
 - Drag and drop:
   - Ctrl copies, Shift moves, Ctrl+Shift creates a link, and Alt asks what to do.
   - With no key held, a drop moves files on the same drive and copies them to another drive.
-- Copies run in the background with progress and a cancel button. If a name already exists you can replace, merge, skip or keep both.
-- Trash, permanent delete, and restoring or emptying the trash.
+- File operations run on background threads, so the window stays responsive even with tens of thousands of files. Copy, move, duplicate, move to trash, permanent delete, restore, empty trash, compress and extract show their status and a progress bar in the status bar at the bottom of the window, with ✕ to cancel. When several run at once, the bar shows the oldest with "+N more" (hover to see them all). Closing a window while operations are running asks whether to stop them or keep going.
+- If a name already exists when copying or moving, you can replace, merge, skip or keep both.
+- Trash, permanent delete, and restoring or emptying the trash. The Trash shows everything you've deleted on every drive in one list: your home trash plus the trash folder each drive keeps for files deleted on it (`.Trash-<uid>`, the same as GNOME Files). The Location column shows where each item came from, and Restore, Delete Permanently and Empty Trash work across all of them.
 - Links and shortcuts:
   - Symbolic links (absolute or relative) and hard links.
   - Link to the Desktop.

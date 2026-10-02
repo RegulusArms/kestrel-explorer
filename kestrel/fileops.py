@@ -4,11 +4,12 @@ import shutil
 import stat
 import subprocess
 import tarfile
+import time
 import zipfile
 
 from PyQt6.QtCore import QThread, Qt, pyqtSignal
-from PyQt6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QLabel, QMessageBox, QProgressDialog,
-                             QVBoxLayout)
+from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QMessageBox,
+                             QProgressBar, QToolButton, QVBoxLayout, QWidget)
 
 from . import util
 
@@ -19,62 +20,217 @@ class Cancelled(Exception):
     pass
 
 
-class OpThread(QThread):
-    """Runs a list of (op, src, dst) where op in copy/move/merge_copy/merge_move/delete."""
-    progress = pyqtSignal(object, object, str)   # done bytes, total bytes, current name
-    failed = pyqtSignal(list)
+class Task(QThread):
+    """A background job shown in its window's status bar (TaskPanel).
 
-    def __init__(self, jobs, parent=None):
+    fn(task) runs on the thread. It may call task.report(done, total, text) for progress (total 0 = busy,
+    no percentage) and task.check() to stop early when the user cancels. Its return value goes to
+    on_done; a Cancelled exception counts as a normal finish with task.was_cancelled set."""
+    progress = pyqtSignal(float, str)   # fraction 0..1 or -1 for busy, status text
+    result = pyqtSignal(object)
+    error = pyqtSignal(str)
+
+    def __init__(self, title, fn, parent=None, cancellable=True):
         super().__init__(parent)
-        self.jobs = jobs
-        self.cancelled = False
-        self.errors = []
-        self.done_bytes = 0
-        self.total = 0
+        self.title, self.fn, self.cancellable = title, fn, cancellable
+        self.cancelled = self.was_cancelled = False
+        self.fraction, self.text = -1.0, ""
+        self._last = 0.0
 
     def cancel(self):
         self.cancelled = True
 
+    def check(self):
+        if self.cancelled:
+            raise Cancelled()
+
+    def report(self, done, total=0, text=""):
+        # at most ~12 updates a second, so thousands of tiny files can't flood the UI thread
+        now = time.monotonic()
+        if now - self._last < 0.08:
+            return
+        self._last = now
+        self.progress.emit(min(done / total, 1.0) if total else -1.0, text)
+
+    def run(self):
+        try:
+            res = self.fn(self)
+        except Cancelled:
+            self.was_cancelled, res = True, None
+        except Exception as e:
+            self.error.emit(str(e))
+            return
+        self.result.emit(res)
+
+
+class TaskPanel(QWidget):
+    """Status-bar widget: the running tasks' title, status and progress, with a cancel button."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(4)
+        self.label = QLabel()
+        self.bar = QProgressBar()
+        self.bar.setFixedWidth(200)
+        self.bar.setMaximumHeight(16)
+        self.bar.setRange(0, 1000)
+        self.stop = QToolButton()
+        self.stop.setText("✕")
+        self.stop.setAutoRaise(True)
+        self.stop.clicked.connect(self._cancel)
+        for w in (self.label, self.bar, self.stop):
+            lay.addWidget(w)
+        self.tasks = []
+        self.hide()
+
+    def add(self, task):
+        self.tasks.append(task)
+        task.progress.connect(lambda f, text, t=task: self._progress(t, f, text))
+        task.finished.connect(lambda t=task: self._finished(t))
+        self._refresh()
+
+    def _progress(self, task, fraction, text):
+        task.fraction, task.text = fraction, text
+        if self.tasks and task is self.tasks[0]:
+            self._refresh()
+
+    def _finished(self, task):
+        if task in self.tasks:
+            self.tasks.remove(task)
+        self._refresh()
+
+    def _cancel(self):
+        if self.tasks:
+            self.tasks[0].cancel()
+            self._refresh()
+
+    def _refresh(self):
+        if not self.tasks:
+            self.hide()
+            return
+        t = self.tasks[0]
+        text = t.title + (" — cancelling…" if t.cancelled else f": {t.text}" if t.text else "")
+        more = f"  (+{len(self.tasks) - 1} more)" if len(self.tasks) > 1 else ""
+        self.label.setText(self.label.fontMetrics().elidedText(text, Qt.TextElideMode.ElideMiddle, 380) + more)
+        self.setToolTip("\n".join(x.title + (f": {x.text}" if x.text else "") for x in self.tasks))
+        if t.fraction < 0:
+            self.bar.setRange(0, 0)
+        else:
+            self.bar.setRange(0, 1000)
+            self.bar.setValue(int(t.fraction * 1000))
+        self.stop.setVisible(t.cancellable)
+        self.stop.setEnabled(not t.cancelled)
+        self.stop.setToolTip(f"Cancel {t.title.lower()}")
+        self.show()
+
+
+def _panel_for(widget):
+    """The TaskPanel of the main window that `widget` belongs to (or the active/first main window's)."""
+    w = widget
+    while w is not None:
+        if getattr(w, "task_panel", None) is not None:
+            return w.task_panel
+        w = w.parentWidget()
+    active = QApplication.activeWindow()
+    if getattr(active, "task_panel", None) is not None:
+        return active.task_panel
+    return next((w.task_panel for w in QApplication.topLevelWidgets() if getattr(w, "task_panel", None)), None)
+
+
+_running = set()
+
+
+def run_job(parent, title, fn, on_done=None, cancellable=True, quiet=False):
+    """Run fn(task) on a thread, shown in the status bar unless quiet. on_done(result) runs on the UI thread
+    (also after a cancel, with result None). Errors are shown in a message box unless quiet."""
+    t = Task(title, fn, parent, cancellable)
+    _running.add(t)
+    if on_done:
+        t.result.connect(on_done)
+    if not quiet:
+        t.error.connect(lambda msg: QMessageBox.warning(parent, title, msg))
+        panel = _panel_for(parent)
+        if panel is not None:
+            panel.add(t)
+    t.finished.connect(lambda: (_running.discard(t), t.deleteLater()))
+    t.start()
+    return t
+
+
+def run_task(parent, title, fn, on_done=None, quiet=False):
+    """Run fn() (no arguments) on a thread, shown as a busy item in the status bar unless quiet."""
+    return run_job(parent, title, lambda _task: fn(), on_done, cancellable=False, quiet=quiet)
+
+
+class _Ops:
+    """Runs a list of (op, src, dst) where op in copy/move/merge_copy/merge_move/delete, for a Task.
+    Progress is in bytes, or in files when every job is a delete. Returns the list of error strings."""
+
+    def __init__(self, task, jobs):
+        self.task, self.jobs = task, jobs
+        self.errors = []
+        self.denied = []   # delete jobs blocked by files another user (e.g. root) owns: (path, owner)
+        self.done = self.total = 0
+        self.by_count = all(op == "delete" for op, _, _ in jobs)
+
+    def _report(self, name):
+        if self.by_count:
+            text = f"{self.done:,} of {self.total:,} — {name}"
+        else:
+            text = f"{util.human_size(self.done)} of {util.human_size(self.total)} — {name}"
+        self.task.report(self.done, self.total, text)
+
     def _size(self, path):
+        """Bytes under path, or file count when counting deletes."""
         try:
             st = os.lstat(path)
         except OSError:
             return 0
-        if stat.S_ISDIR(st.st_mode):
-            total = 0
-            for root, dirs, files in os.walk(path):
-                for f in files:
-                    try:
-                        total += os.lstat(os.path.join(root, f)).st_size
-                    except OSError:
-                        pass
-            return total
-        return st.st_size
+        if not stat.S_ISDIR(st.st_mode):
+            return 1 if self.by_count else st.st_size
+        total = 1 if self.by_count else 0
+        for root, dirs, files in os.walk(path):
+            self.task.check()
+            if self.by_count:
+                total += len(files) + len(dirs)
+                continue
+            for f in files:
+                try:
+                    total += os.lstat(os.path.join(root, f)).st_size
+                except OSError:
+                    pass
+        return total
 
     def run(self):
+        self.task.report(0, 0, "Counting…")
         for op, src, dst in self.jobs:
-            if op != "delete" and not (op == "move" and self._same_dev(src, dst)):
+            if op == "delete" and not self.by_count:
+                continue
+            if not (op == "move" and self._same_dev(src, dst)):
                 self.total += self._size(src)
         self.total = max(self.total, 1)
         for op, src, dst in self.jobs:
-            if self.cancelled:
-                break
+            self.task.check()
             try:
                 if op == "delete":
-                    self.progress.emit(self.done_bytes, self.total, os.path.basename(src))
-                    if os.path.isdir(src) and not os.path.islink(src):
-                        shutil.rmtree(src)
-                    else:
-                        os.unlink(src)
+                    self._remove(src)
                 elif op in ("move", "merge_move"):
                     self._move(src, dst, merge=op == "merge_move")
                 else:
                     self._copy(src, dst, merge=op == "merge_copy")
             except Cancelled:
-                break
+                raise
+            except PermissionError as e:
+                owner = _foreign_owner(src) if op == "delete" else None
+                if owner:
+                    self.denied.append((src, owner))
+                else:
+                    self.errors.append(f"{os.path.basename(src)}: {e.strerror or e}")
             except Exception as e:
                 self.errors.append(f"{os.path.basename(src)}: {e}")
-        self.failed.emit(self.errors)
+        return self.errors
 
     @staticmethod
     def _same_dev(src, dst):
@@ -88,17 +244,41 @@ class OpThread(QThread):
             if os.path.lexists(dst):
                 self._remove(dst)
             os.rename(src, dst)
+            self._report(os.path.basename(src))
             return
         self._copy(src, dst, merge=merge)
-        if not self.cancelled:
-            self._remove(src)
+        self._remove(src)
 
-    @staticmethod
-    def _remove(path):
+    def _remove(self, path):
+        """Delete a file or tree one entry at a time, so it can report progress and be cancelled.
+        Read-only folders you own (common in extracted Windows archives) are made writable and retried."""
+        try:
+            self._remove_tree(path)
+        except OSError:
+            if not (os.path.isdir(path) and not os.path.islink(path)) or not _make_writable(path):
+                raise
+            self._remove_tree(path)
+
+    def _remove_tree(self, path):
         if os.path.isdir(path) and not os.path.islink(path):
-            shutil.rmtree(path)
+            for root, dirs, files in os.walk(path, topdown=False):
+                for name in files + dirs:
+                    self.task.check()
+                    p = os.path.join(root, name)
+                    if name in dirs and not os.path.islink(p):
+                        os.rmdir(p)
+                    else:
+                        os.unlink(p)
+                    self._count(name)
+            os.rmdir(path)
         else:
             os.unlink(path)
+        self._count(os.path.basename(path))
+
+    def _count(self, name):
+        if self.by_count:
+            self.done += 1
+            self._report(name)
 
     def _copy(self, src, dst, merge=False):
         if os.path.islink(src):
@@ -117,98 +297,113 @@ class OpThread(QThread):
 
     def _copy_file(self, src, dst):
         name = os.path.basename(src)
-        tmp_dst = dst
-        with open(src, "rb") as fi, open(tmp_dst, "wb") as fo:
+        with open(src, "rb") as fi, open(dst, "wb") as fo:
             while True:
-                if self.cancelled:
+                if self.task.cancelled:
                     fo.close()
-                    os.unlink(tmp_dst)
+                    os.unlink(dst)
                     raise Cancelled()
                 buf = fi.read(CHUNK)
                 if not buf:
                     break
                 fo.write(buf)
-                self.done_bytes += len(buf)
-                self.progress.emit(self.done_bytes, self.total, name)
+                self.done += len(buf)
+                self._report(name)
         shutil.copystat(src, dst)
 
 
-class TaskThread(QThread):
-    """Run fn() in a thread; emits result or error."""
-    result = pyqtSignal(object)
-    error = pyqtSignal(str)
+def _make_writable(path):
+    """Give the owner rwx on every folder under path that this user owns (so its entries can be deleted).
+    Returns True if anything changed."""
+    uid, changed = os.getuid(), False
+    for root, dirs, _files in os.walk(path):
+        for d in [root] + [os.path.join(root, x) for x in dirs]:
+            try:
+                st = os.lstat(d)
+                if st.st_uid == uid and not stat.S_ISLNK(st.st_mode) and (st.st_mode & 0o700) != 0o700:
+                    os.chmod(d, st.st_mode | 0o700)
+                    changed = True
+            except OSError:
+                pass
+    return changed
 
-    def __init__(self, fn, parent=None):
-        super().__init__(parent)
-        self.fn = fn
 
-    def run(self):
+def _foreign_owner(path):
+    """Name of another user owning something in or above `path` that blocks deleting it, else None."""
+    uid = os.getuid()
+    candidates = [os.path.dirname(path), path]
+    if os.path.isdir(path) and not os.path.islink(path):
+        for root, dirs, files in os.walk(path):
+            candidates += [os.path.join(root, n) for n in dirs + files]
+            if len(candidates) > 100000:
+                break
+    for p in candidates:
         try:
-            self.result.emit(self.fn())
-        except Exception as e:
-            self.error.emit(str(e))
+            owner = os.lstat(p).st_uid
+        except OSError:
+            continue
+        if owner != uid:
+            try:
+                import pwd
+                return pwd.getpwuid(owner).pw_name
+            except KeyError:
+                return f"uid {owner}"
+    return None
 
 
-_running = set()
+def delete_as_admin(parent, paths, on_done=None):
+    """rm -rf the given paths through pkexec (the system asks for an administrator password)."""
+    def work(task):
+        task.report(0, 0, f"{len(paths):,} item(s) — waiting for authorization")
+        r = subprocess.run(["pkexec", "rm", "-rf", "--", *paths], capture_output=True, text=True)
+        if r.returncode in (126, 127):  # dialog dismissed / not authorized
+            return "Not authorized: nothing was deleted."
+        if r.returncode != 0:
+            return r.stderr.strip() or f"rm failed (exit code {r.returncode})"
+        return None
 
-
-def run_task(parent, title, fn, on_done=None, quiet=False):
-    """Run fn in background with an indeterminate progress dialog (none if quiet)."""
-    dlg = None
-    if not quiet:
-        dlg = QProgressDialog(title, None, 0, 0, parent)
-        dlg.setWindowTitle(util.APP_NAME)
-        dlg.setMinimumDuration(400)
-        dlg.setWindowModality(Qt.WindowModality.NonModal)
-    t = TaskThread(fn, parent)
-    _running.add(t)
-
-    def finish():
-        if dlg:
-            dlg.close()
-        _running.discard(t)
-        t.deleteLater()
-
-    def ok(res):
+    def done(err):
+        if err:
+            QMessageBox.warning(parent, "Delete as Administrator", err)
         if on_done:
-            on_done(res)
-
-    t.result.connect(ok)
-    if not quiet:
-        t.error.connect(lambda msg: QMessageBox.warning(parent, title, msg))
-    t.finished.connect(finish)
-    t.start()
-    return t
+            on_done()
+    return run_job(parent, "Deleting as administrator", work, done, cancellable=False)
 
 
 def start_ops(parent, jobs, title, on_done=None):
+    """Copy/move/delete jobs on a thread, with progress and Cancel in the status bar."""
     if not jobs:
         return
-    dlg = QProgressDialog(title, "Cancel", 0, 1000, parent)
-    dlg.setWindowTitle(title)
-    dlg.setMinimumDuration(500)
-    dlg.setAutoClose(False)
-    dlg.setAutoReset(False)
-    dlg.setValue(0)
-    t = OpThread(jobs, parent)
-    _running.add(t)
-    dlg.canceled.connect(t.cancel)
-
-    def prog(done, total, name):
-        dlg.setLabelText(f"{title}\n{name}\n{util.human_size(done)} of {util.human_size(total)}")
-        dlg.setValue(int(done * 1000 / max(total, 1)))
+    ops = []
 
     def finished(errors):
-        dlg.close()
+        denied = ops[0].denied if ops else []
         if errors:
             QMessageBox.warning(parent, title, "Some items could not be processed:\n\n" + "\n".join(errors[:20]))
+        if denied and shutil.which("pkexec"):
+            owners = sorted({o for _, o in denied})
+            names = "\n".join(f"• {os.path.basename(p)}" for p, _ in denied[:10])
+            more = f"\n…and {len(denied) - 10} more" if len(denied) > 10 else ""
+            box = QMessageBox(QMessageBox.Icon.Warning, title,
+                              f"{len(denied)} item(s) couldn't be deleted because they contain files owned by "
+                              f"{', '.join(owners)}:\n\n{names}{more}\n\n"
+                              "Delete them as administrator? You'll be asked for your password.",
+                              QMessageBox.StandardButton.Cancel, parent)
+            admin = box.addButton("Delete as Administrator", QMessageBox.ButtonRole.DestructiveRole)
+            box.exec()
+            if box.clickedButton() is admin:
+                delete_as_admin(parent, [p for p, _ in denied], on_done)
+                return
+        elif denied:
+            QMessageBox.warning(parent, title, "These items contain files owned by another user and couldn't be "
+                                "deleted:\n\n" + "\n".join(p for p, _ in denied[:20]))
         if on_done:
             on_done()
 
-    t.progress.connect(prog)
-    t.failed.connect(finished)
-    t.finished.connect(lambda: (_running.discard(t), t.deleteLater()))
-    t.start()
+    def work(task):
+        ops.append(_Ops(task, jobs))
+        return ops[0].run()
+    return run_job(parent, title, work, finished)
 
 
 class ConflictDialog(QDialog):
@@ -235,7 +430,7 @@ class ConflictDialog(QDialog):
 
 
 def plan_transfer(parent, sources, dest_dir, op):
-    """Resolve conflicts interactively; return job list for OpThread (or None if cancelled)."""
+    """Resolve conflicts interactively; return job list for start_ops (or None if cancelled)."""
     jobs, apply_all = [], None
     dest_real = os.path.realpath(dest_dir)
     for src in sources:

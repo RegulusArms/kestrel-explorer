@@ -277,8 +277,9 @@ class PropertiesDialog(QDialog):
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
 
-    def _run(self, fn, cb):
-        t = fileops.run_task(self, "Working…", fn, cb)
+    def _run(self, fn, cb, title=None):
+        """Background job; shown in the main window's status bar only when given a title."""
+        t = fileops.run_task(self, title or "", fn, cb, quiet=title is None)
         self.threads.append(t)
 
     def _general_tab(self):
@@ -522,7 +523,7 @@ class PropertiesDialog(QDialog):
             if warnings:
                 QMessageBox.information(self, "Metadata", "\n".join(warnings))
             self._reload_meta()
-        self._run(fn, done)
+        self._run(fn, done, "Writing metadata")
 
     def _reload_meta(self):
         self.meta_loaded = True
@@ -654,7 +655,7 @@ class PropertiesDialog(QDialog):
                         for chunk in iter(lambda: f.read(4 << 20), b""):
                             h.update(chunk)
                     return h.hexdigest()
-                self._run(fn, o.setText)
+                self._run(fn, o.setText, f"Computing {a.upper()}")
             btn.clicked.connect(compute)
         verify = QLineEdit()
         verify.setPlaceholderText("Paste a checksum to compare…")
