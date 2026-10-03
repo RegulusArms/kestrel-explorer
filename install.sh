@@ -16,7 +16,8 @@ LEGACY_DESKTOP="$HOME/.local/share/applications/folder-explorer.desktop"
 # Recommended apt packages (see "Dependencies" in README.md). Most come with a standard Ubuntu desktop;
 # kimageformat6-plugins (camera RAW, HEIC, AVIF, JPEG XL, PSD previews) usually doesn't.
 RECOMMENDED=(libglib2.0-bin xdg-utils gvfs gvfs-backends udisks2 qt6-image-formats-plugins qt6-svg-plugins
-             kimageformat6-plugins adwaita-icon-theme)
+             kimageformat6-plugins adwaita-icon-theme
+             7zip unrar zip unzip pigz zpaq zstd xz-utils bzip2 lzip)   # archives (unrar is in multiverse)
 
 DEFAULT=0 WITH_RECOMMENDED=0 UNINSTALL=0
 for arg in "$@"; do

@@ -3,9 +3,7 @@ import os
 import shutil
 import stat
 import subprocess
-import tarfile
 import time
-import zipfile
 
 from PyQt6.QtCore import QThread, Qt, pyqtSignal
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QMessageBox,
@@ -514,61 +512,6 @@ def make_desktop_shortcut(target, dest_dir):
 
 
 # ---------------------------------------------------------------- archives
-
-def compress(paths, out_path, fmt):
-    base = os.path.dirname(paths[0])
-    if fmt == "zip":
-        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as z:
-            for p in paths:
-                if os.path.isdir(p) and not os.path.islink(p):
-                    for root, dirs, files in os.walk(p):
-                        rel_root = os.path.relpath(root, base)
-                        z.write(root, rel_root)
-                        for f in files:
-                            full = os.path.join(root, f)
-                            z.write(full, os.path.relpath(full, base))
-                else:
-                    z.write(p, os.path.relpath(p, base))
-    elif fmt == "7z":
-        subprocess.run(["7z", "a", "-y", out_path] + [os.path.relpath(p, base) for p in paths],
-                       cwd=base, check=True, capture_output=True)
-    else:
-        mode = {"tar": "w", "tar.gz": "w:gz", "tar.xz": "w:xz", "tar.bz2": "w:bz2"}[fmt]
-        with tarfile.open(out_path, mode) as t:
-            for p in paths:
-                t.add(p, arcname=os.path.relpath(p, base))
-    return out_path
-
-
-def extract(archive, dest_parent):
-    stem = util.split_ext(os.path.basename(archive))[0]
-    if stem.endswith(".tar"):
-        stem = stem[:-4]
-    out = util.unique_path(dest_parent, stem, "num")
-    os.makedirs(out)
-    low = archive.lower()
-    if low.endswith(".zip"):
-        with zipfile.ZipFile(archive) as z:
-            z.extractall(out)
-    elif ".tar" in low or low.endswith((".tgz", ".tbz2", ".txz")):
-        with tarfile.open(archive) as t:
-            t.extractall(out, filter="data")
-    elif shutil.which("7z"):
-        subprocess.run(["7z", "x", "-y", f"-o{out}", archive], check=True, capture_output=True)
-    else:
-        os.rmdir(out)
-        raise RuntimeError("No tool available to extract this archive (install 7zip, or p7zip-full on older releases)")
-    # collapse single top-level folder
-    entries = os.listdir(out)
-    if len(entries) == 1 and os.path.isdir(os.path.join(out, entries[0])):
-        inner = os.path.join(out, entries[0])
-        final = util.unique_path(dest_parent, entries[0], "num") if entries[0] != os.path.basename(out) else None
-        if final:
-            os.rename(inner, final)
-            os.rmdir(out)
-            out = final
-    return out
-
 
 def dir_stats(path, cancel=lambda: False):
     """(total bytes, file count, dir count) recursively, not following symlinks."""

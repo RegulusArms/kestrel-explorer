@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QHBoxLa
                              QProgressBar, QSlider, QSplitter, QStackedWidget, QTabWidget, QToolBar, QToolButton, QTreeView,
                              QVBoxLayout, QWidget)
 
-from . import __version__, dialogs, fileops, thumbs, util, uwp
+from . import __version__, archive, archive_ui, dialogs, fileops, thumbs, util, uwp
 from .overview import OVERVIEW, OVERVIEW_TITLE, OverviewPage, is_uri, mount_uri
 from .viewer import ImageViewer
 from .widgets import (FSModel, GridDelegate, InfoPanel, PathBar, PathRole, SearchModel, SearchThread, Sidebar)
@@ -1343,9 +1343,22 @@ class MainWindow(QMainWindow):
             lm.addAction(icon("bookmark-new"), "Add to Bookmarks", lambda: self.sidebar.add_bookmark(single))
 
         m.addSeparator()
-        if single and util.is_archive(single):
-            m.addAction(icon("archive-extract", "package-x-generic"), "Extract Here", lambda: self.extract(single))
-        m.addAction(icon("package-x-generic", "archive-insert"), "Compress…", lambda: self.compress(paths))
+        if single and not is_dir and archive.can_extract(single):
+            missing = archive.missing_extract_tool(single)
+            if missing:
+                a = m.addAction(icon("archive-extract", "package-x-generic"), f"Extract (install {missing})")
+                a.setEnabled(False)
+            else:
+                m.addAction(icon("archive-extract", "package-x-generic"), "Extract Here",
+                            lambda: archive_ui.extract_here(self, single))
+                m.addAction(icon("archive-extract", "package-x-generic"), "Extract To…",
+                            lambda: archive_ui.extract_dialog(self, single))
+        quick = archive_ui.quick_compress_label(self.settings, paths)
+        if quick:
+            m.addAction(icon("package-x-generic", "archive-insert"), quick,
+                        lambda: archive_ui.quick_compress(self, paths))
+        m.addAction(icon("package-x-generic", "archive-insert"), "Compress…",
+                    lambda: archive_ui.compress_dialog(self, paths))
         if single and (util.is_image(single) or util.is_video(single)) and uwp.editor_open():
             m.addAction(icon("preferences-desktop-wallpaper", "video-display"), "Add to Selected UWP Monitor",
                         lambda: self._uwp_add(single))
@@ -1643,26 +1656,11 @@ class MainWindow(QMainWindow):
             if dest == self.cur_dir():
                 self.pane().select_later(made[0])
 
-    def compress(self, paths):
-        res = dialogs.ask_compress(self, paths)
-        if not res:
-            return
-        name, fmt = res
-        out = util.unique_path(os.path.dirname(paths[0]), f"{name}.{fmt}", "num")
-        fileops.run_task(self, f"Compressing to {os.path.basename(out)}",
-                         lambda: fileops.compress(paths, out, fmt),
-                         lambda p: self.pane().select_later(p))
-
     def _uwp_add(self, path):
         if uwp.add_to_selected(path):
             self.statusBar().showMessage(f"Sent {os.path.basename(path)} to the selected UWP monitor", 4000)
         else:
             QMessageBox.warning(self, "UWP", "Couldn't reach UWP. Is its editor window still open?")
-
-    def extract(self, path):
-        fileops.run_task(self, f"Extracting {os.path.basename(path)}",
-                         lambda: fileops.extract(path, os.path.dirname(path)),
-                         lambda p: self.pane().select_later(p))
 
     def properties(self, paths, parent=None):
         if paths:

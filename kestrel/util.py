@@ -36,7 +36,6 @@ VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".wmv", ".flv", "
 RAW_EXTS = {".3fr", ".arw", ".crw", ".cr2", ".cr3", ".dcr", ".dng", ".erf", ".fff", ".iiq", ".k25", ".kdc",
             ".mdc", ".mef", ".mos", ".mrw", ".nef", ".nrw", ".orf", ".pef", ".raf", ".raw", ".rw2", ".rwl",
             ".sr2", ".srf", ".srw", ".x3f"}
-ARCHIVE_EXTS = (".zip", ".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".7z", ".rar", ".tar.zst")
 
 _image_exts = None
 _mime_db = QMimeDatabase()
@@ -79,11 +78,6 @@ def image_reader(path):
 
 def is_video(path):
     return ext_of(path) in VIDEO_EXTS
-
-
-def is_archive(path):
-    p = path.lower()
-    return any(p.endswith(e) for e in ARCHIVE_EXTS)
 
 
 def file_uri(path):

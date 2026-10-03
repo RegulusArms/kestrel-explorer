@@ -942,30 +942,6 @@ class BatchRenameDialog(QDialog):
 
 # ---------------------------------------------------------------- compress
 
-def ask_compress(parent, paths):
-    dlg = QDialog(parent)
-    dlg.setWindowTitle("Compress")
-    form = QFormLayout(dlg)
-    default = os.path.basename(paths[0]) if len(paths) == 1 else "Archive"
-    if len(paths) == 1 and os.path.isfile(paths[0]):
-        default = util.split_ext(default)[0]
-    name = QLineEdit(default)
-    fmt = QComboBox()
-    fmts = ["zip", "tar.gz", "tar.xz", "tar"]
-    if __import__("shutil").which("7z"):
-        fmts.append("7z")
-    fmt.addItems(fmts)
-    form.addRow("Archive name:", name)
-    form.addRow("Format:", fmt)
-    bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-    bb.accepted.connect(dlg.accept)
-    bb.rejected.connect(dlg.reject)
-    form.addRow(bb)
-    if dlg.exec() and name.text().strip():
-        return name.text().strip(), fmt.currentText()
-    return None
-
-
 # ---------------------------------------------------------------- preferences
 
 class PreferencesDialog(QDialog):
