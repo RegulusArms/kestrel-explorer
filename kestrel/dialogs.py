@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QColorD
                              QTableWidgetItem, QTabWidget, QTreeView, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
                              QWidget)
 
-from . import fileops, metadata, thumbs, util
+from . import fileops, metadata, thumbs, util, uwp
 
 
 def _sel_label(text=""):
@@ -277,8 +277,9 @@ class PropertiesDialog(QDialog):
         bb.rejected.connect(self.reject)
         lay.addWidget(bb)
 
-    def _run(self, fn, cb):
-        t = fileops.run_task(self, "Working…", fn, cb)
+    def _run(self, fn, cb, title=None):
+        """Background job; shown in the main window's status bar only when given a title."""
+        t = fileops.run_task(self, title or "", fn, cb, quiet=title is None)
         self.threads.append(t)
 
     def _general_tab(self):
@@ -450,7 +451,7 @@ class PropertiesDialog(QDialog):
                 form.addRow(k + ":", ed)
             else:
                 form.addRow(k + ":", _sel_label(v))
-        btn = QPushButton("Set as Wallpaper")
+        btn = QPushButton(uwp.wallpaper_label())
         btn.clicked.connect(lambda: util.set_wallpaper(self.path))
         form.addRow(btn)
         return w
@@ -522,7 +523,7 @@ class PropertiesDialog(QDialog):
             if warnings:
                 QMessageBox.information(self, "Metadata", "\n".join(warnings))
             self._reload_meta()
-        self._run(fn, done)
+        self._run(fn, done, "Writing metadata")
 
     def _reload_meta(self):
         self.meta_loaded = True
@@ -654,7 +655,7 @@ class PropertiesDialog(QDialog):
                         for chunk in iter(lambda: f.read(4 << 20), b""):
                             h.update(chunk)
                     return h.hexdigest()
-                self._run(fn, o.setText)
+                self._run(fn, o.setText, f"Computing {a.upper()}")
             btn.clicked.connect(compute)
         verify = QLineEdit()
         verify.setPlaceholderText("Paste a checksum to compare…")
@@ -676,11 +677,26 @@ class PropertiesDialog(QDialog):
                 if m != self.orig_mode:
                     try:
                         os.chmod(self.path, m)
+                    except PermissionError:
+                        from . import admin
+                        admin.retry_as_admin(
+                            self.parent() or self, "Permissions",
+                            f"You don't have permission to change the permissions of “{os.path.basename(self.path)}”.",
+                            lambda task, p=self.path, mode=m: admin.session().call(task, "chmod", path=p, mode=mode))
                     except OSError as e:
                         QMessageBox.warning(self, "Permissions", str(e))
             new = self.name_edit.text().strip()
             if new and new != os.path.basename(self.path.rstrip("/")):
-                err = do_rename(self.path, new)
+                try:
+                    err = do_rename(self.path, new)
+                except PermissionError:
+                    from . import admin
+                    target = os.path.join(os.path.dirname(self.path), new)
+                    admin.retry_as_admin(
+                        self.parent() or self, "Rename",
+                        f"You don't have permission to rename “{os.path.basename(self.path)}”.",
+                        lambda task, p=self.path: admin.session().call(task, "rename", src=p, dst=target))
+                    err = None
                 if err:
                     QMessageBox.warning(self, "Rename", err)
                     return
@@ -706,6 +722,8 @@ def do_rename(path, new_name):
         return f"“{new_name}” already exists."
     try:
         os.rename(path, target)
+    except PermissionError:
+        raise  # callers offer to retry as administrator
     except OSError as e:
         return str(e)
     return None
@@ -940,30 +958,6 @@ class BatchRenameDialog(QDialog):
 
 
 # ---------------------------------------------------------------- compress
-
-def ask_compress(parent, paths):
-    dlg = QDialog(parent)
-    dlg.setWindowTitle("Compress")
-    form = QFormLayout(dlg)
-    default = os.path.basename(paths[0]) if len(paths) == 1 else "Archive"
-    if len(paths) == 1 and os.path.isfile(paths[0]):
-        default = util.split_ext(default)[0]
-    name = QLineEdit(default)
-    fmt = QComboBox()
-    fmts = ["zip", "tar.gz", "tar.xz", "tar"]
-    if __import__("shutil").which("7z"):
-        fmts.append("7z")
-    fmt.addItems(fmts)
-    form.addRow("Archive name:", name)
-    form.addRow("Format:", fmt)
-    bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-    bb.accepted.connect(dlg.accept)
-    bb.rejected.connect(dlg.reject)
-    form.addRow(bb)
-    if dlg.exec() and name.text().strip():
-        return name.text().strip(), fmt.currentText()
-    return None
-
 
 # ---------------------------------------------------------------- preferences
 

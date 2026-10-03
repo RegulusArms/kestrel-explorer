@@ -3,14 +3,14 @@ import os
 import shutil
 import sys
 
-from PyQt6.QtCore import QDir, QEvent, QItemSelectionModel, QMimeData, QSettings, QSize, QStorageInfo, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QDir, QEvent, QFileSystemWatcher, QItemSelectionModel, QMimeData, QSettings, QSize, QStorageInfo, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QGuiApplication, QKeySequence
 from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QHBoxLayout, QHeaderView,
                              QInputDialog, QLabel, QLineEdit, QListView, QMainWindow, QMenu, QMessageBox,
                              QProgressBar, QSlider, QSplitter, QStackedWidget, QTabWidget, QToolBar, QToolButton, QTreeView,
                              QVBoxLayout, QWidget)
 
-from . import __version__, dialogs, fileops, thumbs, util
+from . import __version__, admin, archive, archive_ui, dialogs, fileops, thumbs, util, uwp
 from .overview import OVERVIEW, OVERVIEW_TITLE, OverviewPage, is_uri, mount_uri
 from .viewer import ImageViewer
 from .widgets import (FSModel, GridDelegate, InfoPanel, PathBar, PathRole, SearchModel, SearchThread, Sidebar)
@@ -43,6 +43,8 @@ class Pane(QWidget):
         self.in_search = False
         self.search_thread = None
         self._pending_select = None
+        self._trash_gen = 0          # bumps on every combined-trash reload, so stale loads are dropped
+        self._trash_watch = None     # QFileSystemWatcher on every trash files/ folder while showing the trash
         self.grid_size = int(self.settings.value("grid_size", 160))
         self.list_size = int(self.settings.value("list_size", 28))
 
@@ -183,6 +185,10 @@ class Pane(QWidget):
     def is_overview(self):
         return self.path == OVERVIEW
 
+    def is_trash(self):
+        """Showing the Trash: the combined contents of the home trash and every drive's trash."""
+        return self.path == str(util.TRASH_DIR / "files")
+
     @property
     def dir(self):
         """The current folder, or None on the overview page."""
@@ -280,7 +286,64 @@ class Pane(QWidget):
         self.tree.scrollToTop()
         self._update_empty()
         self.path_changed.emit()
+        if self.is_trash():
+            self.show_trash()
         return True
+
+    # -- combined trash
+    def show_trash(self):
+        """List the items of every trash folder (home + each drive's .Trash-$uid) in the results model,
+        with the folder each item was deleted from as its Location. Loaded on a thread."""
+        self._trash_gen += 1
+        gen = self._trash_gen
+        fileops.run_task(self, "", util.trashed_items, lambda items: self._fill_trash(items, gen), quiet=True)
+
+    def _fill_trash(self, items, gen):
+        if gen != self._trash_gen or not self.is_trash():
+            return
+        text = self.search_edit.text().strip().lower() if self.search_bar.isVisible() else ""
+        if text:
+            items = [(p, o) for p, o in items if text in os.path.basename(p).lower()]
+        if not self.in_search:
+            self.in_search = True
+            self._attach(self.search_model)
+            self.grid.setRootIndex(self.search_model.index(-1, -1))
+            self.tree.setRootIndex(self.search_model.index(-1, -1))
+        sel = set(self.selected_paths())
+        self.search_model.clear_results()
+        locations = {p: os.path.dirname(o) if o else "(unknown)" for p, o in items}
+        self._add_trash_rows([p for p, _ in items], locations, gen, sel)
+        if self._trash_watch is None:
+            self._trash_watch = QFileSystemWatcher(self)
+            self._trash_watch.directoryChanged.connect(self._trash_changed)
+        dirs = [os.path.join(r, "files") for r in util.trash_dirs()]
+        new = [d for d in dirs if d not in self._trash_watch.directories()]
+        if new:
+            self._trash_watch.addPaths(new)
+
+    def _add_trash_rows(self, paths, locations, gen, sel):
+        # in chunks, so a trash with tens of thousands of items doesn't block the window
+        if gen != self._trash_gen or not self.is_trash():
+            return
+        self.search_model.add_paths(paths[:1000], locations)
+        if paths[1000:]:
+            QTimer.singleShot(0, lambda: self._add_trash_rows(paths[1000:], locations, gen, sel))
+            return
+        if sel:
+            self.select_paths([p for p in sel if p in self.search_model.rows])
+        self._update_empty()
+        if self.win.pane() is self:
+            self.win.update_status()
+
+    def _trash_changed(self, _d):
+        if self.is_trash() and not getattr(self, "_trash_reload", False):
+            self._trash_reload = True  # coalesce bursts (deleting thousands of items) into one reload
+
+            def reload():
+                self._trash_reload = False
+                if self.is_trash():
+                    self.show_trash()
+            QTimer.singleShot(400, reload)
 
     def _dir_loaded(self, p):
         if p == self.path:
@@ -345,6 +408,9 @@ class Pane(QWidget):
         if self.is_overview():
             self.overview.refresh()
             return
+        if self.is_trash():
+            self.show_trash()
+            return
         for p in self.all_paths():
             if os.path.isdir(p):
                 self.thumbs.invalidate(p)
@@ -366,7 +432,11 @@ class Pane(QWidget):
         if self.is_overview():
             self.empty.hide()
             return
-        if self.in_search:
+        if self.in_search and self.is_trash():
+            text = "" if self.search_model.rowCount() else (
+                "No matches in the trash" if self.search_bar.isVisible() and self.search_edit.text().strip()
+                else "Trash is empty")
+        elif self.in_search:
             n = self.search_model.rowCount()
             text = "No results" if n == 0 and not (self.search_thread and self.search_thread.isRunning()) else ""
         else:
@@ -401,6 +471,8 @@ class Pane(QWidget):
         if refocus:
             self.view().setFocus()
         self.path_changed.emit()
+        if self.is_trash():
+            self.show_trash()
 
     def _stop_search(self):
         if self.search_thread:
@@ -411,6 +483,9 @@ class Pane(QWidget):
     def _do_search(self):
         text = self.search_edit.text().strip()
         self._stop_search()
+        if self.is_trash():  # filter the combined trash list by name
+            self.show_trash()
+            return
         if not text:
             self.model.setNameFilters([])
             if self.in_search:
@@ -636,7 +711,11 @@ class MainWindow(QMainWindow):
         for wdg in (self.build_label, self.build_bar, self.build_stop):
             bl.addWidget(wdg)
         self.build_box.hide()
+        self.task_panel = fileops.TaskPanel()  # file operations running in the background
+        self.admin_indicator = admin.Indicator()  # 🛡 while an admin session is open
         self.statusBar().addWidget(self.status_label, 1)
+        self.statusBar().addPermanentWidget(self.admin_indicator)
+        self.statusBar().addPermanentWidget(self.task_panel)
         self.statusBar().addPermanentWidget(self.build_box)
         self.statusBar().addPermanentWidget(self.thumb_progress)
         self.statusBar().addPermanentWidget(self.free_label)
@@ -793,6 +872,8 @@ class MainWindow(QMainWindow):
 
         menu.addSeparator()
         A("Preferences…", "Ctrl+,", self.preferences, ["preferences-system"], menu=menu)
+        A("Start Admin Session…", None, lambda: admin.start_session(self), ["security-high", "dialog-password"],
+          menu=menu)
         A("Clear Folder Preview Cache", None, self.clear_cache, menu=menu)
         A("Delete All Thumbnails…", None, self.purge_thumbnails, ["edit-clear-all", "edit-delete"], menu=menu)
         A("Keyboard Shortcuts", "F1", self.show_shortcuts, menu=menu)
@@ -1266,12 +1347,30 @@ class MainWindow(QMainWindow):
             lm.addAction(icon("bookmark-new"), "Add to Bookmarks", lambda: self.sidebar.add_bookmark(single))
 
         m.addSeparator()
-        if single and util.is_archive(single):
-            m.addAction(icon("archive-extract", "package-x-generic"), "Extract Here", lambda: self.extract(single))
-        m.addAction(icon("package-x-generic", "archive-insert"), "Compress…", lambda: self.compress(paths))
+        if single and not is_dir and archive.can_extract(single):
+            missing = archive.missing_extract_tool(single)
+            if missing:
+                a = m.addAction(icon("archive-extract", "package-x-generic"), f"Extract (install {missing})")
+                a.setEnabled(False)
+            else:
+                m.addAction(icon("archive-extract", "package-x-generic"), "Extract Here",
+                            lambda: archive_ui.extract_here(self, single))
+                m.addAction(icon("archive-extract", "package-x-generic"), "Extract To…",
+                            lambda: archive_ui.extract_dialog(self, single))
+        quick = archive_ui.quick_compress_label(self.settings, paths)
+        if quick:
+            m.addAction(icon("package-x-generic", "archive-insert"), quick,
+                        lambda: archive_ui.quick_compress(self, paths))
+        m.addAction(icon("package-x-generic", "archive-insert"), "Compress…",
+                    lambda: archive_ui.compress_dialog(self, paths))
+        if single and (util.is_image(single) or util.is_video(single)) and uwp.editor_open():
+            m.addAction(icon("preferences-desktop-wallpaper", "video-display"), "Add to Selected UWP Monitor",
+                        lambda: self._uwp_add(single))
+        if single and util.is_video(single) and uwp.available():
+            m.addAction(icon("preferences-desktop-wallpaper"), uwp.wallpaper_label(), lambda: util.set_wallpaper(single))
         if single and util.is_image(single):
             im = m.addMenu(icon("image-x-generic"), "Image")
-            im.addAction("Set as Wallpaper", lambda: util.set_wallpaper(single))
+            im.addAction(uwp.wallpaper_label(), lambda: util.set_wallpaper(single))
             im.addAction("Use as Folder Cover", lambda: self.thumbs.set_cover(os.path.dirname(single), single))
             im.addAction("Copy Image to Clipboard", lambda: QGuiApplication.clipboard().setImage(
                 __import__("PyQt6.QtGui", fromlist=["QImage"]).QImage(single)))
@@ -1406,6 +1505,10 @@ class MainWindow(QMainWindow):
             try:
                 os.makedirs(p)
                 self.pane().select_later(p)
+            except PermissionError:
+                admin.retry_as_admin(self, "New Folder", f"You don't have permission to create folders in “{cur}”.",
+                                     lambda task: admin.session().call(task, "mkdir", path=p),
+                                     lambda ok: ok and self.pane().select_later(p))
             except OSError as e:
                 QMessageBox.warning(self, "New Folder", str(e))
 
@@ -1427,6 +1530,12 @@ class MainWindow(QMainWindow):
                 else:
                     open(p, "x").close()
                 self.pane().select_later(p)
+            except PermissionError:
+                admin.retry_as_admin(
+                    self, "New File", f"You don't have permission to create files in “{cur}”.",
+                    lambda task: admin.session().call(task, "copyfile", src=template, dst=p) if template else
+                    admin.session().call(task, "touch", path=p),
+                    lambda ok: ok and self.pane().select_later(p))
             except OSError as e:
                 QMessageBox.warning(self, "New File", str(e))
 
@@ -1438,12 +1547,24 @@ class MainWindow(QMainWindow):
             return
         new = dialogs.ask_rename(self, paths[0])
         if new:
-            err = dialogs.do_rename(paths[0], new)
+            target = os.path.join(os.path.dirname(paths[0]), new)
+
+            def renamed(ok=True):
+                if ok:
+                    self.pane().select_later(target)
+                    QTimer.singleShot(150, self.pane()._try_select)
+            try:
+                err = dialogs.do_rename(paths[0], new)
+            except PermissionError:
+                admin.retry_as_admin(self, "Rename",
+                                     f"You don't have permission to rename “{os.path.basename(paths[0])}”.",
+                                     lambda task: admin.session().call(task, "rename", src=paths[0], dst=target),
+                                     renamed)
+                return
             if err:
                 QMessageBox.warning(self, "Rename", err)
             else:
-                self.pane().select_later(os.path.join(os.path.dirname(paths[0]), new))
-                QTimer.singleShot(150, self.pane()._try_select)
+                renamed()
 
     def trash_paths(self, paths):
         if not paths:
@@ -1451,103 +1572,140 @@ class MainWindow(QMainWindow):
         if util.in_trash(paths[0]):
             self.delete_paths(paths)
             return
-        failed = []
-        for p in paths:
-            try:
-                util.trash(p)
-            except OSError as e:
-                failed.append((p, str(e)))
-        self.sidebar.refresh()
-        if failed:
-            r = QMessageBox.question(
-                self, "Cannot move to trash",
-                f"{len(failed)} item(s) could not be moved to the trash:\n{failed[0][1]}\n\nDelete them permanently?")
-            if r == QMessageBox.StandardButton.Yes:
-                fileops.start_ops(self, [("delete", p, None) for p, _ in failed], "Deleting")
-        else:
-            self.statusBar().showMessage(f"Moved {len(paths)} item(s) to the trash", 4000)
+        paths = list(paths)
+
+        def work(task):
+            failed = []
+            for i, p in enumerate(paths):
+                task.check()
+                task.report(i, len(paths), f"{i:,} of {len(paths):,} — {os.path.basename(p)}")
+                try:
+                    util.trash(p)
+                except OSError as e:
+                    failed.append((p, str(e)))
+            return failed
+
+        def done(failed):
+            self.sidebar.refresh()
+            if failed:
+                r = QMessageBox.question(
+                    self, "Cannot move to trash",
+                    f"{len(failed)} item(s) could not be moved to the trash:\n{failed[0][1]}\n\n"
+                    "Delete them permanently?")
+                if r == QMessageBox.StandardButton.Yes:
+                    fileops.start_ops(self, [("delete", p, None) for p, _ in failed], "Deleting")
+            elif failed is not None:
+                self.statusBar().showMessage(f"Moved {len(paths):,} item(s) to the trash", 4000)
+            else:
+                self.statusBar().showMessage("Move to trash cancelled; items already moved stay in the trash", 6000)
+        fileops.run_job(self, "Moving to trash", work, done)
 
     def delete_paths(self, paths):
         if not paths:
             return
         what = f"“{os.path.basename(paths[0])}”" if len(paths) == 1 else f"these {len(paths)} items"
-        r = QMessageBox.warning(self, "Delete Permanently",
-                                f"Permanently delete {what}?\n\nThis cannot be undone.",
-                                QMessageBox.StandardButton.Delete | QMessageBox.StandardButton.Cancel,
-                                QMessageBox.StandardButton.Cancel)
-        if r == QMessageBox.StandardButton.Delete:
+        box = QMessageBox(QMessageBox.Icon.Warning, "Delete Permanently",
+                          f"Permanently delete {what}?\n\nThis cannot be undone.", QMessageBox.StandardButton.Cancel, self)
+        delete = box.addButton("Delete", QMessageBox.ButtonRole.DestructiveRole)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() is delete:
             def done():
                 for p in paths:
-                    if util.in_trash(p):
+                    info = util.trash_info_path(p)
+                    if info:
                         try:
-                            (util.TRASH_DIR / "info" / (os.path.basename(p) + ".trashinfo")).unlink()
+                            os.unlink(info)
                         except OSError:
                             pass
                 self.sidebar.refresh()
             fileops.start_ops(self, [("delete", p, None) for p in paths], "Deleting", done)
 
     def restore(self, paths):
-        errors = []
-        for p in paths:
-            orig = util.trash_original_path(p)
-            if not orig:
-                errors.append(f"{os.path.basename(p)}: original location unknown")
-                continue
-            dest = orig if not os.path.lexists(orig) else util.unique_path(os.path.dirname(orig), os.path.basename(orig), "num")
-            try:
-                os.makedirs(os.path.dirname(dest), exist_ok=True)
-                shutil.move(p, dest)
-                (util.TRASH_DIR / "info" / (os.path.basename(p) + ".trashinfo")).unlink(missing_ok=True)
-            except OSError as e:
-                errors.append(f"{os.path.basename(p)}: {e}")
-        self.sidebar.refresh()
-        if errors:
-            QMessageBox.warning(self, "Restore", "\n".join(errors))
+        paths = list(paths)
+
+        def work(task):
+            errors = []
+            for i, p in enumerate(paths):
+                task.check()
+                task.report(i, len(paths), f"{i:,} of {len(paths):,} — {os.path.basename(p)}")
+                orig = util.trash_original_path(p)
+                if not orig:
+                    errors.append(f"{os.path.basename(p)}: original location unknown")
+                    continue
+                dest = orig if not os.path.lexists(orig) else \
+                    util.unique_path(os.path.dirname(orig), os.path.basename(orig), "num")
+                try:
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    info = util.trash_info_path(p)
+                    shutil.move(p, dest)
+                    if info and os.path.exists(info):
+                        os.unlink(info)
+                except OSError as e:
+                    errors.append(f"{os.path.basename(p)}: {e}")
+            return errors
+
+        def done(errors):
+            self.sidebar.refresh()
+            if errors:
+                QMessageBox.warning(self, "Restore", "\n".join(errors[:20]))
+        fileops.run_job(self, "Restoring", work, done)
 
     def empty_trash(self):
         r = QMessageBox.warning(self, "Empty Trash", "Permanently delete all items in the trash?",
                                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
         if r == QMessageBox.StandardButton.Yes:
-            fileops.run_task(self, "Emptying trash…", util.empty_trash, lambda _: self.sidebar.refresh())
+            jobs = [("delete", e.path, None) for root in util.trash_dirs() for sub in ("files", "info", "expunged")
+                    if os.path.isdir(os.path.join(root, sub)) for e in os.scandir(os.path.join(root, sub))]
+            fileops.start_ops(self, jobs, "Emptying trash", self.sidebar.refresh)
 
     def make_links(self, paths, dest, kind):
         if dest is None:
             dest = dialogs.choose_dir(self, "Create Links In", self.cur_dir() or util.HOME)
             if not dest:
                 return
-        os.makedirs(dest, exist_ok=True)
-        made, errors = [], []
+        made, errors, denied = [], [], []
+        try:
+            os.makedirs(dest, exist_ok=True)
+        except OSError as e:
+            QMessageBox.warning(self, "Create Link", str(e))
+            return
         for p in paths:
+            plan = fileops.link_plan(kind, p, dest)
             try:
-                if kind == "hard":
-                    made.append(fileops.make_hardlink(p, dest))
-                elif kind == "desktop":
-                    made.append(fileops.make_desktop_shortcut(p, dest))
-                else:
-                    made.append(fileops.make_symlink(p, dest, relative=kind == "rel"))
+                made.append(fileops.make_link(plan))
+            except PermissionError:
+                denied.append(plan)
             except OSError as e:
                 errors.append(f"{os.path.basename(p)}: {e}")
         if errors:
             QMessageBox.warning(self, "Create Link", "\n".join(errors))
-        if made:
-            self.statusBar().showMessage(f"Created {len(made)} link(s) in {dest}", 4000)
-            if dest == self.cur_dir():
-                self.pane().select_later(made[0])
 
-    def compress(self, paths):
-        res = dialogs.ask_compress(self, paths)
-        if not res:
-            return
-        name, fmt = res
-        out = util.unique_path(os.path.dirname(paths[0]), f"{name}.{fmt}", "num")
-        fileops.run_task(self, f"Compressing to {os.path.basename(out)}…",
-                         lambda: fileops.compress(paths, out, fmt),
-                         lambda p: self.pane().select_later(p))
+        def finish(_ok=True):
+            done = made + [fileops.plan_path(pl) for pl in denied if os.path.lexists(fileops.plan_path(pl))]
+            if done:
+                self.statusBar().showMessage(f"Created {len(done)} link(s) in {dest}", 4000)
+                if dest == self.cur_dir():
+                    self.pane().select_later(done[0])
+        if denied:
+            def work(task):
+                errs = []
+                for pl in denied:
+                    try:
+                        admin.session().call(task, **pl)
+                    except admin.AdminError as e:
+                        errs.append(f"{os.path.basename(fileops.plan_path(pl))}: {e}")
+                return errs
+            admin.retry_as_admin(self, "Create Link", f"You don't have permission to create links in “{dest}”.",
+                                 work, finish)
+        else:
+            finish()
 
-    def extract(self, path):
-        fileops.run_task(self, f"Extracting {os.path.basename(path)}…",
-                         lambda: fileops.extract(path, os.path.dirname(path)),
-                         lambda p: self.pane().select_later(p))
+    def _uwp_add(self, path):
+        if uwp.add_to_selected(path):
+            self.statusBar().showMessage(f"Sent {os.path.basename(path)} to the selected UWP monitor", 4000)
+        else:
+            QMessageBox.warning(self, "UWP", "Couldn't reach UWP. Is its editor window still open?")
 
     def properties(self, paths, parent=None):
         if paths:
@@ -1594,7 +1752,7 @@ class MainWindow(QMainWindow):
                 for p in w.panes():
                     p.view().viewport().update()
             self.statusBar().showMessage(f"Deleted {files:,} thumbnails ({util.human_size(size)})", 6000)
-        fileops.run_task(self, "Deleting thumbnails…", lambda: thumbs.purge_thumbnails(include), done)
+        fileops.run_task(self, "Deleting thumbnails", lambda: thumbs.purge_thumbnails(include), done)
 
     def show_shortcuts(self):
         text = """
@@ -1628,6 +1786,25 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Keyboard Shortcuts", text)
 
     def closeEvent(self, ev):
+        tasks = list(self.task_panel.tasks)
+        if tasks:
+            # The worker threads belong to this window; closing now would kill them mid-operation.
+            names = "\n".join(f"• {t.title}" for t in tasks[:5])
+            box = QMessageBox(QMessageBox.Icon.Question, "Operations Running",
+                              f"These operations are still running:\n\n{names}\n\n"
+                              "Stop them and close the window? Items already processed stay processed.",
+                              QMessageBox.StandardButton.NoButton, self)
+            stop = box.addButton("Stop and Close", QMessageBox.ButtonRole.DestructiveRole)
+            box.addButton("Keep Running", QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            ev.ignore()
+            if box.clickedButton() is stop:
+                for t in tasks:
+                    t.cancel()
+                self.task_panel._refresh()
+                self.centralWidget().setEnabled(False)  # stay visible (showing "cancelling…") until stopped
+                self._close_when_idle()
+            return
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("splitter", self.split.saveState())
         for p in self.panes():
@@ -1640,6 +1817,13 @@ class MainWindow(QMainWindow):
         if self in WINDOWS:
             WINDOWS.remove(self)
         super().closeEvent(ev)
+
+    def _close_when_idle(self):
+        """Finish closing once every task has stopped (tasks that can't be cancelled run to the end)."""
+        if self.task_panel.tasks:
+            QTimer.singleShot(100, self._close_when_idle)
+        else:
+            self.close()
 
 
 # ---------------------------------------------------------------- entry

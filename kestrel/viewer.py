@@ -7,7 +7,7 @@ from PyQt6.QtGui import (QAction, QColor, QFont, QGuiApplication, QImageReader, 
                          QPixmap, QTransform)
 from PyQt6.QtWidgets import QMenu, QWidget
 
-from . import util
+from . import util, uwp
 
 
 ANIMATABLE = {".gif", ".webp", ".avif", ".jxl", ".mng", ".apng"}
@@ -368,7 +368,9 @@ class ImageViewer(QWidget):
             m.addAction("Open With…", lambda: self.on_open_with(path))
         m.addAction("Copy Image\tCtrl+C", self._copy_image)
         m.addAction("Copy Path", lambda: QGuiApplication.clipboard().setText(path))
-        m.addAction("Set as Wallpaper", lambda: util.set_wallpaper(path))
+        m.addAction(uwp.wallpaper_label(), lambda: util.set_wallpaper(path))
+        if uwp.editor_open():
+            m.addAction("Add to Selected UWP Monitor", lambda: uwp.add_to_selected(path))
         m.addSeparator()
         if self.on_properties:
             m.addAction("Properties\tAlt+Return", lambda: self.on_properties(path))

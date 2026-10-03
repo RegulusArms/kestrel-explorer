@@ -124,7 +124,8 @@ class SearchModel(QStandardItemModel):
         self.setHorizontalHeaderLabels(["Name", "Location", "Size", "Modified"])
         thumbs.updated.connect(self._thumb_ready)
 
-    def add_paths(self, paths):
+    def add_paths(self, paths, locations=None):
+        """Add result rows; `locations` optionally maps a path to the text for its Location column."""
         for p in paths:
             try:
                 st = os.stat(p)
@@ -137,7 +138,7 @@ class SearchModel(QStandardItemModel):
             name.setData((is_dir, os.path.islink(p)), KindRole)
             name.setToolTip(p)
             name.setEditable(False)
-            loc = QStandardItem(os.path.dirname(p))
+            loc = QStandardItem(locations.get(p, os.path.dirname(p)) if locations else os.path.dirname(p))
             size = QStandardItem("" if is_dir else util.human_size(st.st_size))
             size.setData(st.st_size, Qt.ItemDataRole.UserRole)
             from time import localtime, strftime
@@ -542,7 +543,7 @@ class Sidebar(QListWidget):
             if os.path.isdir(p):
                 self._add(label, p, icon)
         trash_files = str(util.TRASH_DIR / "files")
-        empty = not os.path.isdir(trash_files) or not os.listdir(trash_files)
+        empty = util.trash_is_empty()  # home trash and every drive's trash
         self._add("Trash", trash_files, "user-trash" if empty else "user-trash-full", "trash")
         bms = util.read_bookmarks()
         if bms:
@@ -602,7 +603,7 @@ class Sidebar(QListWidget):
             m.addAction("Move Down", lambda: self._move_bookmark(extra, 1))
         elif kind == "trash":
             m.addSeparator()
-            m.addAction("Empty Trash", lambda: (util.empty_trash(), self.refresh()))
+            m.addAction("Empty Trash", lambda: self.window().empty_trash())
         elif kind == "mount":
             m.addSeparator()
             m.addAction("Unmount", lambda: self._unmount(path))
