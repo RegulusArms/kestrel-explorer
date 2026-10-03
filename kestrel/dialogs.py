@@ -5,6 +5,7 @@ import html
 import os
 import pwd
 import re
+import shutil
 import stat
 import time
 
@@ -1056,6 +1057,13 @@ class PreferencesDialog(QDialog):
         self.slide.setRange(1, 120)
         self.slide.setSuffix(" s")
         self.slide.setValue(int(settings.value("slideshow_secs", 4)))
+        self.play_gifs = QCheckBox("Play animated GIFs in the file view")
+        self.play_gifs.setChecked(settings.value("play_gifs", False, type=bool))
+        self.play_webm = QCheckBox("Play WebM videos in the file view (silent looping previews)")
+        self.play_webm.setChecked(settings.value("play_webm", False, type=bool))
+        if not shutil.which("ffmpeg"):
+            self.play_webm.setEnabled(False)
+            self.play_webm.setToolTip("Needs ffmpeg:  sudo apt install ffmpeg")
         form.addRow("Images in folder previews:", self.count)
         form.addRow("Folder preview picks:", self.order)
         form.addRow("Folder colour:", self.color_btn)
@@ -1065,6 +1073,8 @@ class PreferencesDialog(QDialog):
         form.addRow("Open videos with:", self.vid_opener)
         form.addRow(self.single)
         form.addRow(self.dirs_first)
+        form.addRow(self.play_gifs)
+        form.addRow(self.play_webm)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self._save)
         bb.rejected.connect(self.reject)
@@ -1128,6 +1138,8 @@ class PreferencesDialog(QDialog):
         s.setValue("single_click", self.single.isChecked())
         s.setValue("list_folder_previews", self.dirs_first.isChecked())
         s.setValue("slideshow_secs", self.slide.value())
+        s.setValue("play_gifs", self.play_gifs.isChecked())
+        s.setValue("play_webm", self.play_webm.isChecked())
         self.accept()
 
 

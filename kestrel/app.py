@@ -10,8 +10,8 @@ from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QHBoxLa
                              QProgressBar, QSlider, QSplitter, QStackedWidget, QTabWidget, QToolBar, QToolButton, QTreeView,
                              QVBoxLayout, QWidget)
 
-from . import (__version__, admin, archive, archive_ui, dialogs, fileops, fm1, places, sharing, thumbs, undo, util,
-               uwp)
+from . import (__version__, admin, animate, archive, archive_ui, dialogs, fileops, fm1, places, sharing, thumbs, undo,
+               util, uwp)
 from .overview import OVERVIEW, OVERVIEW_TITLE, OverviewPage, is_uri, mount_uri
 from .viewer import ImageViewer
 from .widgets import (FSModel, GridDelegate, InfoPanel, PathBar, PathRole, SearchModel, SearchThread, Sidebar,
@@ -88,6 +88,7 @@ class Pane(QWidget):
 
         self.stack = QStackedWidget()
         self.grid = QListView()
+        self.animator = animate.Animator(self.grid, self.settings, self)   # GIF / WebM playing in the grid
         self.tree = QTreeView()
         self._setup_grid()
         self._setup_tree()
@@ -310,6 +311,7 @@ class Pane(QWidget):
         self.path = path
         self.stack.setCurrentWidget(self.mode_view)
         self.thumbs.cancel_pending()
+        self.animator.clear()
         self.model.setNameFilters([])
         root = self.model.setRootPath(path)
         self.grid.setRootIndex(root)
@@ -769,6 +771,7 @@ class MainWindow(QMainWindow):
         self.show_hidden = self.settings.value("show_hidden", False, type=bool)
         self.folder_previews = self.settings.value("folder_previews", True, type=bool)
         self.viewers = []
+        self._prefs = None   # the open Preferences window
         self.setWindowTitle(util.APP_NAME)
         self.setWindowIcon(icon("folder"))
         self.resize(1280, 820)
@@ -1894,13 +1897,28 @@ class MainWindow(QMainWindow):
 
     # -- settings
     def preferences(self):
-        if dialogs.PreferencesDialog(self, self.settings).exec():
-            apply_thumb_settings(self.thumbs, self.settings)
-            self.thumbs.clear_memory()
-            for w in WINDOWS:
-                for p in w.panes():
-                    p._apply_folder_previews()
-                    p.view().viewport().update()
+        # A separate, non-modal window: GNOME attaches modal dialogs to their parent ("attach-modal-dialogs"), so
+        # dragging a modal Preferences would drag the whole Kestrel window with it.
+        if self._prefs is not None:
+            self._prefs.raise_()
+            self._prefs.activateWindow()
+            return
+        d = dialogs.PreferencesDialog(self, self.settings)
+        d.setWindowModality(Qt.WindowModality.NonModal)
+        d.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        d.accepted.connect(self._preferences_saved)
+        d.destroyed.connect(lambda: setattr(self, "_prefs", None))
+        self._prefs = d
+        d.show()
+
+    def _preferences_saved(self):
+        apply_thumb_settings(self.thumbs, self.settings)
+        self.thumbs.clear_memory()
+        for w in WINDOWS:
+            for p in w.panes():
+                p.animator.clear()
+                p._apply_folder_previews()
+                p.view().viewport().update()
 
     def clear_cache(self):
         shutil.rmtree(util.APP_CACHE / "folders", ignore_errors=True)

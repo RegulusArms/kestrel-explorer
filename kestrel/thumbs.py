@@ -457,8 +457,9 @@ def purge_thumbnails(include_shared=False):
     """
     files = size = 0
     targets = []
-    for root, _, names in os.walk(util.APP_CACHE / "folders"):
-        targets += [os.path.join(root, n) for n in names]
+    for sub in ("folders", "animated"):   # folder mosaics, looping video previews
+        for root, _, names in os.walk(util.APP_CACHE / sub):
+            targets += [os.path.join(root, n) for n in names]
     for flavor in FLAVORS.values():
         d = util.THUMB_DIR / flavor
         if not d.is_dir():

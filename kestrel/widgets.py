@@ -295,9 +295,11 @@ class GridDelegate(QStyledItemDelegate):
         s = self.icon_size
         icon_rect = QRect(r.x() + (r.width() - s) // 2, r.y() + 6, s, s)
         pm = index.data(ThumbRole)
+        animator = getattr(self.pane, "animator", None)
+        anim = animator.frame(path, index, s) if animator is not None and not is_dir else None  # GIF / WebM playing
         badge_box = QRectF(icon_rect)   # where the star goes: the corner of what's drawn
-        if pm is not None:
-            spm = self.pane.thumbs.scaled(pm, s)
+        if anim is not None or pm is not None:
+            spm = anim if anim is not None else self.pane.thumbs.scaled(pm, s)
             dpr = spm.devicePixelRatio()
             w, h = spm.width() / dpr, spm.height() / dpr
             target = QRectF(icon_rect.x() + (s - w) / 2, icon_rect.y() + (s - h), w, h)
@@ -312,7 +314,7 @@ class GridDelegate(QStyledItemDelegate):
                 p.setPen(QColor(0, 0, 0, 50))
                 p.setBrush(Qt.BrushStyle.NoBrush)
                 p.drawRoundedRect(target, 4, 4)
-                if util.is_video(path):
+                if util.is_video(path) and anim is None:
                     self._play_badge(p, target)
             else:
                 p.drawPixmap(target, spm, QRectF(spm.rect()))
