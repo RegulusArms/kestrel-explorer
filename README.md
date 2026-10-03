@@ -57,11 +57,11 @@ Package names are for Ubuntu (tested on 26.04). Everything else Kestrel uses is 
 | `python3-pil` | Image sizes, EXIF summary, AI-prompt metadata, and a fallback image decoder |
 | `python3-gi` + `gir1.2-glib-2.0` | GIO: default and "Open With" apps, file type detection, drive and network mounting |
 
-**Recommended** (installed by `./install.sh --install-recommended`; all but `kimageformat6-plugins` come with a standard Ubuntu desktop)
+**Recommended**: run `./install.sh --install-recommended` to install any of these you're missing. Ubuntu already includes most of them. The ones you'll usually need to add are `kimageformat6-plugins` (RAW and HEIC previews) and some of the archive tools, such as `unrar`, `pigz`, `zpaq` and `lzip`.
 
 | Package | Used for |
 |---|---|
-| `libglib2.0-bin` | `gio` (launching `.desktop` shortcuts, unmounting) and `gsettings` (icon theme, set as wallpaper) |
+| `libglib2.0-bin` | `gio` (launching `.desktop` shortcuts, unmounting), `gsettings` (icon theme, set as wallpaper) and `gdbus` (talking to UWP when GIO isn't available) |
 | `xdg-utils` | `xdg-open` (opening files when GIO isn't available) and `xdg-mime` (making Kestrel the default folder app) |
 | `gvfs`, `gvfs-backends` | Network locations (`smb://`, `sftp://`, `nfs://`, `ftp://`…) and the drive list on the Overview page |
 | `udisks2` | Mounting, unlocking and ejecting drives from the Overview page |
@@ -84,6 +84,7 @@ Package names are for Ubuntu (tested on 26.04). Everything else Kestrel uses is 
 | `libimage-exiftool-perl` | The full Metadata tab, plus editing, adding and clearing metadata |
 | `ffmpeg` | Video thumbnails and video stills in folder previews (`ffmpeg` and `ffprobe`) |
 | `zfsutils-linux` | Showing a ZFS pool as one card with pool-level usage on the Overview page |
+| `pkexec` | **Delete as Administrator**, for items that contain files owned by another user such as root (usually already installed) |
 | `rar` (non-free, multiverse; a trial version of WinRAR's command-line tool) | Creating `.rar` archives (passwords, volumes, recovery records) |
 | `pbzip2` or `lbzip2`, `plzip`, `lz4` | Multi-core `.bz2` and `.lz`, and `.lz4` archives. Kestrel offers whichever are installed |
 | [UWP](https://github.com/RegulusArms/UWP) (not an apt package; install with its `install.sh`) | "Set as Wallpaper" through UWP profiles, and "Add to Selected UWP Monitor". Found as `uwp` on your PATH or in `~/.local/bin` |
@@ -103,14 +104,15 @@ sudo apt install python3-pyqt6 python3-pil python3-gi gir1.2-glib-2.0 libglib2.0
 - A folder with only videos uses a still from the middle of each video, marked with a ▶ badge.
 - Right-click a folder → **Generate Previews Recursively** pre-builds every thumbnail and folder preview below it in the background. Progress shows in the status bar, and ✕ stops it.
 - The **Folder previews** checkbox in the toolbar (Ctrl+Shift+P) turns the mosaics off for speed in large or slow folders. Image file thumbnails stay on.
-- If a folder contains an image named `cover.*` or `folder.*`, that image is used as the cover. You can also right-click an image and choose "Use as Folder Cover".
+- If a folder contains an image named `cover`, `folder`, `front` or `poster` (any extension, also hidden as `.cover` or `.folder`), that image is used as the cover. You can also right-click an image and choose "Use as Folder Cover", and "Reset Folder Cover" to undo it.
+- Right-click a folder → **Regenerate Preview** rebuilds its mosaic. The ☰ menu has **Clear Folder Preview Cache** and **Delete All Thumbnails…** to free disk space or start fresh.
 - Thumbnails are generated in background threads and support JPEG, PNG, GIF, WebP, TIFF, SVG and video (with `ffmpeg`). AVIF, HEIC, JPEG XL, PSD and camera RAW also work when `kimageformat6-plugins` is installed (see [Dependencies](#dependencies)).
 - Thumbnails are shared with GNOME Files through the freedesktop cache (`~/.cache/thumbnails`).
 - Zoom with Ctrl+scroll or the slider, from 48 to 320 px.
-- Built-in viewer: arrow keys or the scroll wheel to move between images, zoom and pan, fullscreen, slideshow (S), rotate and flip, trash (Delete), animated GIF/WebP.
+- Built-in viewer: arrow keys or the scroll wheel to move between images, zoom and pan, fullscreen (F), slideshow (S), rotate (R/L) and flip (H), an info overlay (I), copy the image (Ctrl+C), trash (Delete), and animated GIF/WebP.
 - Images and videos open in your system's default app unless you choose otherwise. In Preferences you can pick **Open images with** (system default, Kestrel's built-in viewer, or any installed image app) and **Open videos with** (system default or any installed video app). "View Image" in the right-click menu always uses the built-in viewer.
 - The info panel (F3) shows EXIF details: camera, lens, exposure and GPS.
-- It also shows Stable Diffusion / ComfyUI prompts and settings embedded in PNG files.
+- It also shows Stable Diffusion / ComfyUI prompts and settings embedded in PNG, WebP and JPEG files.
 
 **Overview (default homepage)**
 - Like the old GNOME Files "Other Locations" page:
@@ -132,6 +134,7 @@ sudo apt install python3-pyqt6 python3-pil python3-gi gir1.2-glib-2.0 libglib2.0
 - File operations run on background threads, so the window stays responsive even with tens of thousands of files. Copy, move, duplicate, move to trash, permanent delete, restore, empty trash, compress and extract show their status and a progress bar in the status bar at the bottom of the window, with ✕ to cancel. When several run at once, the bar shows the oldest with "+N more" (hover to see them all). Closing a window while operations are running asks whether to stop them or keep going.
 - If a name already exists when copying or moving, you can replace, merge, skip or keep both.
 - Trash, permanent delete, and restoring or emptying the trash. The Trash shows everything you've deleted on every drive in one list: your home trash plus the trash folder each drive keeps for files deleted on it (`.Trash-<uid>`, the same as GNOME Files). The Location column shows where each item came from, and Restore, Delete Permanently and Empty Trash work across all of them.
+- Deleting handles awkward permissions: read-only folders you own (common in extracted Windows archives) are made writable and deleted. Items containing files owned by another user (such as root) can be removed with **Delete as Administrator**, which asks for your password through the system prompt.
 - Links and shortcuts:
   - Symbolic links (absolute or relative) and hard links.
   - Link to the Desktop.
@@ -145,7 +148,7 @@ sudo apt install python3-pyqt6 python3-pil python3-gi gir1.2-glib-2.0 libglib2.0
 - Properties window:
   - **General:** size (recursive for folders), dates, inode, the free space on the drive, and the default app.
   - **Permissions:** an editable rwx grid plus setuid, setgid and sticky bits.
-  - **Image:** image details.
+  - **Image:** image details and a Set as Wallpaper button.
   - **Metadata:** every tag exiftool can read, with a filter. With `exiftool` installed you can also edit the file's metadata, and changes are written straight to the file:
     - **Edit:** double-click a tag to change its value. List tags such as keywords are edited one item per line.
     - **Add Tag…:** a searchable list of the tags this file type supports, with columns for the tag, what it's for, and what it accepts (text, numbers only, date/time, a fixed choice, or true/false). The allowed values are shown for choice tags.
@@ -180,7 +183,7 @@ Right-click an archive:
   - what to do with files that already exist: keep both (rename), replace or skip;
   - whether to move the archive to the trash afterwards, and whether to open the extracted folder.
 
-  These choices are remembered.
+  These choices, except the destination, are remembered.
 
 **Encrypted archives.** Kestrel checks every archive before extracting. If it's encrypted (including RAR and 7z archives whose file names are hidden) it asks for the password. A wrong password asks again, and nothing half-extracted is left behind.
 
@@ -256,14 +259,15 @@ Not every tool can report real progress, so the bar shows what each one can:
 
 | File | Purpose |
 |---|---|
-| `kestrel/app.py` | Main window, tabs, browser pane, actions, context menus |
+| `kestrel/app.py` | Main window, tabs, browser pane (including the combined trash view), actions, context menus |
 | `kestrel/widgets.py` | File-system model, grid delegate, path bar, sidebar, info panel, search |
 | `kestrel/thumbs.py` | Background thumbnail and folder-mosaic generation and caching |
 | `kestrel/viewer.py` | Image viewer |
-| `kestrel/fileops.py` | Copy, move and delete threads, conflict handling, links, archives |
-| `kestrel/dialogs.py` | Properties, Open With, rename, batch rename, compress, preferences |
+| `kestrel/fileops.py` | Background tasks and the status-bar task panel; copy, move and delete (with Delete as Administrator); conflict handling; links |
+| `kestrel/dialogs.py` | Properties (including the metadata editor and Add Tag picker), Open With, rename, batch rename, Edit Bookmark, preferences |
 | `kestrel/metadata.py` | EXIF, AI-generation metadata, exiftool reading/editing, and the tag catalog for the Add Tag picker (the tag descriptions and "Accepts" types are AI-generated and may not be completely accurate) |
 | `kestrel/overview.py` | Overview page: drives, network locations, bookmarks |
+| `kestrel/util.py` | Shared helpers: paths, file types, icons, desktop integration (default apps, wallpaper, terminal), trash on every drive, GTK bookmarks |
 | `kestrel/archive.py` | Archive engine: tool detection, the commands for every format, progress, cancel, password handling |
 | `kestrel/archive_ui.py` | Compress and Extract dialogs, password prompts, and the archive job flows |
 | `kestrel/uwp.py` | Integration with the UWP wallpaper manager (over D-Bus and the `uwp` command) |
