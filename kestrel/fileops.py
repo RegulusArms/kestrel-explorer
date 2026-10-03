@@ -1,14 +1,15 @@
 """File operations: threaded copy/move/delete with progress, links, shortcuts, archives."""
+import itertools
 import os
 import shutil
 import stat
 import time
 
-from PyQt6.QtCore import QThread, Qt, pyqtSignal
+from PyQt6.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QMessageBox,
                              QProgressBar, QToolButton, QVBoxLayout, QWidget)
 
-from . import util
+from . import atc, util
 
 CHUNK = 4 * 1024 * 1024
 
@@ -27,9 +28,13 @@ class Task(QThread):
     result = pyqtSignal(object)
     error = pyqtSignal(str)
 
+    _ids = itertools.count(1)
+
     def __init__(self, title, fn, parent=None, cancellable=True):
         super().__init__(parent)
         self.title, self.fn, self.cancellable = title, fn, cancellable
+        self.id = str(next(Task._ids))   # unique in this process (for the shared task list)
+        self.admin = False               # runs in this window's admin session
         self.cancelled = self.was_cancelled = False
         self.fraction, self.text = -1.0, ""
         self._last = 0.0
@@ -60,8 +65,122 @@ class Task(QThread):
         self.result.emit(res)
 
 
+class TaskInfo:
+    """A running task as the shared task list knows it: one of ours (local), or another Kestrel's."""
+    __slots__ = ("flight", "id", "title", "text", "fraction", "cancellable", "cancelling", "admin", "local")
+
+    def __init__(self, flight, id, title, text="", fraction=-1.0, cancellable=False, cancelling=False, admin=False,
+                 local=None):
+        self.flight, self.id, self.title, self.text, self.fraction = flight, id, title, text, fraction
+        self.cancellable, self.cancelling, self.admin, self.local = cancellable, cancelling, admin, local
+
+
+class TaskBoard(QObject):
+    """Every running task: this Kestrel's (all its windows) and, through the tower (atc.py), the other Kestrels'.
+    Ours are reported to the others whenever one starts or ends, and at most twice a second while they make
+    progress."""
+    changed = pyqtSignal()
+    _instance = None
+
+    @classmethod
+    def instance(cls):
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def __init__(self):
+        super().__init__()
+        self.local = []
+        self.remote = {}   # flight -> [TaskInfo]
+        self.timer = QTimer(self, singleShot=True, timeout=self._publish)
+        atc.radio().heard.connect(self._heard)
+        atc.radio().reset.connect(self._reset)
+
+    def add(self, task):
+        self.local.append(task)
+        task.progress.connect(self._progress)
+        task.finished.connect(lambda t=task: self._finished(t))
+        self._schedule(0)
+        self.changed.emit()
+
+    def _progress(self, *_):
+        self._schedule(500)
+        self.changed.emit()
+
+    def _finished(self, task):
+        if task in self.local:
+            self.local.remove(task)
+        self._schedule(0)
+        self.changed.emit()
+
+    def _reset(self):
+        self.remote.clear()
+        self.changed.emit()
+
+    def _schedule(self, ms):
+        # report soon (a task started, ended or was cancelled) or within ms (progress); never more often than that
+        if not self.timer.isActive() or self.timer.remainingTime() > ms:
+            self.timer.start(ms)
+
+    def _publish(self):
+        atc.announce("tasks", keep=True, tasks=[
+            {"id": t.id, "title": t.title, "text": t.text, "fraction": t.fraction, "cancellable": t.cancellable,
+             "cancelling": t.cancelled, "admin": t.admin} for t in self.local])
+
+    def others(self, mine):
+        """All tasks but `mine`: our other windows', then other Kestrels'."""
+        me = atc.radio().flight()
+        out = [TaskInfo(me, t.id, t.title, t.text, t.fraction, t.cancellable, t.cancelled, t.admin, t)
+               for t in self.local if t not in mine]
+        for tasks in self.remote.values():
+            out += tasks
+        return out
+
+    def cancel(self, info):
+        """Cancel a task from another window. Another Kestrel's is cancelled by that Kestrel (its admin session stays
+        its own)."""
+        if info.local is not None:
+            if info.local in self.local:
+                info.local.cancel()
+            self._schedule(0)
+        else:
+            atc.announce("cancel", flight=info.flight, task=info.id)
+            for t in self.remote.get(info.flight, []):
+                if t.id == info.id:
+                    t.cancelling = True
+        self.changed.emit()
+
+    def _heard(self, msg):
+        if msg.get("own"):
+            return
+        kind, sender = msg.get("type"), msg.get("from")
+        if kind == "tasks":
+            tasks = []
+            for o in msg.get("tasks") or []:
+                if isinstance(o, dict):
+                    tasks.append(TaskInfo(sender, str(o.get("id", "")), str(o.get("title", "")), str(o.get("text", "")),
+                                          float(o.get("fraction", -1.0)), bool(o.get("cancellable")),
+                                          bool(o.get("cancelling")), bool(o.get("admin"))))
+            if tasks:
+                self.remote[sender] = tasks
+            else:
+                self.remote.pop(sender, None)
+            self.changed.emit()
+        elif kind == "left":
+            if self.remote.pop(sender, None) is not None:
+                self.changed.emit()
+        elif kind == "cancel" and msg.get("flight") == atc.radio().flight():
+            for t in self.local:
+                if t.id == msg.get("task") and t.cancellable:
+                    t.cancel()
+            self._schedule(0)
+            self.changed.emit()
+
+
 class TaskPanel(QWidget):
-    """Status-bar widget: the running tasks' title, status and progress, with a cancel button."""
+    """Status-bar widget: the running tasks' title, status and progress, with a cancel button. This window's tasks
+    come first; tasks running in other windows (and other Kestrels) are counted after them, or shown when there are
+    none here."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -81,11 +200,13 @@ class TaskPanel(QWidget):
             lay.addWidget(w)
         self.tasks = []
         self.hide()
+        TaskBoard.instance().changed.connect(self._refresh)
 
     def add(self, task):
         self.tasks.append(task)
         task.progress.connect(lambda f, text, t=task: self._progress(t, f, text))
         task.finished.connect(lambda t=task: self._finished(t))
+        TaskBoard.instance().add(task)
         self._refresh()
 
     def _progress(self, task, fraction, text):
@@ -102,24 +223,48 @@ class TaskPanel(QWidget):
         if self.tasks:
             self.tasks[0].cancel()
             self._refresh()
+            return
+        others = TaskBoard.instance().others(self.tasks)
+        if others:
+            TaskBoard.instance().cancel(others[0])
 
     def _refresh(self):
-        if not self.tasks:
+        others = TaskBoard.instance().others(self.tasks)
+        if not self.tasks and not others:
             self.hide()
             return
-        t = self.tasks[0]
-        text = t.title + (" — cancelling…" if t.cancelled else f": {t.text}" if t.text else "")
-        more = f"  (+{len(self.tasks) - 1} more)" if len(self.tasks) > 1 else ""
-        self.label.setText(self.label.fontMetrics().elidedText(text, Qt.TextElideMode.ElideMiddle, 380) + more)
-        self.setToolTip("\n".join(x.title + (f": {x.text}" if x.text else "") for x in self.tasks))
-        if t.fraction < 0:
+
+        def line(t):
+            return ("🛡 " if t.admin else "") + t.title + (f": {t.text}" if t.text else "")
+        where = ""
+        if self.tasks:
+            t = self.tasks[0]
+            first = TaskInfo("", t.id, t.title, t.text, t.fraction, t.cancellable, t.cancelled, False, t)
+        else:
+            first = others.pop(0)
+            where = " (in another window)"
+        shown = ("🛡 " if first.admin and first.local is None else "") + first.title
+        text = shown + where + (" — cancelling…" if first.cancelling else f": {first.text}" if first.text else "")
+        more = []
+        if len(self.tasks) > 1:
+            more.append(f"+{len(self.tasks) - 1} more")
+        if others:
+            more.append(f"+{len(others)} in other windows")
+        self.label.setText(self.label.fontMetrics().elidedText(text, Qt.TextElideMode.ElideMiddle, 380)
+                           + (f"  ({', '.join(more)})" if more else ""))
+        tips = [x.title + (f": {x.text}" if x.text else "") for x in self.tasks]
+        if where:
+            tips.append(line(first) + " — in another window")
+        tips += [line(x) + " — in another window" for x in others]
+        self.setToolTip("\n".join(tips))
+        if first.fraction < 0:
             self.bar.setRange(0, 0)
         else:
             self.bar.setRange(0, 1000)
-            self.bar.setValue(int(t.fraction * 1000))
-        self.stop.setVisible(t.cancellable)
-        self.stop.setEnabled(not t.cancelled)
-        self.stop.setToolTip(f"Cancel {t.title.lower()}")
+            self.bar.setValue(int(first.fraction * 1000))
+        self.stop.setVisible(first.cancellable)
+        self.stop.setEnabled(not first.cancelling)
+        self.stop.setToolTip(f"Cancel {first.title.lower()}{where}")
         self.show()
 
 

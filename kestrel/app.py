@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QHBoxLa
                              QProgressBar, QSlider, QSplitter, QStackedWidget, QTabWidget, QToolBar, QToolButton, QTreeView,
                              QVBoxLayout, QWidget)
 
-from . import (__version__, admin, animate, archive, archive_ui, dialogs, fileops, fm1, places, sharing, thumbs, undo,
+from . import (__version__, admin, animate, archive, archive_ui, atc, dialogs, fileops, fm1, places, sharing, thumbs, undo,
                util, uwp)
 from .overview import OVERVIEW, OVERVIEW_TITLE, OverviewPage, is_uri, mount_uri
 from .viewer import ImageViewer
@@ -1531,7 +1531,8 @@ class MainWindow(QMainWindow):
                         lambda: sharing.share_dialog(self, single))
         sharing.add_scripts_menu(m, paths, here, self.navigate)
         if is_dir:
-            m.addAction("Regenerate Preview", lambda: self.thumbs.invalidate(single))
+            m.addAction("Regenerate Preview", lambda: (self.thumbs.invalidate(single),
+                                                       atc.announce("folders", paths=[single])))
             m.addAction(icon("view-refresh"), "Generate Previews Recursively",
                         lambda: self.build_previews(single))
             m.addAction(icon("utilities-terminal"), "Open in Terminal", lambda: util.open_terminal(single))
@@ -1912,19 +1913,14 @@ class MainWindow(QMainWindow):
         d.show()
 
     def _preferences_saved(self):
-        apply_thumb_settings(self.thumbs, self.settings)
-        self.thumbs.clear_memory()
-        for w in WINDOWS:
-            for p in w.panes():
-                p.animator.clear()
-                p._apply_folder_previews()
-                p.view().viewport().update()
+        apply_preferences()
+        atc.announce("settings")
 
     def clear_cache(self):
         shutil.rmtree(util.APP_CACHE / "folders", ignore_errors=True)
         self.thumbs.clear_memory()
-        for p in self.panes():
-            p.view().viewport().update()
+        repaint_all()
+        atc.announce("thumbs_cleared")
         self.statusBar().showMessage("Folder preview cache cleared", 3000)
 
     def purge_thumbnails(self):
@@ -1946,9 +1942,8 @@ class MainWindow(QMainWindow):
         def done(res):
             files, size = res
             self.thumbs.clear_memory()
-            for w in WINDOWS:
-                for p in w.panes():
-                    p.view().viewport().update()
+            repaint_all()
+            atc.announce("thumbs_cleared")
             self.statusBar().showMessage(f"Deleted {files:,} thumbnails ({util.human_size(size)})", 6000)
         fileops.run_task(self, "Deleting thumbnails", lambda: thumbs.purge_thumbnails(include), done)
 
@@ -2037,6 +2032,51 @@ def apply_thumb_settings(t, s):
     t.max_file_mb = int(s.value("thumb_max_mb", 200))
 
 
+def repaint_all():
+    for w in WINDOWS:
+        for p in w.panes():
+            p.view().viewport().update()
+
+
+def apply_preferences():
+    apply_thumb_settings(_thumbs, _settings)
+    _thumbs.clear_memory()
+    for w in WINDOWS:
+        for p in w.panes():
+            p.animator.clear()
+            p._apply_folder_previews()
+            p.view().viewport().update()
+
+
+def on_atc(msg):
+    """A change reported by another Kestrel through the tower (see atc.py), or by this one ("own")."""
+    kind = msg.get("type")
+    if kind == "bookmarks":   # also refreshes this process's other windows
+        for w in WINDOWS:
+            w.sidebar.refresh()
+            for p in w.panes():
+                if p.is_overview():
+                    p.refresh()
+    if msg.get("own"):
+        return   # the rest was already applied where it was changed
+    if kind == "settings":
+        _settings.sync()
+        apply_preferences()
+    elif kind == "starred":
+        places.reload_starred()
+    elif kind == "folders":
+        _thumbs.reload_styles()
+        for path in msg.get("paths") or []:
+            if isinstance(path, str):
+                _thumbs.invalidate(path, disk=False)   # the sender already removed the cached mosaic
+    elif kind == "thumbs_cleared":
+        _thumbs.clear_memory()
+        for w in WINDOWS:
+            for p in w.panes():
+                p.animator.clear()
+        repaint_all()
+
+
 def location_arg(arg):
     """A command-line argument (as passed by xdg-open, the file chooser or GNOME) as a location for open_location:
     a local path, OVERVIEW, or a network URI to mount. None if it can't be opened."""
@@ -2105,6 +2145,8 @@ def main(argv=None):
     if "--version" in argv[1:]:
         print(f"{util.APP_NAME} {__version__}")
         return 0
+    if "--atc" in argv[1:]:
+        return atc.run_tower(argv)   # the tower: no window (see atc.py)
     QApplication.setApplicationName(util.APP_ID)
     QApplication.setApplicationVersion(__version__)
     QApplication.setApplicationDisplayName(util.APP_NAME)
@@ -2121,6 +2163,8 @@ def main(argv=None):
     apply_thumb_settings(_thumbs, _settings)
     paths = [location_arg(a) for a in argv[1:] if not a.startswith("-")]
     service = "--dbus-service" in argv[1:]
+    atc.radio().heard.connect(on_atc)
+    atc.radio().start()
     fm1.start(handle_fm1, on_lost=app.quit if service else None)
     if service:
         # started by D-Bus for a "show in folder" request: no window of our own; quit if none is asked for

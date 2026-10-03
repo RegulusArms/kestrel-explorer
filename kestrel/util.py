@@ -472,6 +472,8 @@ def write_bookmarks(items):
         uri = file_uri(target) if target.startswith("/") else target
         lines.append(uri + ("" if label == default else " " + label))
     GTK_BOOKMARKS.write_text("\n".join(lines) + "\n")
+    from . import atc
+    atc.announce("bookmarks")
 
 
 def url_list(paths):

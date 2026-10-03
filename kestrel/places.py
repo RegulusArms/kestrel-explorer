@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from . import util
+from . import atc, util
 
 STARRED = "starred://"
 RECENT = "recent://"
@@ -72,6 +72,7 @@ def _starred_set():
 
 def set_starred(paths, on):
     global _starred
+    _starred = None   # another Kestrel may have changed it since
     current = list(starred())
     if on:
         current += [p for p in paths if p not in current]
@@ -84,6 +85,15 @@ def set_starred(paths, on):
         STARRED_FILE.write_text(json.dumps(current, indent=1))
     except OSError:
         pass
+    signals.starred_changed.emit()
+    atc.announce("starred")
+
+
+def reload_starred():
+    """Re-read the list (another Kestrel changed it) and emit starred_changed."""
+    global _starred
+    _starred = None
+    starred()
     signals.starred_changed.emit()
 
 

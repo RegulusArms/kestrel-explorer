@@ -201,7 +201,7 @@ def start_session(parent):
     def done(err):
         if err:
             QMessageBox.warning(parent, "Admin Session", err)
-    fileops.run_job(parent, "Starting admin session", work, done, cancellable=False)
+    fileops.run_job(parent, "Starting admin session", work, done, cancellable=False).admin = True
 
 
 def retry_as_admin(parent, title, message, work, on_done=None):
@@ -239,4 +239,4 @@ def retry_as_admin(parent, title, message, work, on_done=None):
             QMessageBox.warning(parent, title, "\n".join(errors[:20]))
         if on_done:
             on_done(res is not None and not errors)
-    fileops.run_job(parent, f"{title} (as administrator)", job, done)
+    fileops.run_job(parent, f"{title} (as administrator)", job, done).admin = True

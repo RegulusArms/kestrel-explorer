@@ -19,7 +19,7 @@ from collections import OrderedDict
 from PyQt6.QtCore import QObject, QRectF, QRunnable, QSize, Qt, QThread, QThreadPool, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QImage, QPainter, QPainterPath, QPixmap
 
-from . import util
+from . import atc, util
 
 FLAVORS = {128: "normal", 256: "large", 512: "x-large"}
 COVER_NAMES = ("cover", "folder", ".cover", ".folder", "front", "poster")
@@ -588,7 +588,13 @@ class ThumbnailManager(QObject):
         """False if image previews are turned off for this folder."""
         return self.styles.get(folder, {}).get("previews", True)
 
+    def reload_styles(self):
+        """Re-read covers and folder styles (another Kestrel changed them)."""
+        self.covers = self._load_covers()
+        self.styles = self._load_json(STYLES_FILE)
+
     def _set_style(self, folders, key, value):
+        self.reload_styles()   # another Kestrel may have changed them since
         for f in folders:
             st = dict(self.styles.get(f, {}))
             if value is None:
@@ -606,6 +612,7 @@ class ThumbnailManager(QObject):
             pass
         for f in folders:
             self.invalidate(f)
+        atc.announce("folders", paths=list(folders))
 
     def set_folder_color(self, folders, color):
         """color "#rrggbb", or None for the default."""
@@ -634,6 +641,7 @@ class ThumbnailManager(QObject):
         return self.plain_folder(color, size) if color else None
 
     def set_cover(self, folder, image):
+        self.reload_styles()
         if image:
             self.covers[folder] = image
         else:
@@ -641,6 +649,7 @@ class ThumbnailManager(QObject):
         COVERS_FILE.parent.mkdir(parents=True, exist_ok=True)
         COVERS_FILE.write_text(json.dumps(self.covers, indent=1))
         self.invalidate(folder)
+        atc.announce("folders", paths=[folder])
 
     # -- api
     def key(self, path, mtime, is_dir, size):
@@ -714,12 +723,13 @@ class ThumbnailManager(QObject):
             self.batch_total = self.batch_done = 0
         self.progress.emit(self.batch_done, self.batch_total)
 
-    def invalidate(self, path):
+    def invalidate(self, path, disk=True):
+        """disk=False keeps the cached mosaic on disk."""
         for d in (self.cache, self.icons):
             for k in [k for k in d if k[2] == path]:
                 d.pop(k, None)
         self.failed = {k for k in self.failed if k[2] != path}
-        for size in (128, 256, 512):
+        for size in (128, 256, 512) if disk else ():
             try:
                 (util.APP_CACHE / "folders" / f"{util.md5(path)}-{size}.png").unlink()
             except OSError:
