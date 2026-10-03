@@ -1,6 +1,9 @@
 """Models, delegates and widgets used by the main window."""
 import fnmatch
 import os
+import re
+import shutil
+import subprocess
 
 from PyQt6.QtCore import (QDir, QFileInfo, QRect, QRectF, QSize, QStorageInfo, Qt, QThread, QTimer,
                           pyqtSignal)
@@ -10,7 +13,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QCompleter, QFormLayout, QHBoxLa
                              QListWidget, QListWidgetItem, QMenu, QPlainTextEdit, QPushButton, QScrollArea,
                              QSizePolicy, QStyle, QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget)
 
-from . import metadata, util
+from . import metadata, places, thumbs, util
 
 ThumbRole = Qt.ItemDataRole.UserRole + 50
 PathRole = Qt.ItemDataRole.UserRole + 51
@@ -65,7 +68,7 @@ class FSModel(QFileSystemModel):
         mtime = fi.lastModified().toSecsSinceEpoch()
         if fi.isDir():
             return self.thumbs.folder_pixmap(path, mtime, self.thumb_size, self.folder_previews)
-        if not (util.is_image(path) or util.is_video(path)):
+        if not thumbs.can_thumbnail(path):
             return None
         return self.thumbs.get(path, mtime, False, self.thumb_size, fi.size())
 
@@ -159,7 +162,7 @@ class SearchModel(QStandardItemModel):
             pm = None
             if is_dir:
                 pm = self.thumbs.folder_pixmap(path, mtime, self.thumb_size, self.folder_previews)
-            elif util.is_image(path) or util.is_video(path):
+            elif thumbs.can_thumbnail(path):
                 pm = self.thumbs.get(path, mtime, False, self.thumb_size, size)
             if role == ThumbRole:
                 return pm
@@ -176,14 +179,17 @@ class SearchModel(QStandardItemModel):
 class SearchThread(QThread):
     found = pyqtSignal(list)
 
-    def __init__(self, root, query, hidden, parent=None):
+    def __init__(self, root, query, hidden, parent=None, contents=False):
         super().__init__(parent)
-        self.root, self.hidden = root, hidden
+        self.root, self.hidden, self.contents, self.query = root, hidden, contents, query
         q = query.lower()
         self.match = (lambda n: fnmatch.fnmatch(n.lower(), q)) if any(c in q for c in "*?[") else (lambda n: q in n.lower())
         self.stop = False
 
     def run(self):
+        if self.contents:
+            self._run_contents()
+            return
         batch, count = [], 0
         for root, dirs, files in os.walk(self.root):
             if self.stop:
@@ -203,6 +209,38 @@ class SearchThread(QThread):
                 break
         if batch:
             self.found.emit(batch)
+
+
+    def _run_contents(self):
+        """Search file contents (and names) with the desktop's search index (localsearch), within root."""
+        terms = [t for t in re.split(r"[\s*?\[\]]+", self.query) if t]
+        if not terms:
+            return
+        try:
+            out = subprocess.run(["localsearch", "search", "-f", "--limit", "20000", *terms], capture_output=True,
+                                 text=True, timeout=60, stdin=subprocess.DEVNULL).stdout
+        except (OSError, subprocess.SubprocessError):
+            return
+        prefix = self.root.rstrip("/") + "/"
+        batch = []
+        for line in out.splitlines():
+            if self.stop:
+                return
+            p = util.uri_to_path(line.strip())
+            if not p or not p.startswith(prefix) or not os.path.lexists(p):
+                continue
+            if not self.hidden and any(part.startswith(".") for part in p[len(prefix):].split("/")):
+                continue
+            batch.append(p)
+            if len(batch) >= 50:
+                self.found.emit(batch)
+                batch = []
+        if batch:
+            self.found.emit(batch)
+
+
+def can_search_contents():
+    return shutil.which("localsearch") is not None
 
 
 # ---------------------------------------------------------------- grid delegate
@@ -257,11 +295,13 @@ class GridDelegate(QStyledItemDelegate):
         s = self.icon_size
         icon_rect = QRect(r.x() + (r.width() - s) // 2, r.y() + 6, s, s)
         pm = index.data(ThumbRole)
+        badge_box = QRectF(icon_rect)   # where the star goes: the corner of what's drawn
         if pm is not None:
             spm = self.pane.thumbs.scaled(pm, s)
             dpr = spm.devicePixelRatio()
             w, h = spm.width() / dpr, spm.height() / dpr
             target = QRectF(icon_rect.x() + (s - w) / 2, icon_rect.y() + (s - h), w, h)
+            badge_box = target
             if not is_dir:
                 clip = QPainterPath()
                 clip.addRoundedRect(target, 4, 4)
@@ -284,6 +324,9 @@ class GridDelegate(QStyledItemDelegate):
             em = util.theme_icon("emblem-symbolic-link", "emblem-link")
             es = max(16, s // 5)
             em.paint(p, QRect(icon_rect.right() - es, icon_rect.bottom() - es, es, es))
+        if places.is_starred(path):
+            bs = max(16, s // 6)
+            self._star_badge(p, QRectF(badge_box.right() - bs * 0.75, badge_box.top() - bs * 0.25, bs, bs))
         # text
         p.setPen(pal.color(QPalette.ColorRole.Text))
         if selected:
@@ -295,6 +338,28 @@ class GridDelegate(QStyledItemDelegate):
         for i, line in enumerate(self._lines(fm, name, text_rect.width())):
             lr = QRect(text_rect.x(), text_rect.y() + i * fm.height(), text_rect.width(), fm.height())
             p.drawText(lr, Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter, line)
+        p.restore()
+
+    @staticmethod
+    def _star_badge(p, rect):
+        """A small gold star (starred items)."""
+        import math
+        c, r = rect.center(), rect.width() / 2
+        star = QPainterPath()
+        for i in range(10):
+            radius = r if i % 2 == 0 else r * 0.45
+            a = math.pi / 2 + i * math.pi / 5
+            x, y = c.x() + radius * math.cos(a), c.y() - radius * math.sin(a)
+            if i == 0:
+                star.moveTo(x, y)
+            else:
+                star.lineTo(x, y)
+        star.closeSubpath()
+        p.save()
+        p.setOpacity(1.0)
+        p.setPen(QColor(120, 80, 0, 220))
+        p.setBrush(QColor("#f6c02d"))
+        p.drawPath(star)
         p.restore()
 
     @staticmethod
@@ -408,6 +473,9 @@ class PathBar(QWidget):
         parts = []
         if path == OVERVIEW:
             parts.append((OVERVIEW_TITLE, OVERVIEW, "computer"))
+            rest, base = "", ""
+        elif path in places.VIRTUAL:
+            parts.append((places.title(path), path, places.icon_name(path)))
             rest, base = "", ""
         elif path == util.HOME or path.startswith(util.HOME + "/"):
             parts.append(("Home", util.HOME, "user-home"))
@@ -537,6 +605,8 @@ class Sidebar(QListWidget):
         self._header("PLACES")
         self._add(OVERVIEW_TITLE, OVERVIEW, "computer", "overview")
         self._add("Home", util.HOME, "user-home")
+        self._add("Recent", places.RECENT, util.theme_icon("document-open-recent", "folder-recent", "folder"), "recent")
+        self._add("Starred", places.STARRED, util.theme_icon("starred", "starred-symbolic", "folder"), "starred")
         for key, label, icon in (("DESKTOP", "Desktop", "user-desktop"), ("DOCUMENTS", "Documents", "folder-documents"),
                                  ("DOWNLOAD", "Downloads", "folder-download"), ("MUSIC", "Music", "folder-music"),
                                  ("PICTURES", "Pictures", "folder-pictures"), ("VIDEOS", "Videos", "folder-videos")):
@@ -715,7 +785,7 @@ class InfoPanel(QScrollArea):
         pm = None
         if is_dir:
             pm = self.thumbs.folder_pixmap(path, fi.lastModified().toSecsSinceEpoch(), 512, self.folder_previews)
-        elif util.is_image(path) or util.is_video(path):
+        elif thumbs.can_thumbnail(path):
             pm = self.thumbs.get(path, fi.lastModified().toSecsSinceEpoch(), False, 512, fi.size())
         if pm is not None:
             self.preview.setPixmap(self.thumbs.scaled(pm, size))

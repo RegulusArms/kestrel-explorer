@@ -169,6 +169,7 @@ class _Ops:
         self.task, self.jobs = task, jobs
         self.errors = []
         self.denied = []   # jobs that failed for lack of permission, to retry as administrator: (op, src, dst)
+        self.completed = []   # jobs that succeeded (for undo)
         self.done = self.total = 0
         self.by_count = all(op == "delete" for op, _, _ in jobs)
 
@@ -217,6 +218,7 @@ class _Ops:
                     self._move(src, dst, merge=op == "merge_move")
                 else:
                     self._copy(src, dst, merge=op == "merge_copy")
+                self.completed.append((op, src, dst))
             except Cancelled:
                 raise
             except PermissionError:
@@ -349,15 +351,25 @@ def retry_denied_as_admin(parent, title, denied, on_done=None):
     admin.retry_as_admin(parent, title, message, work, lambda _ok: on_done and on_done())
 
 
-def start_ops(parent, jobs, title, on_done=None):
+def start_ops(parent, jobs, title, on_done=None, undo_label=None):
     """Copy/move/delete jobs on a thread, with progress and Cancel in the status bar. Jobs that fail for lack
-    of permission can be retried as administrator."""
+    of permission can be retried as administrator. With undo_label, the moves and copies that succeed (also when
+    cancelled part-way) can be undone with Ctrl+Z; merges into existing folders can't."""
     if not jobs:
         return
     ops = []
 
     def finished(errors):
         denied = ops[0].denied if ops else []
+        if undo_label and ops:
+            from . import undo
+            done = ops[0].completed
+            moves = [(src, dst) for op, src, dst in done if op == "move"]
+            copies = [dst for op, src, dst in done if op == "copy"]
+            if moves:
+                undo.record("move", undo_label, moves)
+            elif copies:
+                undo.record("create", undo_label, copies)
         if errors:
             QMessageBox.warning(parent, title, "Some items could not be processed:\n\n" + "\n".join(errors[:20]))
         if denied and errors is not None:
@@ -439,7 +451,8 @@ def plan_transfer(parent, sources, dest_dir, op):
 def transfer(parent, sources, dest_dir, op, on_done=None):
     jobs = plan_transfer(parent, sources, dest_dir, op)
     if jobs:
-        start_ops(parent, jobs, "Copying" if op == "copy" else "Moving", on_done)
+        start_ops(parent, jobs, "Copying" if op == "copy" else "Moving", on_done,
+                  undo_label="Copy" if op == "copy" else "Move")
 
 
 # ---------------------------------------------------------------- links & shortcuts

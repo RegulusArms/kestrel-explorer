@@ -8,6 +8,8 @@ Folder previews are a mosaic of the first images in the folder, cached in
 import io
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -114,6 +116,110 @@ def video_frame(path, size):
     return None
 
 
+# ---------------------------------------------------------------- system thumbnailers (PDF, fonts, audio, …)
+
+_thumbnailers = None
+
+
+def thumbnailers():
+    """{mime type: [Exec line, …]} from the freedesktop .thumbnailer files (the same ones GNOME Files uses), in
+    order of preference: a user's own ~/.local/share/thumbnailers comes first."""
+    global _thumbnailers
+    if _thumbnailers is None:
+        table = {}
+        data_dirs = [os.environ.get("XDG_DATA_HOME", os.path.join(util.HOME, ".local/share"))]
+        data_dirs += os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":")
+        for d in data_dirs:
+            folder = os.path.join(d, "thumbnailers")
+            try:
+                names = sorted(os.listdir(folder))
+            except OSError:
+                continue
+            for name in names:
+                if not name.endswith(".thumbnailer"):
+                    continue
+                entry = {}
+                try:
+                    with open(os.path.join(folder, name), errors="replace") as f:
+                        for line in f:
+                            key, eq, value = line.strip().partition("=")
+                            if eq:
+                                entry[key] = value
+                except OSError:
+                    continue
+                exe, try_exec = entry.get("Exec", ""), entry.get("TryExec", "")
+                if not exe or (try_exec and not shutil.which(try_exec)):
+                    continue
+                for mt in entry.get("MimeType", "").split(";"):
+                    if mt and exe not in table.setdefault(mt, []):
+                        table[mt].append(exe)
+        _thumbnailers = table
+    return _thumbnailers
+
+
+def thumbnailers_for(path):
+    """The system thumbnailers' Exec lines for this file's type, best first (empty if there are none)."""
+    table = thumbnailers()
+    if not table:
+        return []
+    m = util.mime_for(path, False)
+    for name in [m.name(), *m.aliases(), *m.allAncestors()]:
+        if name in table:
+            return table[name]
+    return []
+
+
+def can_thumbnail(path):
+    """Whether a file can get a thumbnail: images and videos (Kestrel's own), anything else a system
+    thumbnailer handles."""
+    return util.is_image(path) or util.is_video(path) or bool(thumbnailers_for(path))
+
+
+_tries = {}   # Exec line -> [successes, failures]: one that only ever fails is skipped after a few tries
+
+
+def _run_thumbnailer(exe, path, size):
+    # The output goes to /tmp/gnome-desktop-thumbnailer-*.png like GNOME's own: Ubuntu's AppArmor profiles only let
+    # thumbnailers such as evince/papers write there.
+    fd, out = tempfile.mkstemp(prefix="gnome-desktop-thumbnailer-", suffix=".png", dir="/tmp")
+    os.close(fd)
+    try:
+        subst = {"%i": os.path.abspath(path), "%u": util.file_uri(path), "%o": out, "%s": str(size), "%%": "%"}
+        argv = []
+        for arg in shlex.split(exe):
+            for k, v in subst.items():
+                arg = arg.replace(k, v)
+            argv.append(arg)
+        subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=30, start_new_session=True)
+        img = QImage(out)
+        return None if img.isNull() else img
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    finally:
+        try:
+            os.unlink(out)
+        except OSError:
+            pass
+
+
+def system_thumb(path, size):
+    """A thumbnail from the system thumbnailers for this file's type (QImage or None); if one fails, the next one
+    registered for the type is tried."""
+    for exe in thumbnailers_for(path):
+        ok, bad = _tries.setdefault(exe, [0, 0])
+        if not ok and bad >= 3:
+            continue
+        img = _run_thumbnailer(exe, path, size)
+        _tries[exe][0 if img is not None else 1] += 1
+        if img is not None:
+            if img.width() > size or img.height() > size:
+                img = img.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio,
+                                 Qt.TransformationMode.SmoothTransformation)
+            return img
+    return None
+
+
 def file_thumb(path, mtime, size):
     """Return a QImage thumbnail (max size x size) using the freedesktop cache."""
     flavor = FLAVORS[bucket_for(size)]
@@ -130,10 +236,13 @@ def file_thumb(path, mtime, size):
         img = video_frame(path, size)
     else:
         img = None
+    own = img is not None
+    if img is None:   # PDFs, fonts, … (and images Qt can't decode): the system thumbnailers
+        img = system_thumb(path, size)
     if img is None:
         return None
     # don't bother caching images that are already thumbnail sized
-    if not in_cache_dir and (img.width() >= size or img.height() >= size or util.is_video(path)):
+    if not in_cache_dir and (img.width() >= size or img.height() >= size or util.is_video(path) or not own):
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             img.setText("Thumb::URI", uri)
@@ -431,6 +540,7 @@ class ThumbnailManager(QObject):
         self.dir_pool = QThreadPool(self)  # folder mosaics (directory scans)
         self.dir_pool.setMaxThreadCount(2)
         util.image_exts()  # initialise on the main thread
+        thumbnailers()
         self.batch_total = 0
         self.batch_done = 0
         self._progress_timer = QTimer(self, singleShot=True, interval=100, timeout=self._emit_progress)

@@ -295,7 +295,7 @@ class PropertiesDialog(QDialog):
             pm = t.folder_pixmap(self.path, os.stat(self.path).st_mtime, 128)
             if pm is not None:
                 icon.setPixmap(t.scaled(pm, 128))
-        if self.single and (util.is_image(self.path) or util.is_video(self.path)):
+        if self.single and not os.path.isdir(self.path) and thumbs.can_thumbnail(self.path):
             st = os.stat(self.path)
             self._run(lambda: thumbs.file_thumb(self.path, st.st_mtime, 128),
                       lambda img: img is not None and icon.setPixmap(QPixmap.fromImage(img)))
@@ -726,6 +726,9 @@ class PropertiesDialog(QDialog):
             if new and new != os.path.basename(self.path.rstrip("/")):
                 try:
                     err = do_rename(self.path, new)
+                    if not err:
+                        from . import undo
+                        undo.record("rename", "Rename", [(self.path, os.path.join(os.path.dirname(self.path), new))])
                 except PermissionError:
                     from . import admin
                     target = os.path.join(os.path.dirname(self.path), new)
@@ -985,6 +988,10 @@ class BatchRenameDialog(QDialog):
                 temps.append((tmp, p))
             for (tmp, p), new in zip(temps, names):
                 os.rename(tmp, os.path.join(os.path.dirname(p), new))
+            from . import undo
+            undo.record("rename", f"Rename {len(names)} Items",
+                        [(p, os.path.join(os.path.dirname(p), new)) for (_, p), new in zip(temps, names) if
+                         os.path.basename(p) != new])
         except OSError as e:
             for tmp, p in temps:
                 if os.path.exists(tmp):

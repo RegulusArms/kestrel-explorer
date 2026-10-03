@@ -10,10 +10,12 @@ from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QHBoxLa
                              QProgressBar, QSlider, QSplitter, QStackedWidget, QTabWidget, QToolBar, QToolButton, QTreeView,
                              QVBoxLayout, QWidget)
 
-from . import __version__, admin, archive, archive_ui, dialogs, fileops, fm1, thumbs, util, uwp
+from . import (__version__, admin, archive, archive_ui, dialogs, fileops, fm1, places, sharing, thumbs, undo, util,
+               uwp)
 from .overview import OVERVIEW, OVERVIEW_TITLE, OverviewPage, is_uri, mount_uri
 from .viewer import ImageViewer
-from .widgets import (FSModel, GridDelegate, InfoPanel, PathBar, PathRole, SearchModel, SearchThread, Sidebar)
+from .widgets import (FSModel, GridDelegate, InfoPanel, PathBar, PathRole, SearchModel, SearchThread, Sidebar,
+                      can_search_contents)
 
 SEL = QItemSelectionModel.SelectionFlag
 
@@ -46,6 +48,7 @@ class Pane(QWidget):
         self._pending_select = None
         self._trash_gen = 0          # bumps on every combined-trash reload, so stale loads are dropped
         self._trash_watch = None     # QFileSystemWatcher on every trash files/ folder while showing the trash
+        places.signals.starred_changed.connect(self._starred_changed)
         self.grid_size = int(self.settings.value("grid_size", 160))
         self.list_size = int(self.settings.value("list_size", 28))
 
@@ -65,8 +68,16 @@ class Pane(QWidget):
         close.setIcon(icon("window-close-symbolic", "window-close"))
         close.setAutoRaise(True)
         close.clicked.connect(lambda: self.close_search())
+        self.search_contents = QCheckBox("File contents")
+        self.search_contents.setToolTip("Search inside files too, using the desktop's search index (localsearch).\n"
+                                        "Includes subfolders; only finds files in indexed folders.")
+        self.search_contents.setChecked(self.settings.value("search_contents", False, type=bool))
+        self.search_contents.setVisible(can_search_contents())
+        self.search_contents.toggled.connect(lambda v: (self.settings.setValue("search_contents", v),
+                                                        self._do_search()))
         sl.addWidget(self.search_edit, 1)
         sl.addWidget(self.search_sub)
+        sl.addWidget(self.search_contents)
         sl.addWidget(close)
         self.search_bar.hide()
         self.search_timer = QTimer(self, singleShot=True, interval=250, timeout=self._do_search)
@@ -190,10 +201,18 @@ class Pane(QWidget):
         """Showing the Trash: the combined contents of the home trash and every drive's trash."""
         return self.path == str(util.TRASH_DIR / "files")
 
+    def is_virtual(self):
+        """Showing Starred or Recent: files from anywhere, not a folder."""
+        return self.path in places.VIRTUAL
+
+    def is_listing(self):
+        """Showing a list of files from many folders (Trash, Starred, Recent) in the results model."""
+        return self.is_trash() or self.is_virtual()
+
     @property
     def dir(self):
-        """The current folder, or None on the overview page."""
-        return None if self.is_overview() else self.path
+        """The current folder, or None on the overview page and Starred / Recent."""
+        return None if self.is_overview() or self.is_virtual() else self.path
 
     def set_view_mode(self, mode):
         self.mode_view = self.grid if mode == "grid" else self.tree
@@ -259,6 +278,19 @@ class Pane(QWidget):
             self.empty.hide()
             self.path_changed.emit()
             return True
+        if path in places.VIRTUAL:
+            if record and self.path and self.path != path:
+                self.back_stack.append(self._snapshot(path))
+                self.fwd_stack.clear()
+            if self.in_search or self.search_bar.isVisible():
+                self.close_search(refocus=False, navigating=True)
+            self.path = path
+            self.stack.setCurrentWidget(self.mode_view)
+            self.view().selectionModel().clear()
+            self._pending_select = select
+            self.path_changed.emit()
+            self.show_trash()
+            return True
         path = os.path.abspath(os.path.expanduser(path))
         if os.path.isfile(path):
             select, path = path, os.path.dirname(path)
@@ -293,16 +325,23 @@ class Pane(QWidget):
             self.show_trash()
         return True
 
-    # -- combined trash
+    # -- combined trash, Starred and Recent
     def show_trash(self):
         """List the items of every trash folder (home + each drive's .Trash-$uid) in the results model,
-        with the folder each item was deleted from as its Location. Loaded on a thread."""
+        with the folder each item was deleted from as its Location; or the Starred / Recent files with their
+        folder. Loaded on a thread."""
         self._trash_gen += 1
         gen = self._trash_gen
-        fileops.run_task(self, "", util.trashed_items, lambda items: self._fill_trash(items, gen), quiet=True)
+        fn = util.trashed_items if self.is_trash() else (lambda place=self.path: places.items(place))
+        fileops.run_task(self, "", fn, lambda items: self._fill_trash(items, gen), quiet=True)
+
+    def _starred_changed(self):
+        if self.path == places.STARRED:
+            self.show_trash()
+        self.view().viewport().update()
 
     def _fill_trash(self, items, gen):
-        if gen != self._trash_gen or not self.is_trash():
+        if gen != self._trash_gen or not self.is_listing():
             return
         text = self.search_edit.text().strip().lower() if self.search_bar.isVisible() else ""
         if text:
@@ -316,6 +355,8 @@ class Pane(QWidget):
         self.search_model.clear_results()
         locations = {p: os.path.dirname(o) if o else "(unknown)" for p, o in items}
         self._add_trash_rows([p for p, _ in items], locations, gen, sel)
+        if not self.is_trash():
+            return
         if self._trash_watch is None:
             self._trash_watch = QFileSystemWatcher(self)
             self._trash_watch.directoryChanged.connect(self._trash_changed)
@@ -326,7 +367,7 @@ class Pane(QWidget):
 
     def _add_trash_rows(self, paths, locations, gen, sel):
         # in chunks, so a trash with tens of thousands of items doesn't block the window
-        if gen != self._trash_gen or not self.is_trash():
+        if gen != self._trash_gen or not self.is_listing():
             return
         self.search_model.add_paths(paths[:1000], locations)
         if paths[1000:]:
@@ -450,7 +491,7 @@ class Pane(QWidget):
             self._restore(entry)
 
     def go_up(self):
-        if self.is_overview():
+        if self.is_overview() or self.is_virtual():
             return
         parent = os.path.dirname(self.path)
         if parent != self.path:
@@ -460,7 +501,7 @@ class Pane(QWidget):
         if self.is_overview():
             self.overview.refresh()
             return
-        if self.is_trash():
+        if self.is_listing():
             self.show_trash()
             return
         for p in self.all_paths():
@@ -484,10 +525,10 @@ class Pane(QWidget):
         if self.is_overview():
             self.empty.hide()
             return
-        if self.in_search and self.is_trash():
-            text = "" if self.search_model.rowCount() else (
-                "No matches in the trash" if self.search_bar.isVisible() and self.search_edit.text().strip()
-                else "Trash is empty")
+        if self.in_search and self.is_listing():
+            searching = self.search_bar.isVisible() and self.search_edit.text().strip()
+            empty = "Trash is empty" if self.is_trash() else places.EMPTY_TEXT[self.path]
+            text = "" if self.search_model.rowCount() else ("No matches" if searching else empty)
         elif self.in_search:
             n = self.search_model.rowCount()
             text = "No results" if n == 0 and not (self.search_thread and self.search_thread.isRunning()) else ""
@@ -526,7 +567,7 @@ class Pane(QWidget):
         if refocus:
             self.view().setFocus()
         self.path_changed.emit()
-        if self.is_trash():
+        if self.is_listing():
             self.show_trash()
 
     def _stop_search(self):
@@ -558,7 +599,7 @@ class Pane(QWidget):
             self._record_search()
         else:
             self._unrecord_search()
-        if self.is_trash():  # filter the combined trash list by name
+        if self.is_listing():  # filter the combined trash / Starred / Recent list by name
             self.show_trash()
             return
         if not text:
@@ -571,14 +612,15 @@ class Pane(QWidget):
                 self.tree.setRootIndex(root)
             self._update_empty()
             return
-        if self.search_sub.isChecked():
+        contents = can_search_contents() and self.search_contents.isChecked()
+        if self.search_sub.isChecked() or contents:
             if not self.in_search:
                 self.in_search = True
                 self._attach(self.search_model)
                 self.grid.setRootIndex(self.search_model.index(-1, -1))
                 self.tree.setRootIndex(self.search_model.index(-1, -1))
             self.search_model.clear_results()
-            t = SearchThread(self.path, text, self.win.show_hidden, self)
+            t = SearchThread(self.path, text, self.win.show_hidden, self, contents=contents)
             t.found.connect(self.search_model.add_paths)
             t.found.connect(lambda *_: self._try_select())
             t.found.connect(self._update_empty)
@@ -709,6 +751,8 @@ class Pane(QWidget):
     def title(self):
         if self.is_overview():
             return OVERVIEW_TITLE
+        if self.is_listing() and not (self.search_bar.isVisible() and self.search_edit.text().strip()):
+            return "Trash" if self.is_trash() else places.title(self.path)
         if self.in_search:
             return f"Search: {self.search_edit.text()}"
         return os.path.basename(self.path.rstrip("/")) or "/"
@@ -898,6 +942,10 @@ class MainWindow(QMainWindow):
         A("Quit", "Ctrl+Q", QApplication.quit, menu=fm)
 
         em = menu.addMenu("Edit")
+        self.a_undo = A("Undo", "Ctrl+Z", lambda: undo.undo(self), ["edit-undo"], menu=em)
+        undo.signals.changed.connect(self._sync_undo)
+        self._sync_undo()
+        em.addSeparator()
         A("Cut", "Ctrl+X", lambda: self.clip(True), ["edit-cut"], menu=em)
         A("Copy", "Ctrl+C", lambda: self.clip(False), ["edit-copy"], menu=em)
         A("Paste", "Ctrl+V", lambda: self.paste(), ["edit-paste"], menu=em)
@@ -957,6 +1005,11 @@ class MainWindow(QMainWindow):
             self, util.APP_NAME, f"<b>{util.APP_NAME}</b> {__version__}<br>"
                                  "A lightweight image-gallery-oriented file manager."), menu=menu)
 
+    def _sync_undo(self):
+        what = undo.label()
+        self.a_undo.setText(f"Undo {what}" if what else "Undo")
+        self.a_undo.setEnabled(bool(what))
+
     # -- tabs
     def pane(self):
         return self.tabs.currentWidget()
@@ -1003,7 +1056,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"{pane.title()} — {util.APP_NAME}")
         self.a_back.setEnabled(bool(pane.back_stack))
         self.a_fwd.setEnabled(bool(pane.fwd_stack))
-        self.a_up.setEnabled(not pane.is_overview() and pane.path != "/")
+        self.a_up.setEnabled(not pane.is_overview() and not pane.is_virtual() and pane.path != "/")
         self._sync_view_btn()
         self.sync_zoom_slider()
         vol = QStorageInfo(pane.dir) if pane.dir else None
@@ -1216,6 +1269,7 @@ class MainWindow(QMainWindow):
             return
         dirs = [p for p in paths if os.path.isdir(p)]
         files = [p for p in paths if not os.path.isdir(p)]
+        places.add_recent(files)
         if dirs:
             if len(dirs) == 1 and not new_tab and not files:
                 pane.set_path(dirs[0])
@@ -1325,6 +1379,9 @@ class MainWindow(QMainWindow):
     def build_menu(self, pane, paths):
         m = QMenu(self)
         cur = pane.path
+        if not paths and pane.is_virtual():
+            m.addAction("Select All", lambda: pane.view().selectAll())
+            return m
         if not paths:
             m.addAction(icon("folder-new"), "New Folder…", self.new_folder)
             nd = m.addMenu(icon("document-new"), "New Document")
@@ -1356,6 +1413,7 @@ class MainWindow(QMainWindow):
             m.addAction(icon("view-refresh"), "Generate Previews Recursively", lambda: self.build_previews(cur))
             if util.in_trash(os.path.join(cur, "x")):
                 m.addAction(icon("user-trash"), "Empty Trash", self.empty_trash)
+            sharing.add_scripts_menu(m, [], cur, self.navigate)
             m.addSeparator()
             m.addAction(icon("document-properties"), "Properties", lambda: self.properties([cur]))
             return m
@@ -1374,6 +1432,8 @@ class MainWindow(QMainWindow):
         if is_dir or all(os.path.isdir(p) for p in paths):
             m.addAction(icon("tab-new"), "Open in New Tab", lambda: [self.new_tab(p, activate=False) for p in paths])
             m.addAction("Open in New Window", lambda: open_window(paths))
+        if is_dir:
+            sharing.add_open_folder_menu(m, single, lambda: dialogs.OpenWithDialog(self, paths).exec())
         if any(util.is_image(p) for p in paths):
             imgs = [p for p in paths if util.is_image(p)]
             m.addAction(icon("image-x-generic"), "View Images" if len(imgs) > 1 else "View Image",
@@ -1404,16 +1464,23 @@ class MainWindow(QMainWindow):
         cp.addAction("Copy Name", lambda: self.copy_text([os.path.basename(p) for p in paths]))
         cp.addAction("Copy URI", lambda: self.copy_text([util.file_uri(p) for p in paths]))
 
+        starred = all(places.is_starred(p) for p in paths)
+        m.addAction(icon("non-starred-symbolic", "non-starred") if starred else icon("starred-symbolic", "starred"),
+                    "Unstar" if starred else "Star", lambda: places.set_starred(paths, not starred))
+
+        here = pane.dir   # None in Starred / Recent: no "… Here" there
         lm = m.addMenu(icon("emblem-symbolic-link", "insert-link"), "Links && Shortcuts")
-        lm.addAction("Create Symbolic Link Here", lambda: self.make_links(paths, cur, "sym"))
-        lm.addAction("Create Relative Symbolic Link Here", lambda: self.make_links(paths, cur, "rel"))
-        if all(os.path.isfile(p) and not os.path.islink(p) for p in paths):
-            lm.addAction("Create Hard Link Here", lambda: self.make_links(paths, cur, "hard"))
+        if here:
+            lm.addAction("Create Symbolic Link Here", lambda: self.make_links(paths, here, "sym"))
+            lm.addAction("Create Relative Symbolic Link Here", lambda: self.make_links(paths, here, "rel"))
+        if here and all(os.path.isfile(p) and not os.path.islink(p) for p in paths):
+            lm.addAction("Create Hard Link Here", lambda: self.make_links(paths, here, "hard"))
         lm.addAction("Create Symbolic Link In…", lambda: self.make_links(paths, None, "sym"))
         lm.addSeparator()
         desktop = util.xdg_user_dir("DESKTOP")
         lm.addAction("Send Link to Desktop", lambda: self.make_links(paths, desktop, "sym"))
-        lm.addAction("Create Desktop Shortcut (.desktop) Here", lambda: self.make_links(paths, cur, "desktop"))
+        if here:
+            lm.addAction("Create Desktop Shortcut (.desktop) Here", lambda: self.make_links(paths, here, "desktop"))
         lm.addAction("Send Shortcut (.desktop) to Desktop", lambda: self.make_links(paths, desktop, "desktop"))
         if any(os.path.islink(p) for p in paths):
             lm.addSeparator()
@@ -1455,6 +1522,11 @@ class MainWindow(QMainWindow):
             self._folder_style_menu(m, folders)
         if is_dir and single in self.thumbs.covers:
             m.addAction("Reset Folder Cover", lambda: self.thumbs.set_cover(single, None))
+        sharing.add_send_to_menu(m, paths)
+        if is_dir and sharing.can_share():
+            m.addAction(icon("folder-remote", "network-workgroup"), "Network Sharing…",
+                        lambda: sharing.share_dialog(self, single))
+        sharing.add_scripts_menu(m, paths, here, self.navigate)
         if is_dir:
             m.addAction("Regenerate Preview", lambda: self.thumbs.invalidate(single))
             m.addAction(icon("view-refresh"), "Generate Previews Recursively",
@@ -1539,7 +1611,8 @@ class MainWindow(QMainWindow):
             md = QGuiApplication.clipboard().mimeData()
             if md is not None and md.hasImage():
                 dst = util.unique_path(target, "Pasted image.png", "num")
-                QGuiApplication.clipboard().image().save(dst, "PNG")
+                if QGuiApplication.clipboard().image().save(dst, "PNG"):
+                    undo.record("create", "Paste", [dst])
                 self.pane().select_later(dst)
             return
         if as_link:
@@ -1590,7 +1663,7 @@ class MainWindow(QMainWindow):
     def duplicate(self, paths):
         if paths:
             fileops.start_ops(self, [("copy", p, util.unique_path(os.path.dirname(p), os.path.basename(p)))
-                                     for p in paths], "Duplicating")
+                                     for p in paths], "Duplicating", undo_label="Duplicate")
 
     def new_folder(self):
         cur = self.cur_dir()
@@ -1602,6 +1675,7 @@ class MainWindow(QMainWindow):
             p = os.path.join(cur, name.strip())
             try:
                 os.makedirs(p)
+                undo.record("create", "New Folder", [p])
                 self.pane().select_later(p)
             except PermissionError:
                 admin.retry_as_admin(self, "New Folder", f"You don't have permission to create folders in “{cur}”.",
@@ -1627,6 +1701,7 @@ class MainWindow(QMainWindow):
                     shutil.copyfile(template, p)
                 else:
                     open(p, "x").close()
+                undo.record("create", "New File", [p])
                 self.pane().select_later(p)
             except PermissionError:
                 admin.retry_as_admin(
@@ -1662,6 +1737,7 @@ class MainWindow(QMainWindow):
             if err:
                 QMessageBox.warning(self, "Rename", err)
             else:
+                undo.record("rename", "Rename", [(paths[0], target)])
                 renamed()
 
     def trash_paths(self, paths):
@@ -1671,19 +1747,23 @@ class MainWindow(QMainWindow):
             self.delete_paths(paths)
             return
         paths = list(paths)
+        trashed = []
 
         def work(task):
             failed = []
             for i, p in enumerate(paths):
-                task.check()
+                if task.cancelled:
+                    break   # items already moved stay in the trash (and can be undone)
                 task.report(i, len(paths), f"{i:,} of {len(paths):,} — {os.path.basename(p)}")
                 try:
                     util.trash(p)
+                    trashed.append(p)
                 except OSError as e:
                     failed.append((p, str(e)))
-            return failed
+            return None if task.cancelled else failed
 
         def done(failed):
+            undo.record("trash", "Move to Trash", trashed)
             self.sidebar.refresh()
             if failed:
                 r = QMessageBox.question(
@@ -1778,6 +1858,8 @@ class MainWindow(QMainWindow):
                 errors.append(f"{os.path.basename(p)}: {e}")
         if errors:
             QMessageBox.warning(self, "Create Link", "\n".join(errors))
+
+        undo.record("create", "Create Link", made)
 
         def finish(_ok=True):
             done = made + [fileops.plan_path(pl) for pl in denied if os.path.lexists(fileops.plan_path(pl))]
@@ -1945,7 +2027,9 @@ def location_arg(arg):
     scheme = arg.split(":", 1)[0].lower() if is_uri(arg) else ""
     if scheme == "trash":
         return str(util.TRASH_DIR / "files")
-    if scheme in ("computer", "x-nautilus-desktop", "other-locations", "recent"):
+    if scheme in ("recent", "starred"):
+        return places.RECENT if scheme == "recent" else places.STARRED
+    if scheme in ("computer", "x-nautilus-desktop", "other-locations"):
         return OVERVIEW
     if is_uri(arg):
         return arg  # smb://, sftp://, … are mounted through gvfs by open_location
