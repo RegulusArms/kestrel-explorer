@@ -438,7 +438,7 @@ class BookmarkCard(Card):
         if self.local:
             if os.path.isdir(self.target):
                 fi = QFileInfo(self.target)
-                pm = self.thumbs.get(self.target, fi.lastModified().toSecsSinceEpoch(), True, 128)
+                pm = self.thumbs.folder_pixmap(self.target, fi.lastModified().toSecsSinceEpoch(), 128)
                 if pm is not None:
                     self.pic.setPixmap(self.thumbs.scaled(pm, 128))
                     return

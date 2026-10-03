@@ -1450,6 +1450,9 @@ class MainWindow(QMainWindow):
             im.addAction("Use as Folder Cover", lambda: self.thumbs.set_cover(os.path.dirname(single), single))
             im.addAction("Copy Image to Clipboard", lambda: QGuiApplication.clipboard().setImage(
                 __import__("PyQt6.QtGui", fromlist=["QImage"]).QImage(single)))
+        folders = [p for p in paths if os.path.isdir(p)]
+        if folders and len(folders) == len(paths):
+            self._folder_style_menu(m, folders)
         if is_dir and single in self.thumbs.covers:
             m.addAction("Reset Folder Cover", lambda: self.thumbs.set_cover(single, None))
         if is_dir:
@@ -1463,6 +1466,25 @@ class MainWindow(QMainWindow):
         m.addSeparator()
         m.addAction(icon("document-properties"), "Properties", lambda: self.properties(paths))
         return m
+
+    def _folder_style_menu(self, m, folders):
+        """Folder Colour submenu and the Show Image Previews switch for one or more folders."""
+        t = self.thumbs
+        current = {t.custom_color(f) for f in folders}
+        cm = m.addMenu(icon("preferences-color", "applications-graphics"), "Folder Colour")
+        for name, color in thumbs.FOLDER_COLORS:
+            a = cm.addAction(thumbs.color_swatch(color), name, lambda c=color: t.set_folder_color(folders, c))
+            a.setCheckable(True)
+            a.setChecked(current == {color})
+        cm.addSeparator()
+        a = cm.addAction(thumbs.color_swatch(t.folder_color), "Default", lambda: t.set_folder_color(folders, None))
+        a.setCheckable(True)
+        a.setChecked(current == {None})
+        on = all(t.previews_for(f) for f in folders)
+        a = m.addAction("Show Image Previews", lambda: t.set_folder_previews(folders, not on))
+        a.setCheckable(True)
+        a.setChecked(on)
+        a.setToolTip("Show a mosaic of the images inside on this folder's icon")
 
     # -- file actions
     def reveal(self, path):

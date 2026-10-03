@@ -290,6 +290,11 @@ class PropertiesDialog(QDialog):
         icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         icon.setPixmap(util.icon_for_path(self.path).pixmap(96, 96))
         form.addRow(icon)
+        if self.single and os.path.isdir(self.path) and thumbs.manager() is not None:
+            t = thumbs.manager()
+            pm = t.folder_pixmap(self.path, os.stat(self.path).st_mtime, 128)
+            if pm is not None:
+                icon.setPixmap(t.scaled(pm, 128))
         if self.single and (util.is_image(self.path) or util.is_video(self.path)):
             st = os.stat(self.path)
             self._run(lambda: thumbs.file_thumb(self.path, st.st_mtime, 128),
@@ -319,6 +324,8 @@ class PropertiesDialog(QDialog):
             form.addRow("Accessed:", _sel_label(_fmt_time(st.st_atime)))
             form.addRow("Changed:", _sel_label(_fmt_time(st.st_ctime) + "  (metadata)"))
             form.addRow("Inode / links:", _sel_label(f"{st.st_ino} / {st.st_nlink}  (device {st.st_dev})"))
+            if is_dir:
+                self._folder_style_rows(form)
             if os.path.isfile(self.path):
                 app = util.default_app(self.path)
                 row = QHBoxLayout()
@@ -352,6 +359,35 @@ class PropertiesDialog(QDialog):
                 f"{vol.rootPath()} ({bytes(vol.fileSystemType()).decode()}) — "
                 f"{util.human_size(vol.bytesAvailable())} free of {util.human_size(vol.bytesTotal())}"))
         return w
+
+    def _folder_style_rows(self, form):
+        """Folder colour and image previews for this folder (also in the folder's right-click menu)."""
+        t = thumbs.manager()
+        if t is None:
+            return
+        self.style_color = QComboBox()
+        self.style_color.addItem(thumbs.color_swatch(t.folder_color), "Default", "")
+        for name, color in thumbs.FOLDER_COLORS:
+            self.style_color.addItem(thumbs.color_swatch(color), name, color)
+        cur = t.custom_color(self.path) or ""
+        if cur and self.style_color.findData(cur) < 0:
+            self.style_color.addItem(thumbs.color_swatch(cur), f"Custom ({cur})", cur)
+        self.style_color.setCurrentIndex(max(0, self.style_color.findData(cur)))
+        form.addRow("Folder colour:", self.style_color)
+        self.style_previews = QCheckBox("Show image previews on this folder's icon")
+        self.style_previews.setChecked(t.previews_for(self.path))
+        form.addRow("", self.style_previews)
+
+    def _apply_folder_style(self):
+        t = thumbs.manager()
+        if t is None or getattr(self, "style_color", None) is None:
+            return
+        color = self.style_color.currentData() or None
+        if color != t.custom_color(self.path):
+            t.set_folder_color([self.path], color)
+        on = self.style_previews.isChecked()
+        if on != t.previews_for(self.path):
+            t.set_folder_previews([self.path], on)
 
     def _show_dir_size(self, res):
         size, files, dirs = res
@@ -672,6 +708,7 @@ class PropertiesDialog(QDialog):
 
     def _apply(self):
         if self.single:
+            self._apply_folder_style()   # before a rename: styles are kept by path
             if hasattr(self, "perm_boxes"):
                 m = self._mode()
                 if m != self.orig_mode:

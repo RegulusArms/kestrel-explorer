@@ -62,13 +62,12 @@ class FSModel(QFileSystemModel):
     def _thumb(self, index):
         fi = self.fileInfo(index)
         path = fi.absoluteFilePath()
-        is_dir = fi.isDir()
-        if is_dir:
-            if not self.folder_previews:
-                return None
-        elif not (util.is_image(path) or util.is_video(path)):
+        mtime = fi.lastModified().toSecsSinceEpoch()
+        if fi.isDir():
+            return self.thumbs.folder_pixmap(path, mtime, self.thumb_size, self.folder_previews)
+        if not (util.is_image(path) or util.is_video(path)):
             return None
-        return self.thumbs.get(path, fi.lastModified().toSecsSinceEpoch(), is_dir, self.thumb_size, fi.size())
+        return self.thumbs.get(path, mtime, False, self.thumb_size, fi.size())
 
     def _plain_icon(self, index):
         fi = self.fileInfo(index)
@@ -158,8 +157,10 @@ class SearchModel(QStandardItemModel):
             path = item.data(PathRole)
             is_dir, mtime, size = item.data(Qt.ItemDataRole.UserRole + 52)
             pm = None
-            if (is_dir and self.folder_previews) or util.is_image(path) or util.is_video(path):
-                pm = self.thumbs.get(path, mtime, is_dir, self.thumb_size, size)
+            if is_dir:
+                pm = self.thumbs.folder_pixmap(path, mtime, self.thumb_size, self.folder_previews)
+            elif util.is_image(path) or util.is_video(path):
+                pm = self.thumbs.get(path, mtime, False, self.thumb_size, size)
             if role == ThumbRole:
                 return pm
             return QIcon(pm) if pm is not None else util.icon_for_path(path, is_dir)
@@ -712,8 +713,10 @@ class InfoPanel(QScrollArea):
         is_dir = fi.isDir()
         size = max(160, min(self.viewport().width() - 24, 512))
         pm = None
-        if (is_dir and self.folder_previews) or util.is_image(path) or util.is_video(path):
-            pm = self.thumbs.get(path, fi.lastModified().toSecsSinceEpoch(), is_dir, 512, fi.size())
+        if is_dir:
+            pm = self.thumbs.folder_pixmap(path, fi.lastModified().toSecsSinceEpoch(), 512, self.folder_previews)
+        elif util.is_image(path) or util.is_video(path):
+            pm = self.thumbs.get(path, fi.lastModified().toSecsSinceEpoch(), False, 512, fi.size())
         if pm is not None:
             self.preview.setPixmap(self.thumbs.scaled(pm, size))
         else:

@@ -22,6 +22,12 @@ from . import util
 FLAVORS = {128: "normal", 256: "large", 512: "x-large"}
 COVER_NAMES = ("cover", "folder", ".cover", ".folder", "front", "poster")
 COVERS_FILE = util.CONFIG_DIR / "covers.json"
+STYLES_FILE = util.CONFIG_DIR / "folder_styles.json"   # per-folder {"color": "#rrggbb", "previews": false}
+
+# colours offered for folder icons (right-click a folder → Folder Colour, or its Properties)
+FOLDER_COLORS = [("Red", "#e01b24"), ("Orange", "#ff7800"), ("Yellow", "#f6d32d"), ("Green", "#33d17a"),
+                 ("Teal", "#2aa198"), ("Blue", "#3584e4"), ("Purple", "#9141ac"), ("Pink", "#e66ba5"),
+                 ("Brown", "#986a44"), ("Grey", "#77767b")]
 
 
 def bucket_for(size):
@@ -243,6 +249,9 @@ def compose_folder(images, size, color, videos=()):
     body = QRectF(m, m + s * 0.19, s - 2 * m, s * 0.75)
     p.setBrush(front)
     p.drawRoundedRect(body, s * 0.06, s * 0.06)
+    if not images:  # a plain folder in this colour (no previews)
+        p.end()
+        return canvas
     # mosaic
     inner = body.adjusted(s * 0.035, s * 0.035, -s * 0.035, -s * 0.035)
     clip = QPainterPath()
@@ -362,6 +371,27 @@ def purge_thumbnails(include_shared=False):
     return files, size
 
 
+_manager = None
+
+
+def manager():
+    """The app's ThumbnailManager (the first one created)."""
+    return _manager
+
+
+def color_swatch(color, size=16):
+    """A small rounded square of `color` for menus and lists."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(QColor(0, 0, 0, 80))
+    p.setBrush(QColor(color))
+    p.drawRoundedRect(QRectF(0.5, 0.5, size - 1, size - 1), 3, 3)
+    p.end()
+    return QIcon(pm)
+
+
 class _Signals(QObject):
     done = pyqtSignal(object, str, object)  # key, path, QImage|None
 
@@ -392,6 +422,8 @@ class ThumbnailManager(QObject):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        global _manager
+        _manager = _manager or self
         # Keep the pools small: decoding releases the GIL, but every thread still
         # competes with the UI thread for it between C++ calls.
         self.pool = QThreadPool(self)
@@ -414,6 +446,8 @@ class ThumbnailManager(QObject):
         self.folder_order = "name"
         self.folder_color = "#d9652f"
         self.covers = self._load_covers()
+        self.styles = self._load_json(STYLES_FILE)
+        self._plain = {}   # (color, size) -> QPixmap of a plain folder
         self._prio = 0
         self._scaled = OrderedDict()
 
@@ -423,6 +457,70 @@ class ThumbnailManager(QObject):
             return json.loads(COVERS_FILE.read_text())
         except Exception:
             return {}
+
+    @staticmethod
+    def _load_json(path):
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            return {}
+
+    # -- per-folder style: colour and previews on/off
+    def custom_color(self, folder):
+        """The colour chosen for this folder, or None for the default."""
+        return self.styles.get(folder, {}).get("color")
+
+    def color_for(self, folder):
+        return self.custom_color(folder) or self.folder_color
+
+    def previews_for(self, folder):
+        """False if image previews are turned off for this folder."""
+        return self.styles.get(folder, {}).get("previews", True)
+
+    def _set_style(self, folders, key, value):
+        for f in folders:
+            st = dict(self.styles.get(f, {}))
+            if value is None:
+                st.pop(key, None)
+            else:
+                st[key] = value
+            if st:
+                self.styles[f] = st
+            else:
+                self.styles.pop(f, None)
+        try:
+            STYLES_FILE.parent.mkdir(parents=True, exist_ok=True)
+            STYLES_FILE.write_text(json.dumps(self.styles, indent=1))
+        except OSError:
+            pass
+        for f in folders:
+            self.invalidate(f)
+
+    def set_folder_color(self, folders, color):
+        """color "#rrggbb", or None for the default."""
+        self._set_style(folders, "color", color)
+
+    def set_folder_previews(self, folders, on):
+        self._set_style(folders, "previews", None if on else False)
+
+    def plain_folder(self, color, size):
+        """A plain folder icon in `color` (cached; cheap enough to draw on the UI thread)."""
+        k = (color, bucket_for(size))
+        pm = self._plain.get(k)
+        if pm is None:
+            pm = self._plain[k] = QPixmap.fromImage(compose_folder([], k[1], color))
+        return pm
+
+    def folder_pixmap(self, path, mtime, size, previews=True):
+        """What to draw for a folder: its preview mosaic (in its colour), a plain folder in its custom colour while
+        there is no mosaic, or None for the theme's folder icon. previews=False skips the mosaic (e.g. when folder
+        previews are switched off globally)."""
+        if previews and self.previews_for(path):
+            pm = self.get(path, mtime, True, size)
+            if pm is not None:
+                return pm
+        color = self.custom_color(path)
+        return self.plain_folder(color, size) if color else None
 
     def set_cover(self, folder, image):
         if image:
@@ -437,7 +535,7 @@ class ThumbnailManager(QObject):
     def key(self, path, mtime, is_dir, size):
         b = bucket_for(size)
         if is_dir:
-            return ("d", b, path, int(mtime), self.folder_count, self.folder_order, self.folder_color,
+            return ("d", b, path, int(mtime), self.folder_count, self.folder_order, self.color_for(path),
                     self.covers.get(path, ""))
         return ("f", b, path, int(mtime))
 
@@ -457,7 +555,7 @@ class ThumbnailManager(QObject):
             self.pending.add(k)
             self._prio += 1
             opts = {"count": self.folder_count, "order": self.folder_order,
-                    "color": self.folder_color, "cover": self.covers.get(path)}
+                    "color": self.color_for(path), "cover": self.covers.get(path)}
             job = _Job(k, path, mtime, is_dir, bucket_for(size), opts, self.signals)
             (self.dir_pool if is_dir else self.pool).start(job, self._prio)
             self.batch_total += 1
@@ -564,6 +662,8 @@ class RecursiveBuilder(QThread):
         self.opts = {"count": manager.folder_count, "order": manager.folder_order,
                      "color": manager.folder_color}
         self.covers = dict(manager.covers)
+        self.colors = {f: st["color"] for f, st in manager.styles.items() if st.get("color")}
+        self.no_previews = {f for f, st in manager.styles.items() if st.get("previews") is False}
         self.done = self.total = 0
         self.scanning = True
         self.current = root
@@ -589,7 +689,8 @@ class RecursiveBuilder(QThread):
                 return
             st = os.stat(path)
             if kind == "d":
-                folder_thumb(path, st.st_mtime, self.size, dict(self.opts, cover=self.covers.get(path)))
+                folder_thumb(path, st.st_mtime, self.size, dict(self.opts, cover=self.covers.get(path),
+                                                                color=self.colors.get(path, self.opts["color"])))
             elif st.st_size <= self.max_bytes or util.is_video(path):
                 file_thumb(path, st.st_mtime, self.size)
                 if self.size != 128:  # mosaic tiles use the small size
@@ -625,7 +726,7 @@ class RecursiveBuilder(QThread):
                     if not f.startswith(".") and os.path.splitext(f)[1].lower() in exts:
                         if not submit(("f", os.path.join(root, f))):
                             break
-                if self.stop or not submit(("d", root)):
+                if self.stop or (root not in self.no_previews and not submit(("d", root))):
                     break
                 self._emit()
             with self._lock:
