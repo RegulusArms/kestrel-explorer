@@ -31,6 +31,7 @@ XML = """
     <method name="Kept"><arg type="s" name="Messages" direction="out"/></method>
     <method name="UndoPush"><arg type="s" name="Op" direction="in"/></method>
     <method name="UndoPop"><arg type="s" name="Op" direction="out"/></method>
+    <method name="Handoff"><arg type="s" name="Request" direction="in"/><arg type="s" name="Flight" direction="out"/></method>
     <signal name="Broadcast"><arg type="s" name="Flight"/><arg type="s" name="Message"/></signal>
   </interface>
 </node>
@@ -76,6 +77,22 @@ def run_tower(argv):
                 out = _compact(undo.pop())
                 undo_changed(conn)
             invocation.return_value(GLib.Variant("(s)", (out,)))
+            return
+        if method == "Handoff":   # a new Kestrel's folders, for the flight whose window was used last
+            best, best_active = "", -1.0
+            for name, msgs in kept.items():
+                w = msgs.get("windows") or {}
+                if name in flights and int(w.get("count", 0)) > 0 and float(w.get("active", 0)) > best_active:
+                    best, best_active = name, float(w.get("active", 0))
+            if best:
+                try:
+                    msg = json.loads(params.unpack()[0])
+                except ValueError:
+                    msg = {}
+                msg = dict(msg if isinstance(msg, dict) else {}, type="open", flight=best)
+                conn.emit_signal(None, PATH, IFACE, "Broadcast", GLib.Variant("(ss)", (conn.get_unique_name(),
+                                                                                       _compact(msg))))
+            invocation.return_value(GLib.Variant("(s)", (best,)))
             return
         if method == "Flights":
             out = [dict(info, flight=name) for name, info in flights.items()]
@@ -133,6 +150,25 @@ def run_tower(argv):
 
 
 # ---------------------------------------------------------------- a flight's radio
+
+def hand_off(folders, select=()):
+    """Preferences → "Open folders from other apps as tabs": give folders to the Kestrel whose window was used last
+    (it opens them as tabs, selecting select[i] in folders[i] when given, and comes to the front). Returns that
+    Kestrel's bus name, or "" if there's none (no tower, or no Kestrel with a window): then open our own window."""
+    Gio, GLib = util.Gio, getattr(util, "GLib", None)
+    if not Gio:
+        return ""
+    token = os.environ.get("XDG_ACTIVATION_TOKEN") or os.environ.get("DESKTOP_STARTUP_ID") or ""
+    req = {"folders": list(folders), "select": list(select), "token": token}
+    try:
+        conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        # no tower, no answer within a moment: open our own window
+        r = conn.call_sync(NAME, PATH, IFACE, "Handoff", GLib.Variant("(s)", (_compact(req),)),
+                           GLib.VariantType.new("(s)"), Gio.DBusCallFlags.NO_AUTO_START, 2000, None)
+        return r.unpack()[0]
+    except Exception:
+        return ""
+
 
 class Radio(QObject):
     # a change from another flight ("from": its name), or our own ("own": True); {"type": "left"} when a flight has gone

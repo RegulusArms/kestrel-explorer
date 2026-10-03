@@ -3,15 +3,15 @@ import os
 import shutil
 import sys
 
-from PyQt6.QtCore import QDir, QEvent, QFileSystemWatcher, QItemSelectionModel, QMimeData, QSettings, QSize, QStorageInfo, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QDateTime, QDir, QEvent, QFileSystemWatcher, QItemSelectionModel, QMimeData, QSettings, QSize, QStorageInfo, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QGuiApplication, QKeySequence
 from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QHBoxLayout, QHeaderView,
                              QInputDialog, QLabel, QLineEdit, QListView, QMainWindow, QMenu, QMessageBox,
                              QProgressBar, QSlider, QSplitter, QStackedWidget, QTabWidget, QToolBar, QToolButton, QTreeView,
                              QVBoxLayout, QWidget)
 
-from . import (__version__, admin, animate, archive, archive_ui, atc, dialogs, fileops, fm1, places, sharing, thumbs, undo,
-               util, uwp)
+from . import (__version__, admin, animate, archive, archive_ui, atc, dialogs, env, fileops, fm1, places, sharing, thumbs,
+               undo, util, uwp)
 from .overview import OVERVIEW, OVERVIEW_TITLE, OverviewPage, is_uri, mount_uri
 from .viewer import ImageViewer
 from .widgets import (FSModel, GridDelegate, InfoPanel, PathBar, PathRole, SearchModel, SearchThread, Sidebar,
@@ -2009,6 +2009,7 @@ class MainWindow(QMainWindow):
             v.close()
         if self in WINDOWS:
             WINDOWS.remove(self)
+        report_windows()
         super().closeEvent(ev)
 
     def _close_when_idle(self):
@@ -2060,7 +2061,22 @@ def on_atc(msg):
                     p.refresh()
     if msg.get("own"):
         return   # the rest was already applied where it was changed
-    if kind == "settings":
+    if kind == "open" and msg.get("flight") == atc.radio().flight():
+        # folders another Kestrel handed over (open_in_tabs)
+        folders = [f for f in msg.get("folders") or [] if isinstance(f, str)]
+        select = [f if isinstance(f, str) else "" for f in msg.get("select") or []]
+        if not folders:
+            return
+        use_token(msg.get("token") or "")
+        w = recent_window()
+        if w is not None:
+            open_as_tabs(w, folders, select)
+        else:   # our last window closed in the meantime
+            w = open_window(folders[:1])
+            open_as_tabs(w, folders[1:], select[1:])
+            if w.pane() is not None and select[:1] and select[0]:
+                w.pane().select_later(select[0])
+    elif kind == "settings":
         _settings.sync()
         apply_preferences()
     elif kind == "starred":
@@ -2095,6 +2111,73 @@ def location_arg(arg):
     return os.path.abspath(os.path.expanduser(arg))
 
 
+# ---- Preferences → "Open folders from other apps as tabs in an open Kestrel window"
+
+_last_active = None      # the window used most recently
+_last_active_ms = 0
+
+
+def report_windows():
+    """For the tower's Handoff: whether we have windows, and when one was last used."""
+    atc.announce("windows", keep=True, count=len(WINDOWS), active=float(_last_active_ms))
+
+
+def _window_focused(win):
+    global _last_active, _last_active_ms
+    for w in WINDOWS:
+        if win is not None and w.windowHandle() is win:
+            _last_active, _last_active_ms = w, QDateTime.currentMSecsSinceEpoch()
+            report_windows()
+
+
+def open_in_tabs():
+    # never from a conda environment the user activated: the Kestrel taking over may run in a different one
+    return _settings.value("open_in_tabs", False, type=bool) and not env.explicit_conda_env()
+
+
+def recent_window():
+    if _last_active is not None and _last_active in WINDOWS:
+        return _last_active
+    return WINDOWS[-1] if WINDOWS else None
+
+
+def use_token(token):
+    # the launcher's activation token: without it GNOME (Wayland) won't let the window come to the front
+    if token:
+        os.environ["XDG_ACTIVATION_TOKEN"] = token
+        os.environ["DESKTOP_STARTUP_ID"] = token
+
+
+def open_as_tabs(w, folders, select):
+    """Folders as new tabs (selecting select[i] in folders[i] when given); the first becomes current."""
+    first = w.tabs.count()
+    for i, folder in enumerate(folders):
+        item = select[i] if i < len(select) else ""
+        if not item:
+            w.open_location(folder, new_tab=True)
+        else:
+            pane = w.new_tab(folder, activate=False)
+            if pane is not None:
+                pane.select_later(item)
+    if w.tabs.count() > first:
+        w.tabs.setCurrentIndex(first)
+        w.pane().view().setFocus()
+    w.setWindowState(w.windowState() & ~Qt.WindowState.WindowMinimized)
+    w.raise_()
+    w.activateWindow()
+
+
+def tabs_instead(folders, select):
+    """True if the folders went to an open window as tabs: one of ours, or another Kestrel's (through the tower)."""
+    if not open_in_tabs():
+        return False
+    w = recent_window()
+    if w is not None:
+        open_as_tabs(w, folders, select)
+        return True
+    return bool(atc.hand_off(folders, select))
+
+
 def handle_fm1(method, uris, startup_id=""):
     """A request to the org.freedesktop.FileManager1 service (see fm1.py), e.g. a browser's "Show in folder"."""
     paths = [p for p in (util.uri_to_path(u) for u in uris) if p]
@@ -2109,6 +2192,8 @@ def handle_fm1(method, uris, startup_id=""):
         w.properties(paths)
         return
     if method == "ShowFolders":
+        if tabs_instead(paths, []):
+            return
         w = open_window(paths)
     else:
         # ShowItems: each item's folder in a tab, with the item selected, scrolled to and focused (folders too:
@@ -2116,6 +2201,8 @@ def handle_fm1(method, uris, startup_id=""):
         groups = {}
         for p in paths:
             groups.setdefault(os.path.dirname(p.rstrip("/")) or "/", []).append(p)
+        if tabs_instead(list(groups), [items[0] for items in groups.values()]):
+            return
         w = open_window([next(iter(groups))])
         for i, (folder, items) in enumerate(groups.items()):
             pane = w.pane() if i == 0 else w.new_tab(folder, activate=False)
@@ -2132,6 +2219,7 @@ def open_window(paths):
     w = MainWindow(paths, _thumbs, _settings)
     WINDOWS.append(w)
     w.show()
+    report_windows()
     return w
 
 
@@ -2164,6 +2252,10 @@ def main(argv=None):
     apply_thumb_settings(_thumbs, _settings)
     paths = [location_arg(a) for a in argv[1:] if not a.startswith("-")]
     service = "--dbus-service" in argv[1:]
+    paths = [p for p in paths if p]
+    if not service and paths and open_in_tabs() and atc.hand_off(paths):
+        return 0   # an open Kestrel window took the folders as tabs
+    app.focusWindowChanged.connect(_window_focused)
     atc.radio().heard.connect(on_atc)
     atc.radio().start()
     fm1.start(handle_fm1, on_lost=app.quit if service else None)

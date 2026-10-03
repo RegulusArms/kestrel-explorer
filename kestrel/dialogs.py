@@ -1067,6 +1067,10 @@ class PreferencesDialog(QDialog):
         self.shared_undo = QCheckBox("Share undo between all Kestrel windows")
         self.shared_undo.setChecked(settings.value("shared_undo", False, type=bool))
         self.shared_undo.setToolTip("On: Ctrl+Z in any Kestrel window undoes the newest action from any of them.\nOff: each Kestrel undoes only what was done in it.")
+        self.open_in_tabs = QCheckBox("Open folders from other apps as tabs in an open Kestrel window")
+        self.open_in_tabs.setChecked(settings.value("open_in_tabs", False, type=bool))
+        self.open_in_tabs.setToolTip("On: a folder opened from another app (or with “Show in folder”) becomes a tab in "
+                                     "the Kestrel window you used last.\nOff: it opens in a new window.")
         form.addRow("Images in folder previews:", self.count)
         form.addRow("Folder preview picks:", self.order)
         form.addRow("Folder colour:", self.color_btn)
@@ -1079,6 +1083,7 @@ class PreferencesDialog(QDialog):
         form.addRow(self.play_gifs)
         form.addRow(self.play_webm)
         form.addRow(self.shared_undo)
+        form.addRow(self.open_in_tabs)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self._save)
         bb.rejected.connect(self.reject)
@@ -1145,6 +1150,7 @@ class PreferencesDialog(QDialog):
         s.setValue("play_gifs", self.play_gifs.isChecked())
         s.setValue("play_webm", self.play_webm.isChecked())
         s.setValue("shared_undo", self.shared_undo.isChecked())
+        s.setValue("open_in_tabs", self.open_in_tabs.isChecked())
         self.accept()
 
 
