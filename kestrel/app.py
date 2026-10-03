@@ -42,6 +42,7 @@ class Pane(QWidget):
         self.path = None
         self.in_search = False
         self.search_thread = None
+        self._search_recorded = False  # the folder as it was before the active search is on back_stack
         self._pending_select = None
         self._trash_gen = 0          # bumps on every combined-trash reload, so stale loads are dropped
         self._trash_watch = None     # QFileSystemWatcher on every trash files/ folder while showing the trash
@@ -63,7 +64,7 @@ class Pane(QWidget):
         close = QToolButton()
         close.setIcon(icon("window-close-symbolic", "window-close"))
         close.setAutoRaise(True)
-        close.clicked.connect(self.close_search)
+        close.clicked.connect(lambda: self.close_search())
         sl.addWidget(self.search_edit, 1)
         sl.addWidget(self.search_sub)
         sl.addWidget(close)
@@ -247,11 +248,11 @@ class Pane(QWidget):
     # -- navigation
     def set_path(self, path, record=True, select=None):
         if path == OVERVIEW:
-            if self.in_search or self.search_bar.isVisible():
-                self.close_search(refocus=False)
             if record and self.path and self.path != OVERVIEW:
-                self.back_stack.append(self.path)
+                self.back_stack.append(self._snapshot(OVERVIEW))
                 self.fwd_stack.clear()
+            if self.in_search or self.search_bar.isVisible():
+                self.close_search(refocus=False, navigating=True)
             self.path = OVERVIEW
             self.view().clearSelection()
             self.stack.setCurrentWidget(self.overview)
@@ -267,12 +268,13 @@ class Pane(QWidget):
         if not os.access(path, os.R_OK | os.X_OK):
             QMessageBox.warning(self, "Permission denied", f"You don't have permission to open “{path}”.")
             return False
-        if self.in_search or self.search_bar.isVisible():
-            self.close_search(refocus=False)
         prev = self.path
-        if record and prev and prev != path:
-            self.back_stack.append(prev)
+        searching = self.search_bar.isVisible() and self.search_edit.text().strip()
+        if record and prev and (prev != path or searching):
+            self.back_stack.append(self._snapshot(path))
             self.fwd_stack.clear()
+        if self.in_search or self.search_bar.isVisible():
+            self.close_search(refocus=False, navigating=True)
         self.path = path
         self.stack.setCurrentWidget(self.mode_view)
         self.thumbs.cancel_pending()
@@ -280,6 +282,7 @@ class Pane(QWidget):
         root = self.model.setRootPath(path)
         self.grid.setRootIndex(root)
         self.tree.setRootIndex(root)
+        self.view().selectionModel().clear()  # drop the previous folder's selection and current item
         self._pending_select = select or (prev if prev and os.path.dirname(prev) == path else None)
         QTimer.singleShot(0, self._try_select)
         self.grid.scrollToTop()
@@ -331,6 +334,7 @@ class Pane(QWidget):
             return
         if sel:
             self.select_paths([p for p in sel if p in self.search_model.rows])
+        self._try_select()
         self._update_empty()
         if self.win.pane() is self:
             self.win.update_status()
@@ -353,10 +357,10 @@ class Pane(QWidget):
             QTimer.singleShot(30, self._try_select)
 
     def _try_select(self):
-        if not self._pending_select or self.in_search or self.is_overview():
+        if not self._pending_select or self.is_overview():
             return
-        idx = self.model.index(self._pending_select)
-        if idx.isValid():
+        idx = self._index_for(self._pending_select)
+        if idx is not None and idx.isValid():
             self.select_paths([self._pending_select])
             self._pending_select = None
 
@@ -387,15 +391,52 @@ class Pane(QWidget):
             return item.index() if item else None
         return self.model.index(p)
 
+    def _snapshot(self, dest=None, search=True):
+        """History entry for the current location: the item to refocus on returning (the folder that
+        leads to dest, else the current item) and, if search, the active search."""
+        if self.is_overview():
+            return {"path": OVERVIEW}
+        focus = None
+        if dest and dest != OVERVIEW:
+            if self.in_search:
+                focus = dest if dest in self.search_model.rows else None
+            elif dest.startswith(self.path.rstrip("/") + "/"):
+                focus = os.path.join(self.path, os.path.relpath(dest, self.path).split(os.sep)[0])
+        if not focus:
+            cur = self.current_path()  # the view's current index can be left over from a previous folder
+            if cur and (cur in self.search_model.rows if self.in_search else os.path.dirname(cur) == self.path):
+                focus = cur
+        text = self.search_edit.text().strip() if search and self.search_bar.isVisible() else ""
+        return {"path": self.path, "focus": focus,
+                "search": (text, self.search_sub.isChecked()) if text else None}
+
+    def _restore(self, entry):
+        if not self.set_path(entry["path"], record=False, select=entry.get("focus")):
+            return
+        if entry.get("search"):
+            text, recursive = entry["search"]
+            self.search_sub.blockSignals(True)
+            self.search_sub.setChecked(recursive)
+            self.search_sub.blockSignals(False)
+            self.search_edit.blockSignals(True)
+            self.search_edit.setText(text)
+            self.search_edit.blockSignals(False)
+            self.search_bar.show()
+            self._search_recorded = True  # its folder is already in the history
+            self._do_search()
+            self.path_changed.emit()
+
     def go_back(self):
         if self.back_stack:
-            self.fwd_stack.append(self.path)
-            self.set_path(self.back_stack.pop(), record=False)
+            entry = self.back_stack.pop()
+            self.fwd_stack.append(self._snapshot(entry["path"]))
+            self._restore(entry)
 
     def go_forward(self):
         if self.fwd_stack:
-            self.back_stack.append(self.path)
-            self.set_path(self.fwd_stack.pop(), record=False)
+            entry = self.fwd_stack.pop()
+            self.back_stack.append(self._snapshot(entry["path"]))
+            self._restore(entry)
 
     def go_up(self):
         if self.is_overview():
@@ -454,7 +495,10 @@ class Pane(QWidget):
         self.search_edit.setFocus()
         self.search_edit.selectAll()
 
-    def close_search(self, refocus=True):
+    def close_search(self, refocus=True, navigating=False):
+        if not navigating:
+            self._unrecord_search()  # a cancelled search leaves no step in the history
+        self._search_recorded = False
         self.search_edit.blockSignals(True)
         self.search_edit.clear()
         self.search_edit.blockSignals(False)
@@ -480,9 +524,29 @@ class Pane(QWidget):
             self.search_thread.wait(2000)
             self.search_thread = None
 
+    def _record_search(self):
+        """A search is its own step in the history: Back from it returns to the plain folder."""
+        if not self._search_recorded:
+            self._search_recorded = True
+            self.back_stack.append(self._snapshot(search=False))
+            self.fwd_stack.clear()
+            self.path_changed.emit()
+
+    def _unrecord_search(self):
+        if self._search_recorded:
+            self._search_recorded = False
+            top = self.back_stack[-1] if self.back_stack else None
+            if top and top["path"] == self.path and not top.get("search"):
+                self.back_stack.pop()
+            self.path_changed.emit()
+
     def _do_search(self):
         text = self.search_edit.text().strip()
         self._stop_search()
+        if text:
+            self._record_search()
+        else:
+            self._unrecord_search()
         if self.is_trash():  # filter the combined trash list by name
             self.show_trash()
             return
@@ -505,6 +569,7 @@ class Pane(QWidget):
             self.search_model.clear_results()
             t = SearchThread(self.path, text, self.win.show_hidden, self)
             t.found.connect(self.search_model.add_paths)
+            t.found.connect(lambda *_: self._try_select())
             t.found.connect(self._update_empty)
             t.finished.connect(self._update_empty)
             t.finished.connect(lambda: self.win.update_status())
