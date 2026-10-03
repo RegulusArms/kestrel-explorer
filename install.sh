@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Install Kestrel Explorer for the current user (command: kes).
 #   ./install.sh                        install launcher + app menu entry
-#   ./install.sh --default              also make it the default app for opening folders
+#   ./install.sh --default              also make it the default app for opening folders and the trash
+#                                       (and offer to put it in the dock in place of GNOME Files)
+#   ./install.sh --dock                 put it in the dock in place of GNOME Files (without asking)
 #   ./install.sh --install-recommended  also install the recommended packages (RAW/HEIC previews, network, drives…)
 #   ./install.sh --uninstall
-# --default and --install-recommended can be combined.
+# --default, --dock and --install-recommended can be combined.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$HOME/.local/bin/kes"
@@ -24,17 +26,44 @@ RECOMMENDED=(libglib2.0-bin xdg-utils gvfs gvfs-backends udisks2 qt6-image-forma
 
 # MIME types for folders: inode/directory, plus the older alias some apps still ask for
 FOLDER_TYPES=(inode/directory x-directory/normal)
+# trash:/// (the dock's Trash icon, `gio open trash:///`)
+TRASH_TYPE=x-scheme-handler/trash
+# What --default and --dock replaced, so --uninstall can put it back
+STATE="$HOME/.config/kestrel-explorer/install-state"
+# The system's gsettings (an Anaconda copy earlier on PATH can't see the desktop's settings)
+GSETTINGS=/usr/bin/gsettings
 
-DEFAULT=0 WITH_RECOMMENDED=0 UNINSTALL=0
+DEFAULT=0 DOCK=0 WITH_RECOMMENDED=0 UNINSTALL=0
 for arg in "$@"; do
     case "$arg" in
         --default) DEFAULT=1 ;;
+        --dock) DOCK=1 ;;
         --install-recommended) WITH_RECOMMENDED=1 ;;
         --uninstall) UNINSTALL=1 ;;
-        -h|--help) sed -n '2,7s/^# \{0,1\}//p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,10s/^# \{0,1\}//p' "$0"; exit 0 ;;
         *) echo "Unknown option: $arg (see ./install.sh --help)" >&2; exit 2 ;;
     esac
 done
+
+default_for() {   # the default app for a MIME type or URL scheme, as GNOME sees it (GIO; xdg-mime gets schemes wrong)
+    if [[ -x /usr/bin/gio ]]; then
+        /usr/bin/gio mime "$1" 2>/dev/null | sed -n '1s/^Default application for .*: //p'
+    else
+        xdg-mime query default "$1" 2>/dev/null
+    fi
+}
+state_get() { sed -n "s/^$1=//p" "$STATE" 2>/dev/null | tail -1; }
+state_set() {
+    mkdir -p "$(dirname "$STATE")"
+    { grep -v "^$1=" "$STATE" 2>/dev/null || true; echo "$1=$2"; } > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+}
+dock_favorites() { [[ -x "$GSETTINGS" ]] && "$GSETTINGS" get org.gnome.shell favorite-apps 2>/dev/null; }
+dock_replace() {   # dock_replace OLD.desktop NEW.desktop: swap one pinned app for another, in place
+    local fav
+    fav="$(dock_favorites)" || return 1
+    [[ "$fav" == *"'$1'"* && "$fav" != *"'$2'"* ]] || return 1
+    "$GSETTINGS" set org.gnome.shell favorite-apps "${fav//"'$1'"/"'$2'"}"
+}
 
 reload_dbus() {   # make the session bus re-read its service files
     gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
@@ -48,6 +77,14 @@ if (( UNINSTALL )); then
             xdg-mime default org.gnome.Nautilus.desktop "$mt"
         fi
     done
+    if [[ "$(default_for "$TRASH_TYPE")" =~ ^(kestrel-explorer|folder-explorer)\.desktop$ ]]; then
+        prev="$(state_get trash_handler)"
+        xdg-mime default "${prev:-org.gnome.Nautilus.desktop}" "$TRASH_TYPE"
+    fi
+    if [[ "$(state_get dock)" == swapped ]] && dock_replace kestrel-explorer.desktop org.gnome.Nautilus.desktop; then
+        echo "Put GNOME Files back in the dock."
+    fi
+    rm -f "$STATE"
     if grep -qs -- "--dbus-service" "$FM1_SERVICE"; then
         rm -f "$FM1_SERVICE"
         reload_dbus
@@ -93,7 +130,7 @@ Exec=$BIN %U
 Icon=folder
 Terminal=false
 Categories=System;FileTools;FileManager;Viewer;
-MimeType=inode/directory;x-directory/normal;
+MimeType=inode/directory;x-directory/normal;x-scheme-handler/trash;
 StartupWMClass=kestrel-explorer
 Actions=new-window;
 
@@ -120,6 +157,30 @@ if (( DEFAULT )); then
     else
         echo "Warning: couldn't make Kestrel the default folder handler; xdg-mime reports:" \
              "$(xdg-mime query default inode/directory)" >&2
+    fi
+    # trash:/// too, remembering what had it (to put back on --uninstall)
+    prev="$(default_for "$TRASH_TYPE")"
+    if [[ -n "$prev" && "$prev" != kestrel-explorer.desktop ]]; then
+        state_set trash_handler "$prev"
+    fi
+    xdg-mime default kestrel-explorer.desktop "$TRASH_TYPE"
+    if [[ "$(default_for "$TRASH_TYPE")" == kestrel-explorer.desktop ]]; then
+        echo "Set as the trash handler (trash:///)${prev:+, replacing $prev}."
+    fi
+    # offer the dock swap when asked interactively (--dock does it without asking)
+    if (( ! DOCK )) && [[ -t 0 ]] && [[ "$(dock_favorites)" == *"'org.gnome.Nautilus.desktop'"* ]]; then
+        read -r -p "Replace GNOME Files in the dock with Kestrel Explorer? [y/N] " answer
+        [[ "$answer" =~ ^[Yy] ]] && DOCK=1
+    fi
+fi
+if (( DOCK )); then
+    if dock_replace org.gnome.Nautilus.desktop kestrel-explorer.desktop; then
+        state_set dock swapped
+        echo "Kestrel Explorer is now in the dock in place of GNOME Files."
+    elif [[ "$(dock_favorites)" == *"'kestrel-explorer.desktop'"* ]]; then
+        echo "Kestrel Explorer is already in the dock."
+    else
+        echo "GNOME Files isn't pinned in the dock, so nothing to replace (pin Kestrel from the app grid instead)."
     fi
 fi
 echo "Installed. Launch 'Kestrel Explorer' from the app grid or run: kes [path]"
