@@ -312,6 +312,26 @@ Move to Trash itself doesn't run as administrator: if an item can't be trashed, 
 | `kestrel/uwp.py` | Integration with the UWP wallpaper manager (over D-Bus and the `uwp` command) |
 | `pyproject.toml` | PyPI packaging metadata (not ready for release yet — see [PACKAGING.md](PACKAGING.md)) |
 
+## Performance: Python vs C++
+
+Kestrel Explorer exists in two versions with the same features: the original [Python/PyQt6 version](.) and the [C++/Qt 6 port](../kes-c). They share settings, bookmarks and caches, so you can switch between them.
+
+Both were tested on the same generated data: 600 JPEGs at 1600×1200, 150 folders of 4 images, a tree of 50,000 files, and 20,000 small files plus 250 MB. Each test ran 3 times with empty caches, on a 32-thread machine with the data on a RAM disk. Times are medians.
+
+| Test | Python | C++ | C++ speed-up |
+|---|---|---|---|
+| Startup (launch to window shown) | 0.38 s | 0.18 s | 2.1× faster |
+| Open a 600-image folder (visible thumbnails ready) | 0.29 s | 0.23 s | 1.3× faster |
+| Thumbnail all 600 images ("Generate Previews") | 2.29 s | 2.13 s | 1.1× faster |
+| Build 150 folder mosaics | 3.06 s | 2.78 s | 1.1× faster |
+| Recursive search over 50,000 files | 0.21 s | 0.15 s | 1.4× faster |
+| Copy 20,000 small files + 5 × 50 MB | 1.75 s | 0.98 s | 1.8× faster |
+| Read EXIF / AI metadata for 400 images | 0.95 s | 0.024 s | about 40× faster |
+| Peak memory (startup / folder open) | 105 / 119 MB | 65 / 79 MB | about 40 MB less |
+| Peak memory (background jobs) | 73–81 MB | 35–39 MB | about half |
+
+The largest gains are in work the Python version does in Python itself: reading metadata, copying files and starting up. Thumbnails are only about 10% faster, because both versions decode images with the same Qt C++ code, which the Python version already runs in parallel.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

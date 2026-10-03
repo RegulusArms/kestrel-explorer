@@ -30,8 +30,9 @@ env/
 *.swo
 *~
 
-# Claude Code per-user settings (shared .claude/settings.json is fine to commit)
-.claude/settings.local.json
+# Claude Code
+.claude/
+CLAUDE.md
 
 # OS clutter
 .DS_Store
