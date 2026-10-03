@@ -50,6 +50,8 @@ The packaging setup for PyPI is in place (`pyproject.toml`), but **Kestrel is no
 
 Package names are for Ubuntu (tested on 26.04). Everything else Kestrel uses is in the Python standard library.
 
+**Anaconda / conda:** if `conda init` put Anaconda first on your PATH, Kestrel still uses the system's programs and libraries (gsettings, gio, ffmpeg, xz…), because Anaconda's copies don't match the desktop (its `gsettings` can't see your real settings, for example). Anaconda's folders are moved to the end of the search paths at startup. If you start Kestrel from an environment you activated yourself (`conda activate myenv`; anything but the auto-activated `base`), the environment is left exactly as it is.
+
 **Required**
 
 | Package | Used for |
