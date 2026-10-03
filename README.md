@@ -17,6 +17,8 @@ A lightweight file manager for Ubuntu, written in Python and PyQt6. It is built 
 kes ~/Pictures                   # once installed
 ```
 
+`--default` also makes Kestrel answer "Show in folder" / "Open containing folder" from browsers and other apps. Those don't use the default folder app: they call the `org.freedesktop.FileManager1` D-Bus service, which GNOME Files normally provides. The installer adds a per-user D-Bus activation file so Kestrel provides it instead, and closes GNOME Files' background service so it lets go. If you open GNOME Files later while no Kestrel window is open, it takes the service back until it quits.
+
 It uses the system Python (`/usr/bin/python3`), not a virtualenv or conda Python. `install.sh` installs the required packages and lists any recommended ones that are missing; add `--install-recommended` to install those too. The options can be combined, for example `./install.sh --install-recommended --default`.
 
 ### Updating and reinstalling

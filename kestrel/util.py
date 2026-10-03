@@ -501,7 +501,7 @@ def ensure_desktop_entry():
             "Comment=Browse files and image galleries with folder previews\n"
             f"Exec={launcher} %U\nIcon=folder\nTerminal=false\n"
             "Categories=System;FileTools;FileManager;Viewer;\n"
-            f"MimeType=inode/directory;\nStartupWMClass={APP_ID}\n")
+            f"MimeType=inode/directory;x-directory/normal;\nStartupWMClass={APP_ID}\n")
     except OSError:
         pass
 

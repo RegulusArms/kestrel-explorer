@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QHBoxLa
                              QProgressBar, QSlider, QSplitter, QStackedWidget, QTabWidget, QToolBar, QToolButton, QTreeView,
                              QVBoxLayout, QWidget)
 
-from . import __version__, admin, archive, archive_ui, dialogs, fileops, thumbs, util, uwp
+from . import __version__, admin, archive, archive_ui, dialogs, fileops, fm1, thumbs, util, uwp
 from .overview import OVERVIEW, OVERVIEW_TITLE, OverviewPage, is_uri, mount_uri
 from .viewer import ImageViewer
 from .widgets import (FSModel, GridDelegate, InfoPanel, PathBar, PathRole, SearchModel, SearchThread, Sidebar)
@@ -384,6 +384,17 @@ class Pane(QWidget):
         if first is not None:
             sm.setCurrentIndex(first, SEL.NoUpdate)
             self.view().scrollTo(first)
+            # large folders are laid out in batches, so the item may not have its final position yet: scroll again
+            # once layout has caught up (unless the user has moved on to another item)
+            target = first.siblingAtColumn(0).data(PathRole)
+            for ms in (50, 250, 700):
+                QTimer.singleShot(ms, lambda t=target: self._scroll_to_current(t))
+
+    def _scroll_to_current(self, path):
+        idx = self._index_for(path)
+        cur = self.view().currentIndex()
+        if idx is not None and idx.isValid() and cur.isValid() and cur.siblingAtColumn(0) == idx.siblingAtColumn(0):
+            self.view().scrollTo(idx)
 
     def _index_for(self, p):
         if self.in_search:
@@ -1904,6 +1915,54 @@ def apply_thumb_settings(t, s):
     t.max_file_mb = int(s.value("thumb_max_mb", 200))
 
 
+def location_arg(arg):
+    """A command-line argument (as passed by xdg-open, the file chooser or GNOME) as a location for open_location:
+    a local path, OVERVIEW, or a network URI to mount. None if it can't be opened."""
+    if arg.startswith("file:"):
+        return util.uri_to_path(arg) or None
+    scheme = arg.split(":", 1)[0].lower() if is_uri(arg) else ""
+    if scheme == "trash":
+        return str(util.TRASH_DIR / "files")
+    if scheme in ("computer", "x-nautilus-desktop", "other-locations", "recent"):
+        return OVERVIEW
+    if is_uri(arg):
+        return arg  # smb://, sftp://, … are mounted through gvfs by open_location
+    return os.path.abspath(os.path.expanduser(arg))
+
+
+def handle_fm1(method, uris, startup_id=""):
+    """A request to the org.freedesktop.FileManager1 service (see fm1.py), e.g. a browser's "Show in folder"."""
+    paths = [p for p in (util.uri_to_path(u) for u in uris) if p]
+    if not paths:
+        return
+    if startup_id:
+        # the caller's activation token: without it GNOME (Wayland) won't let the new window take focus
+        os.environ["XDG_ACTIVATION_TOKEN"] = startup_id
+        os.environ["DESKTOP_STARTUP_ID"] = startup_id
+    if method == "ShowItemProperties":
+        w = WINDOWS[-1] if WINDOWS else open_window([os.path.dirname(paths[0])])
+        w.properties(paths)
+        return
+    if method == "ShowFolders":
+        w = open_window(paths)
+    else:
+        # ShowItems: each item's folder in a tab, with the item selected, scrolled to and focused (folders too:
+        # they're shown in their parent, not opened)
+        groups = {}
+        for p in paths:
+            groups.setdefault(os.path.dirname(p.rstrip("/")) or "/", []).append(p)
+        w = open_window([next(iter(groups))])
+        for i, (folder, items) in enumerate(groups.items()):
+            pane = w.pane() if i == 0 else w.new_tab(folder, activate=False)
+            if pane is not None:
+                pane.select_later(items[0])
+    w.raise_()
+    w.activateWindow()
+    if w.pane():
+        w.tabs.setCurrentIndex(0)
+        w.pane().view().setFocus()
+
+
 def open_window(paths):
     w = MainWindow(paths, _thumbs, _settings)
     WINDOWS.append(w)
@@ -1936,12 +1995,12 @@ def main(argv=None):
     _settings = QSettings(util.APP_ID, util.APP_ID)
     _thumbs = thumbs.ThumbnailManager()
     apply_thumb_settings(_thumbs, _settings)
-    paths = []
-    for a in argv[1:]:
-        if a.startswith("-"):
-            continue
-        if a.startswith("file://"):
-            a = util.uri_to_path(a)
-        paths.append(os.path.abspath(os.path.expanduser(a)))
-    open_window(paths)
+    paths = [location_arg(a) for a in argv[1:] if not a.startswith("-")]
+    service = "--dbus-service" in argv[1:]
+    fm1.start(handle_fm1, on_lost=app.quit if service else None)
+    if service:
+        # started by D-Bus for a "show in folder" request: no window of our own; quit if none is asked for
+        QTimer.singleShot(30_000, lambda: WINDOWS or app.quit())
+    else:
+        open_window([p for p in paths if p])
     return app.exec()
