@@ -135,11 +135,6 @@ sudo apt install python3-pyqt6 python3-pil python3-gi gir1.2-glib-2.0 libglib2.0
 - If a name already exists when copying or moving, you can replace, merge, skip or keep both.
 - Trash, permanent delete, and restoring or emptying the trash. The Trash shows everything you've deleted on every drive in one list: your home trash plus the trash folder each drive keeps for files deleted on it (`.Trash-<uid>`, the same as GNOME Files). The Location column shows where each item came from, and Restore, Delete Permanently and Empty Trash work across all of them.
 - Deleting handles read-only folders you own (common in extracted Windows archives): they're made writable and deleted.
-- **Admin session.** When an operation fails because you don't have permission, Kestrel offers **Retry as Administrator**. This covers copy, move, paste, duplicate, delete, empty trash, rename, new folder or file, links and shortcuts, and changing permissions in Properties.
-  - You enter your password once, in the normal system prompt. After that, a 🛡 **Admin** indicator shows in the status bar, and further operations that need admin rights run straight away, without asking again.
-  - The session ends when you click 🛡 Admin → **End Admin Session**, after 15 minutes without admin actions, or when Kestrel quits. ☰ → **Start Admin Session…** opens one ahead of time.
-  - Kestrel itself keeps running as you. Only the individual operations run as root, in a small helper started through `pkexec` (`kestrel/admin_helper.py`). The helper only takes requests from the Kestrel window that started it, and refuses to delete or replace `/`, top-level folders such as `/usr` or `/etc`, and home folders themselves.
-  - Batch rename, extracting archives and editing metadata don't use the admin session yet.
 - Links and shortcuts:
   - Symbolic links (absolute or relative) and hard links.
   - Link to the Desktop.
@@ -170,6 +165,11 @@ sudo apt install python3-pyqt6 python3-pil python3-gi gir1.2-glib-2.0 libglib2.0
 - Every option the format supports: program, level, method, CPU threads, password (AES-256), encrypted file names, split volumes, solid archives, rar recovery records, and extra options for the program, with a live preview of the exact command.
 - **Compress to “name.ext”** repeats your last settings in one click.
 - Progress, elapsed time and Cancel in the status bar; cancelling removes partial output.
+
+**Admin session** (details in [Admin session](#admin-session))
+- When something fails because you don't have permission (copying into `/opt`, deleting files owned by root, renaming in a system folder…), Kestrel offers **Retry as Administrator**.
+- You enter your password once. After that, a 🛡 **Admin** indicator shows in the status bar, and further operations that need admin rights run without asking again, until you end the session or it's unused for 15 minutes.
+- Kestrel itself never runs as root.
 
 Press F1 in the app for all keyboard shortcuts. Settings are in the ☰ menu under Preferences: homepage, how many images a mosaic uses, whether it picks images by name or newest first, folder colour, the thumbnail size limit, which apps open images and videos, single-click, folder previews in list view, and slideshow speed.
 
@@ -259,6 +259,38 @@ Not every tool can report real progress, so the bar shows what each one can:
 - **Creating .rar needs `rar`,** which is non-free (a trial of WinRAR's command-line tool) and not installed by default.
 - **zip volumes** made with 7-Zip are plain `.zip.001` parts, not the "spanned" zip format some Windows tools expect.
 - **Tools only report progress as described above.** A single large file in zip, or zpaq's compression phase, shows the clock rather than a percentage.
+
+## Admin session
+
+Running a whole file manager as root (`sudo kes`) is risky and mostly doesn't work on a modern desktop. Kestrel instead keeps running as you, and does only the operations that need admin rights as root.
+
+### How it works
+
+1. An operation fails with "permission denied". Kestrel lists what failed and offers **Retry as Administrator**.
+2. The first time, the normal system password prompt appears. It says something like *"Authentication is needed to run `/usr/bin/python3` as the super user"*: that's Kestrel's small helper (`kestrel/admin_helper.py`), started through `pkexec`.
+3. The helper keeps running as root in the background, and the status bar shows 🛡 **Admin**. From then on, operations that need admin rights are handed to it straight away, with no password and no extra question. Progress and ✕ Cancel work as usual.
+4. The session ends when you click 🛡 Admin → **End Admin Session**, after 15 minutes without admin actions, or when Kestrel quits. The next admin operation asks for your password again.
+
+☰ → **Start Admin Session…** opens a session ahead of time, for example before a batch of work in system folders.
+
+### What it covers
+
+| Covered | Not yet |
+|---|---|
+| Copy, move, paste, drag and drop, duplicate, Move To / Copy To | Batch rename |
+| Delete permanently and empty trash (including files owned by root in the trash) | Extracting archives into protected folders |
+| Rename (F2 and the Properties name field) | Editing metadata |
+| New folder, new empty file | |
+| Symbolic links, hard links and `.desktop` shortcuts | |
+| Changing permissions in Properties | |
+
+Move to Trash itself doesn't run as administrator: if an item can't be trashed, Kestrel offers to delete it permanently instead, and that can use the session.
+
+### Safety
+
+- **Only the Kestrel window that started the helper can talk to it.** It reads requests from a private pipe and exits as soon as that pipe closes, including if Kestrel crashes.
+- **It only accepts a fixed set of file operations,** on absolute paths. It refuses to delete or replace `/`, top-level folders (`/usr`, `/etc`, `/home`, `/var`, and any other folder directly under `/`) and home folders themselves (`/home/name`).
+- **The trade-off:** the helper runs from the Kestrel folder, which your account can edit. Anything running as you could change that file before your next admin session. That's the same level of trust as typing `sudo` in your own terminal, which is fine on a personal computer.
 
 ## Layout
 

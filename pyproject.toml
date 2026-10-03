@@ -8,13 +8,13 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "kestrel-explorer"
 dynamic = ["version"]  # from kestrel/__init__.py (__version__ "0.1.2-alpha" is published as 0.1.2a0)
-description = "A lightweight, gallery-friendly file manager for Linux with folder preview mosaics"
+description = "A lightweight, gallery-friendly file manager for Linux: folder preview mosaics, archives, metadata editing"
 readme = "README.md"
 requires-python = ">=3.11.4"  # 3.11.4 added tarfile extraction filters (used by Extract Here)
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "RegulusArms" }]
-keywords = ["file manager", "image gallery", "thumbnails", "exif", "pyqt6"]
+keywords = ["file manager", "image gallery", "thumbnails", "exif", "metadata", "archive", "7z", "rar", "zpaq", "pyqt6"]
 classifiers = [
     "Private :: Do Not Upload",
     "Development Status :: 3 - Alpha",
@@ -25,7 +25,10 @@ classifiers = [
     "Programming Language :: Python :: 3 :: Only",
     "Topic :: Desktop Environment :: File Managers",
     "Topic :: Multimedia :: Graphics :: Viewers",
+    "Topic :: System :: Archiving :: Compression",
 ]
+# Python packages only. Kestrel also uses many system programs that pip can't install (archive tools, exiftool,
+# ffmpeg, pkexec, gvfs…); see PACKAGING.md and "Dependencies" in the README.
 dependencies = [
     "PyQt6>=6.5",
     "Pillow>=9.0",
