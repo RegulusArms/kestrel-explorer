@@ -677,11 +677,26 @@ class PropertiesDialog(QDialog):
                 if m != self.orig_mode:
                     try:
                         os.chmod(self.path, m)
+                    except PermissionError:
+                        from . import admin
+                        admin.retry_as_admin(
+                            self.parent() or self, "Permissions",
+                            f"You don't have permission to change the permissions of “{os.path.basename(self.path)}”.",
+                            lambda task, p=self.path, mode=m: admin.session().call(task, "chmod", path=p, mode=mode))
                     except OSError as e:
                         QMessageBox.warning(self, "Permissions", str(e))
             new = self.name_edit.text().strip()
             if new and new != os.path.basename(self.path.rstrip("/")):
-                err = do_rename(self.path, new)
+                try:
+                    err = do_rename(self.path, new)
+                except PermissionError:
+                    from . import admin
+                    target = os.path.join(os.path.dirname(self.path), new)
+                    admin.retry_as_admin(
+                        self.parent() or self, "Rename",
+                        f"You don't have permission to rename “{os.path.basename(self.path)}”.",
+                        lambda task, p=self.path: admin.session().call(task, "rename", src=p, dst=target))
+                    err = None
                 if err:
                     QMessageBox.warning(self, "Rename", err)
                     return
@@ -707,6 +722,8 @@ def do_rename(path, new_name):
         return f"“{new_name}” already exists."
     try:
         os.rename(path, target)
+    except PermissionError:
+        raise  # callers offer to retry as administrator
     except OSError as e:
         return str(e)
     return None

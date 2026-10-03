@@ -84,7 +84,7 @@ Package names are for Ubuntu (tested on 26.04). Everything else Kestrel uses is 
 | `libimage-exiftool-perl` | The full Metadata tab, plus editing, adding and clearing metadata |
 | `ffmpeg` | Video thumbnails and video stills in folder previews (`ffmpeg` and `ffprobe`) |
 | `zfsutils-linux` | Showing a ZFS pool as one card with pool-level usage on the Overview page |
-| `pkexec` | **Delete as Administrator**, for items that contain files owned by another user such as root (usually already installed) |
+| `pkexec` | The **admin session**: retrying operations that fail with "permission denied" as administrator (usually already installed) |
 | `rar` (non-free, multiverse; a trial version of WinRAR's command-line tool) | Creating `.rar` archives (passwords, volumes, recovery records) |
 | `pbzip2` or `lbzip2`, `plzip`, `lz4` | Multi-core `.bz2` and `.lz`, and `.lz4` archives. Kestrel offers whichever are installed |
 | [UWP](https://github.com/RegulusArms/UWP) (not an apt package; install with its `install.sh`) | "Set as Wallpaper" through UWP profiles, and "Add to Selected UWP Monitor". Found as `uwp` on your PATH or in `~/.local/bin` |
@@ -134,7 +134,12 @@ sudo apt install python3-pyqt6 python3-pil python3-gi gir1.2-glib-2.0 libglib2.0
 - File operations run on background threads, so the window stays responsive even with tens of thousands of files. Copy, move, duplicate, move to trash, permanent delete, restore, empty trash, compress and extract show their status and a progress bar in the status bar at the bottom of the window, with ✕ to cancel. When several run at once, the bar shows the oldest with "+N more" (hover to see them all). Closing a window while operations are running asks whether to stop them or keep going.
 - If a name already exists when copying or moving, you can replace, merge, skip or keep both.
 - Trash, permanent delete, and restoring or emptying the trash. The Trash shows everything you've deleted on every drive in one list: your home trash plus the trash folder each drive keeps for files deleted on it (`.Trash-<uid>`, the same as GNOME Files). The Location column shows where each item came from, and Restore, Delete Permanently and Empty Trash work across all of them.
-- Deleting handles awkward permissions: read-only folders you own (common in extracted Windows archives) are made writable and deleted. Items containing files owned by another user (such as root) can be removed with **Delete as Administrator**, which asks for your password through the system prompt.
+- Deleting handles read-only folders you own (common in extracted Windows archives): they're made writable and deleted.
+- **Admin session.** When an operation fails because you don't have permission, Kestrel offers **Retry as Administrator**. This covers copy, move, paste, duplicate, delete, empty trash, rename, new folder or file, links and shortcuts, and changing permissions in Properties.
+  - You enter your password once, in the normal system prompt. After that, a 🛡 **Admin** indicator shows in the status bar, and further operations that need admin rights run straight away, without asking again.
+  - The session ends when you click 🛡 Admin → **End Admin Session**, after 15 minutes without admin actions, or when Kestrel quits. ☰ → **Start Admin Session…** opens one ahead of time.
+  - Kestrel itself keeps running as you. Only the individual operations run as root, in a small helper started through `pkexec` (`kestrel/admin_helper.py`). The helper only takes requests from the Kestrel window that started it, and refuses to delete or replace `/`, top-level folders such as `/usr` or `/etc`, and home folders themselves.
+  - Batch rename, extracting archives and editing metadata don't use the admin session yet.
 - Links and shortcuts:
   - Symbolic links (absolute or relative) and hard links.
   - Link to the Desktop.
@@ -263,7 +268,9 @@ Not every tool can report real progress, so the bar shows what each one can:
 | `kestrel/widgets.py` | File-system model, grid delegate, path bar, sidebar, info panel, search |
 | `kestrel/thumbs.py` | Background thumbnail and folder-mosaic generation and caching |
 | `kestrel/viewer.py` | Image viewer |
-| `kestrel/fileops.py` | Background tasks and the status-bar task panel; copy, move and delete (with Delete as Administrator); conflict handling; links |
+| `kestrel/fileops.py` | Background tasks and the status-bar task panel; copy, move and delete (retrying denied ones as administrator); conflict handling; links |
+| `kestrel/admin.py` | The admin session: starts the root helper once, sends it operations, the 🛡 status-bar indicator, and "Retry as Administrator" |
+| `kestrel/admin_helper.py` | The small root helper (standard library only) that performs admin-session operations |
 | `kestrel/dialogs.py` | Properties (including the metadata editor and Add Tag picker), Open With, rename, batch rename, Edit Bookmark, preferences |
 | `kestrel/metadata.py` | EXIF, AI-generation metadata, exiftool reading/editing, and the tag catalog for the Add Tag picker (the tag descriptions and "Accepts" types are AI-generated and may not be completely accurate) |
 | `kestrel/overview.py` | Overview page: drives, network locations, bookmarks |

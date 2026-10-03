@@ -2,7 +2,6 @@
 import os
 import shutil
 import stat
-import subprocess
 import time
 
 from PyQt6.QtCore import QThread, Qt, pyqtSignal
@@ -169,7 +168,7 @@ class _Ops:
     def __init__(self, task, jobs):
         self.task, self.jobs = task, jobs
         self.errors = []
-        self.denied = []   # delete jobs blocked by files another user (e.g. root) owns: (path, owner)
+        self.denied = []   # jobs that failed for lack of permission, to retry as administrator: (op, src, dst)
         self.done = self.total = 0
         self.by_count = all(op == "delete" for op, _, _ in jobs)
 
@@ -220,12 +219,8 @@ class _Ops:
                     self._copy(src, dst, merge=op == "merge_copy")
             except Cancelled:
                 raise
-            except PermissionError as e:
-                owner = _foreign_owner(src) if op == "delete" else None
-                if owner:
-                    self.denied.append((src, owner))
-                else:
-                    self.errors.append(f"{os.path.basename(src)}: {e.strerror or e}")
+            except PermissionError:
+                self.denied.append((op, src, dst))
             except Exception as e:
                 self.errors.append(f"{os.path.basename(src)}: {e}")
         return self.errors
@@ -326,50 +321,37 @@ def _make_writable(path):
     return changed
 
 
-def _foreign_owner(path):
-    """Name of another user owning something in or above `path` that blocks deleting it, else None."""
-    uid = os.getuid()
-    candidates = [os.path.dirname(path), path]
-    if os.path.isdir(path) and not os.path.islink(path):
-        for root, dirs, files in os.walk(path):
-            candidates += [os.path.join(root, n) for n in dirs + files]
-            if len(candidates) > 100000:
-                break
-    for p in candidates:
-        try:
-            owner = os.lstat(p).st_uid
-        except OSError:
-            continue
-        if owner != uid:
-            try:
-                import pwd
-                return pwd.getpwuid(owner).pw_name
-            except KeyError:
-                return f"uid {owner}"
-    return None
+_VERBS = {"delete": "deleted", "copy": "copied", "merge_copy": "copied", "move": "moved", "merge_move": "moved"}
 
 
-def delete_as_admin(parent, paths, on_done=None):
-    """rm -rf the given paths through pkexec (the system asks for an administrator password)."""
+def retry_denied_as_admin(parent, title, denied, on_done=None):
+    """Offer to redo copy/move/delete jobs that failed with "permission denied" in the admin session."""
+    from . import admin
+    verbs = sorted({_VERBS[op] for op, _, _ in denied})
+    names = "\n".join(f"• {os.path.basename(src)}" for _, src, _ in denied[:10])
+    more = f"\n…and {len(denied) - 10} more" if len(denied) > 10 else ""
+    message = (f"{len(denied)} item(s) couldn't be {' or '.join(verbs)} because you don't have permission:"
+               f"\n\n{names}{more}")
+
     def work(task):
-        task.report(0, 0, f"{len(paths):,} item(s) — waiting for authorization")
-        r = subprocess.run(["pkexec", "rm", "-rf", "--", *paths], capture_output=True, text=True)
-        if r.returncode in (126, 127):  # dialog dismissed / not authorized
-            return "Not authorized: nothing was deleted."
-        if r.returncode != 0:
-            return r.stderr.strip() or f"rm failed (exit code {r.returncode})"
-        return None
-
-    def done(err):
-        if err:
-            QMessageBox.warning(parent, "Delete as Administrator", err)
-        if on_done:
-            on_done()
-    return run_job(parent, "Deleting as administrator", work, done, cancellable=False)
+        errors = []
+        for op, src, dst in denied:
+            task.check()
+            try:
+                if op == "delete":
+                    admin.session().call(task, "delete", path=src)
+                else:
+                    admin.session().call(task, "copy" if "copy" in op else "move", src=src, dst=dst,
+                                         merge=op.startswith("merge"))
+            except admin.AdminError as e:
+                errors.append(f"{os.path.basename(src)}: {e}")
+        return errors
+    admin.retry_as_admin(parent, title, message, work, lambda _ok: on_done and on_done())
 
 
 def start_ops(parent, jobs, title, on_done=None):
-    """Copy/move/delete jobs on a thread, with progress and Cancel in the status bar."""
+    """Copy/move/delete jobs on a thread, with progress and Cancel in the status bar. Jobs that fail for lack
+    of permission can be retried as administrator."""
     if not jobs:
         return
     ops = []
@@ -378,23 +360,9 @@ def start_ops(parent, jobs, title, on_done=None):
         denied = ops[0].denied if ops else []
         if errors:
             QMessageBox.warning(parent, title, "Some items could not be processed:\n\n" + "\n".join(errors[:20]))
-        if denied and shutil.which("pkexec"):
-            owners = sorted({o for _, o in denied})
-            names = "\n".join(f"• {os.path.basename(p)}" for p, _ in denied[:10])
-            more = f"\n…and {len(denied) - 10} more" if len(denied) > 10 else ""
-            box = QMessageBox(QMessageBox.Icon.Warning, title,
-                              f"{len(denied)} item(s) couldn't be deleted because they contain files owned by "
-                              f"{', '.join(owners)}:\n\n{names}{more}\n\n"
-                              "Delete them as administrator? You'll be asked for your password.",
-                              QMessageBox.StandardButton.Cancel, parent)
-            admin = box.addButton("Delete as Administrator", QMessageBox.ButtonRole.DestructiveRole)
-            box.exec()
-            if box.clickedButton() is admin:
-                delete_as_admin(parent, [p for p, _ in denied], on_done)
-                return
-        elif denied:
-            QMessageBox.warning(parent, title, "These items contain files owned by another user and couldn't be "
-                                "deleted:\n\n" + "\n".join(p for p, _ in denied[:20]))
+        if denied and errors is not None:
+            retry_denied_as_admin(parent, title, denied, on_done)
+            return
         if on_done:
             on_done()
 
@@ -476,42 +444,49 @@ def transfer(parent, sources, dest_dir, op, on_done=None):
 
 # ---------------------------------------------------------------- links & shortcuts
 
-def make_symlink(target, dest_dir, relative=False, name=None):
-    name = name or os.path.basename(target.rstrip("/"))
-    link = util.unique_path(dest_dir, name if os.path.dirname(target) != dest_dir else f"Link to {name}", "num")
-    src = os.path.relpath(target, dest_dir) if relative else os.path.abspath(target)
-    os.symlink(src, link)
-    return link
-
-
-def make_hardlink(target, dest_dir):
-    name = os.path.basename(target)
-    link = util.unique_path(dest_dir, name if os.path.dirname(target) != dest_dir else f"{name} (hard link)", "num")
-    os.link(target, link)
-    return link
-
-
-def make_desktop_shortcut(target, dest_dir):
-    """Create a freedesktop .desktop launcher pointing to target."""
+def link_plan(kind, target, dest_dir):
+    """What creating a link of `kind` ("sym", "rel", "hard" or "desktop") to target in dest_dir means, as an
+    admin-helper request: {"op": "symlink" | "hardlink" | "write", ...}. The name is made unique."""
     name = os.path.basename(target.rstrip("/")) or target
+    same_dir = os.path.dirname(target) == dest_dir
+    if kind in ("sym", "rel"):
+        link = util.unique_path(dest_dir, f"Link to {name}" if same_dir else name, "num")
+        src = os.path.relpath(target, dest_dir) if kind == "rel" else os.path.abspath(target)
+        return {"op": "symlink", "target": src, "link": link}
+    if kind == "hard":
+        link = util.unique_path(dest_dir, f"{name} (hard link)" if same_dir else name, "num")
+        return {"op": "hardlink", "target": os.path.abspath(target), "link": link}
+    # a freedesktop .desktop launcher pointing to target
     is_dir = os.path.isdir(target)
-    executable = os.path.isfile(target) and os.access(target, os.X_OK)
-    if executable:
+    if os.path.isfile(target) and os.access(target, os.X_OK):
         body = (f"[Desktop Entry]\nType=Application\nName={name}\nExec=\"{target}\"\n"
                 f"Path={os.path.dirname(target)}\nIcon=application-x-executable\nTerminal=false\n")
     else:
-        mime = util.mime_for(target, is_dir)
-        icon = "folder" if is_dir else mime.iconName()
+        icon = "folder" if is_dir else util.mime_for(target, is_dir).iconName()
         body = f"[Desktop Entry]\nType=Link\nName={name}\nURL={util.file_uri(target)}\nIcon={icon}\n"
     path = util.unique_path(dest_dir, util.split_ext(name)[0] + ".desktop", "num")
-    with open(path, "w") as f:
-        f.write(body)
-    os.chmod(path, 0o755)
-    util.mark_trusted(path)
-    return path
+    return {"op": "write", "path": path, "text": body, "mode": 0o755}
 
 
-# ---------------------------------------------------------------- archives
+def plan_path(plan):
+    return plan.get("link") or plan.get("path")
+
+
+def make_link(plan):
+    """Carry out a link_plan() as the current user. Returns the created path."""
+    if plan["op"] == "symlink":
+        os.symlink(plan["target"], plan["link"])
+    elif plan["op"] == "hardlink":
+        os.link(plan["target"], plan["link"])
+    else:
+        with open(plan["path"], "x") as f:
+            f.write(plan["text"])
+        os.chmod(plan["path"], plan["mode"])
+        util.mark_trusted(plan["path"])
+    return plan_path(plan)
+
+
+# ---------------------------------------------------------------- misc
 
 def dir_stats(path, cancel=lambda: False):
     """(total bytes, file count, dir count) recursively, not following symlinks."""

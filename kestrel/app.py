@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QHBoxLa
                              QProgressBar, QSlider, QSplitter, QStackedWidget, QTabWidget, QToolBar, QToolButton, QTreeView,
                              QVBoxLayout, QWidget)
 
-from . import __version__, archive, archive_ui, dialogs, fileops, thumbs, util, uwp
+from . import __version__, admin, archive, archive_ui, dialogs, fileops, thumbs, util, uwp
 from .overview import OVERVIEW, OVERVIEW_TITLE, OverviewPage, is_uri, mount_uri
 from .viewer import ImageViewer
 from .widgets import (FSModel, GridDelegate, InfoPanel, PathBar, PathRole, SearchModel, SearchThread, Sidebar)
@@ -712,7 +712,9 @@ class MainWindow(QMainWindow):
             bl.addWidget(wdg)
         self.build_box.hide()
         self.task_panel = fileops.TaskPanel()  # file operations running in the background
+        self.admin_indicator = admin.Indicator()  # 🛡 while an admin session is open
         self.statusBar().addWidget(self.status_label, 1)
+        self.statusBar().addPermanentWidget(self.admin_indicator)
         self.statusBar().addPermanentWidget(self.task_panel)
         self.statusBar().addPermanentWidget(self.build_box)
         self.statusBar().addPermanentWidget(self.thumb_progress)
@@ -870,6 +872,8 @@ class MainWindow(QMainWindow):
 
         menu.addSeparator()
         A("Preferences…", "Ctrl+,", self.preferences, ["preferences-system"], menu=menu)
+        A("Start Admin Session…", None, lambda: admin.start_session(self), ["security-high", "dialog-password"],
+          menu=menu)
         A("Clear Folder Preview Cache", None, self.clear_cache, menu=menu)
         A("Delete All Thumbnails…", None, self.purge_thumbnails, ["edit-clear-all", "edit-delete"], menu=menu)
         A("Keyboard Shortcuts", "F1", self.show_shortcuts, menu=menu)
@@ -1501,6 +1505,10 @@ class MainWindow(QMainWindow):
             try:
                 os.makedirs(p)
                 self.pane().select_later(p)
+            except PermissionError:
+                admin.retry_as_admin(self, "New Folder", f"You don't have permission to create folders in “{cur}”.",
+                                     lambda task: admin.session().call(task, "mkdir", path=p),
+                                     lambda ok: ok and self.pane().select_later(p))
             except OSError as e:
                 QMessageBox.warning(self, "New Folder", str(e))
 
@@ -1522,6 +1530,12 @@ class MainWindow(QMainWindow):
                 else:
                     open(p, "x").close()
                 self.pane().select_later(p)
+            except PermissionError:
+                admin.retry_as_admin(
+                    self, "New File", f"You don't have permission to create files in “{cur}”.",
+                    lambda task: admin.session().call(task, "copyfile", src=template, dst=p) if template else
+                    admin.session().call(task, "touch", path=p),
+                    lambda ok: ok and self.pane().select_later(p))
             except OSError as e:
                 QMessageBox.warning(self, "New File", str(e))
 
@@ -1533,12 +1547,24 @@ class MainWindow(QMainWindow):
             return
         new = dialogs.ask_rename(self, paths[0])
         if new:
-            err = dialogs.do_rename(paths[0], new)
+            target = os.path.join(os.path.dirname(paths[0]), new)
+
+            def renamed(ok=True):
+                if ok:
+                    self.pane().select_later(target)
+                    QTimer.singleShot(150, self.pane()._try_select)
+            try:
+                err = dialogs.do_rename(paths[0], new)
+            except PermissionError:
+                admin.retry_as_admin(self, "Rename",
+                                     f"You don't have permission to rename “{os.path.basename(paths[0])}”.",
+                                     lambda task: admin.session().call(task, "rename", src=paths[0], dst=target),
+                                     renamed)
+                return
             if err:
                 QMessageBox.warning(self, "Rename", err)
             else:
-                self.pane().select_later(os.path.join(os.path.dirname(paths[0]), new))
-                QTimer.singleShot(150, self.pane()._try_select)
+                renamed()
 
     def trash_paths(self, paths):
         if not paths:
@@ -1578,11 +1604,12 @@ class MainWindow(QMainWindow):
         if not paths:
             return
         what = f"“{os.path.basename(paths[0])}”" if len(paths) == 1 else f"these {len(paths)} items"
-        r = QMessageBox.warning(self, "Delete Permanently",
-                                f"Permanently delete {what}?\n\nThis cannot be undone.",
-                                QMessageBox.StandardButton.Delete | QMessageBox.StandardButton.Cancel,
-                                QMessageBox.StandardButton.Cancel)
-        if r == QMessageBox.StandardButton.Delete:
+        box = QMessageBox(QMessageBox.Icon.Warning, "Delete Permanently",
+                          f"Permanently delete {what}?\n\nThis cannot be undone.", QMessageBox.StandardButton.Cancel, self)
+        delete = box.addButton("Delete", QMessageBox.ButtonRole.DestructiveRole)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        if box.clickedButton() is delete:
             def done():
                 for p in paths:
                     info = util.trash_info_path(p)
@@ -1637,24 +1664,42 @@ class MainWindow(QMainWindow):
             dest = dialogs.choose_dir(self, "Create Links In", self.cur_dir() or util.HOME)
             if not dest:
                 return
-        os.makedirs(dest, exist_ok=True)
-        made, errors = [], []
+        made, errors, denied = [], [], []
+        try:
+            os.makedirs(dest, exist_ok=True)
+        except OSError as e:
+            QMessageBox.warning(self, "Create Link", str(e))
+            return
         for p in paths:
+            plan = fileops.link_plan(kind, p, dest)
             try:
-                if kind == "hard":
-                    made.append(fileops.make_hardlink(p, dest))
-                elif kind == "desktop":
-                    made.append(fileops.make_desktop_shortcut(p, dest))
-                else:
-                    made.append(fileops.make_symlink(p, dest, relative=kind == "rel"))
+                made.append(fileops.make_link(plan))
+            except PermissionError:
+                denied.append(plan)
             except OSError as e:
                 errors.append(f"{os.path.basename(p)}: {e}")
         if errors:
             QMessageBox.warning(self, "Create Link", "\n".join(errors))
-        if made:
-            self.statusBar().showMessage(f"Created {len(made)} link(s) in {dest}", 4000)
-            if dest == self.cur_dir():
-                self.pane().select_later(made[0])
+
+        def finish(_ok=True):
+            done = made + [fileops.plan_path(pl) for pl in denied if os.path.lexists(fileops.plan_path(pl))]
+            if done:
+                self.statusBar().showMessage(f"Created {len(done)} link(s) in {dest}", 4000)
+                if dest == self.cur_dir():
+                    self.pane().select_later(done[0])
+        if denied:
+            def work(task):
+                errs = []
+                for pl in denied:
+                    try:
+                        admin.session().call(task, **pl)
+                    except admin.AdminError as e:
+                        errs.append(f"{os.path.basename(fileops.plan_path(pl))}: {e}")
+                return errs
+            admin.retry_as_admin(self, "Create Link", f"You don't have permission to create links in “{dest}”.",
+                                 work, finish)
+        else:
+            finish()
 
     def _uwp_add(self, path):
         if uwp.add_to_selected(path):
