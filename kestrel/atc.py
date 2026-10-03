@@ -29,11 +29,14 @@ XML = """
     <method name="Report"><arg type="s" name="Message" direction="in"/></method>
     <method name="Flights"><arg type="s" name="Flights" direction="out"/></method>
     <method name="Kept"><arg type="s" name="Messages" direction="out"/></method>
+    <method name="UndoPush"><arg type="s" name="Op" direction="in"/></method>
+    <method name="UndoPop"><arg type="s" name="Op" direction="out"/></method>
     <signal name="Broadcast"><arg type="s" name="Flight"/><arg type="s" name="Message"/></signal>
   </interface>
 </node>
 """
 LAND_MS = 10_000   # the tower lands this long after the last flight has left (or if none checks in)
+UNDO_MAX = 50
 
 
 def _compact(obj):
@@ -51,6 +54,14 @@ def run_tower(argv):
     node = Gio.DBusNodeInfo.new_for_xml(XML)
     flights = {}   # unique bus name -> what it said when checking in
     kept = {}      # flight -> {type: its latest "keep" message}
+    undo = []      # the shared undo history (Preferences → Share undo…), newest last
+
+    def undo_changed(conn):
+        # tell every flight what Ctrl+Z would undo now; kept, so flights checking in later know it too
+        me = conn.get_unique_name()
+        msg = {"type": "undo_changed", "label": undo[-1].get("label", "") if undo else "", "keep": True}
+        kept.setdefault(me, {})["undo_changed"] = msg
+        conn.emit_signal(None, PATH, IFACE, "Broadcast", GLib.Variant("(ss)", (me, _compact(msg))))
     land = QTimer(singleShot=True, interval=LAND_MS, timeout=app.quit)
     land.start()
 
@@ -58,6 +69,13 @@ def run_tower(argv):
         if method == "Kept":   # the current state for a flight that just checked in (e.g. the others' running tasks)
             out = [{"flight": f, "message": m} for f, msgs in kept.items() for m in msgs.values()]
             invocation.return_value(GLib.Variant("(s)", (_compact(out),)))
+            return
+        if method == "UndoPop":   # each entry is handed out once, so two windows can't undo the same thing
+            out = ""
+            if undo:
+                out = _compact(undo.pop())
+                undo_changed(conn)
+            invocation.return_value(GLib.Variant("(s)", (out,)))
             return
         if method == "Flights":
             out = [dict(info, flight=name) for name, info in flights.items()]
@@ -70,6 +88,15 @@ def run_tower(argv):
             except ValueError:
                 info = {}
             flights[sender] = info if isinstance(info, dict) else {}
+        elif method == "UndoPush":
+            try:
+                op = json.loads(arg)
+            except ValueError:
+                op = None
+            if isinstance(op, dict) and op:
+                undo.append(op)
+                del undo[:-UNDO_MAX]
+                undo_changed(conn)
         else:   # Report: pass it on to every flight (the sender ignores its own)
             flights.setdefault(sender, {})
             try:
@@ -128,6 +155,22 @@ class Radio(QObject):
             return
         self._watch = Gio.bus_watch_name(Gio.BusType.SESSION, NAME, Gio.BusNameWatcherFlags.NONE,
                                          self._appeared, self._vanished)
+
+    def tower_up(self):
+        return self._conn is not None and bool(self._tower)
+
+    def request(self, method, arg=None):
+        """Call a tower method and wait for the answer (its string result, "" if it has none); None if the tower
+        isn't up or didn't answer."""
+        if not self.tower_up():
+            return None
+        try:
+            r = self._conn.call_sync(NAME, PATH, IFACE, method,
+                                     util.GLib.Variant("(s)", (arg,)) if arg is not None else None, None,
+                                     util.Gio.DBusCallFlags.NONE, 2000, None)
+        except Exception:
+            return None
+        return r.unpack()[0] if r is not None and r.n_children() else ""
 
     def flight(self):
         """Our name on the bus ("from" in the others' messages), or "" if not connected."""

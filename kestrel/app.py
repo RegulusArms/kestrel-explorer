@@ -2046,6 +2046,7 @@ def apply_preferences():
             p.animator.clear()
             p._apply_folder_previews()
             p.view().viewport().update()
+    undo.signals.changed.emit()   # "Share undo…" may have changed what Ctrl+Z undoes
 
 
 def on_atc(msg):

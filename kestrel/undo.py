@@ -1,16 +1,18 @@
-"""Undo for file operations (Ctrl+Z), shared by every window.
+"""Undo for file operations (Ctrl+Z), shared by this Kestrel's windows (or every Kestrel's, with Preferences → Share
+undo between all Kestrel windows).
 
 Recorded: moves (drag and drop, cut/paste, Move To), renames (single and batch), Move to Trash, and items created by
 copy, paste, duplicate, New Folder / New File and links. Undoing a creation moves the new items to the trash, like
 GNOME Files, so nothing is lost by undoing. Not undoable: permanent deletes, merges into an existing folder, archive
 jobs and admin-session operations.
 """
+import json
 import os
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, QSettings, pyqtSignal
 from PyQt6.QtWidgets import QMessageBox
 
-from . import fileops, util
+from . import atc, fileops, util
 
 MAX = 50
 
@@ -20,7 +22,47 @@ class _Signals(QObject):
 
 
 signals = _Signals()
-_stack = []   # [{"kind", "label", "items"}], newest last
+_stack = []   # this Kestrel's own history: [{"kind", "label", "items"}], newest last
+_shared_label = ""   # what the tower's shared history would undo
+
+
+def _shared():
+    """Preferences → "Share undo between all Kestrel windows": the history is kept by the tower (atc.py), so Ctrl+Z
+    in any Kestrel undoes the newest action from any of them. Off (the default), or while there is no tower, each
+    Kestrel undoes only what was done in it."""
+    return QSettings(util.APP_ID, util.APP_ID).value("shared_undo", False, type=bool) and atc.radio().tower_up()
+
+
+def _to_json(op):
+    # the tower's format: {"kind", "label", "items": [[a, b], …]} (b is "" for trash and create)
+    pairs = op["items"] if op["kind"] in ("move", "rename") else [(p, "") for p in op["items"]]
+    return json.dumps({"kind": op["kind"], "label": op["label"], "items": [list(p) for p in pairs]},
+                      separators=(",", ":"), ensure_ascii=False)
+
+
+def _from_json(text):
+    o = json.loads(text)
+    pairs = [(str(p[0]), str(p[1])) for p in o.get("items", []) if isinstance(p, list) and len(p) == 2]
+    kind = str(o.get("kind", ""))
+    return {"kind": kind, "label": str(o.get("label", "")),
+            "items": pairs if kind in ("move", "rename") else [a for a, _ in pairs]}
+
+
+def _heard(msg):
+    global _shared_label
+    if msg.get("type") == "undo_changed":
+        _shared_label = str(msg.get("label") or "")
+        signals.changed.emit()
+
+
+def _reset():
+    global _shared_label
+    _shared_label = ""   # a new tower starts with an empty history
+    signals.changed.emit()
+
+
+atc.radio().heard.connect(_heard)
+atc.radio().reset.connect(_reset)
 
 
 def record(kind, label, items):
@@ -28,14 +70,19 @@ def record(kind, label, items):
     items = list(items)
     if not items:
         return
-    _stack.append({"kind": kind, "label": label, "items": items})
+    op = {"kind": kind, "label": label, "items": items}
+    if _shared() and atc.radio().request("UndoPush", _to_json(op)) is not None:
+        return   # the tower tells every window (undo_changed)
+    _stack.append(op)
     del _stack[:-MAX]
     signals.changed.emit()
 
 
 def label():
     """What Ctrl+Z would undo, e.g. "Move", or None."""
-    return _stack[-1]["label"] if _stack else None
+    if _shared() and _shared_label:
+        return _shared_label
+    return _stack[-1]["label"] if _stack else None   # also what was done here before sharing was on
 
 
 def _trashed_index():
@@ -56,9 +103,16 @@ def _trashed_index():
 
 def undo(win):
     """Undo the newest recorded operation; progress and errors show in win's status bar."""
-    if not _stack:
+    got = atc.radio().request("UndoPop") if _shared() else None
+    if got:
+        try:
+            op = _from_json(got)
+        except (ValueError, AttributeError):
+            return
+    elif _stack:
+        op = _stack.pop()
+    else:
         return
-    op = _stack.pop()
     signals.changed.emit()
     kind, items, title = op["kind"], op["items"], f"Undo {op['label']}"
 

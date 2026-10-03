@@ -1064,6 +1064,9 @@ class PreferencesDialog(QDialog):
         if not shutil.which("ffmpeg"):
             self.play_webm.setEnabled(False)
             self.play_webm.setToolTip("Needs ffmpeg:  sudo apt install ffmpeg")
+        self.shared_undo = QCheckBox("Share undo between all Kestrel windows")
+        self.shared_undo.setChecked(settings.value("shared_undo", False, type=bool))
+        self.shared_undo.setToolTip("On: Ctrl+Z in any Kestrel window undoes the newest action from any of them.\nOff: each Kestrel undoes only what was done in it.")
         form.addRow("Images in folder previews:", self.count)
         form.addRow("Folder preview picks:", self.order)
         form.addRow("Folder colour:", self.color_btn)
@@ -1075,6 +1078,7 @@ class PreferencesDialog(QDialog):
         form.addRow(self.dirs_first)
         form.addRow(self.play_gifs)
         form.addRow(self.play_webm)
+        form.addRow(self.shared_undo)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self._save)
         bb.rejected.connect(self.reject)
@@ -1140,6 +1144,7 @@ class PreferencesDialog(QDialog):
         s.setValue("slideshow_secs", self.slide.value())
         s.setValue("play_gifs", self.play_gifs.isChecked())
         s.setValue("play_webm", self.play_webm.isChecked())
+        s.setValue("shared_undo", self.shared_undo.isChecked())
         self.accept()
 
 
