@@ -608,6 +608,7 @@ class Sidebar(QListWidget):
         self.customContextMenuRequested.connect(self._menu)
         self.itemClicked.connect(self._clicked)
         self.setStyleSheet("QListWidget { background: palette(window); } QListWidget::item { padding: 3px; }")
+        util.on_palette_change(self, self.refresh)  # the headers' colour is set per item
         self._mounts = None
         self._phones = []  # phones and cameras (Gio)
         self._press_pos = None

@@ -508,6 +508,12 @@ class _Signals(QObject):
     done = pyqtSignal(object, str, object)  # key, path, QImage|None
 
 
+def follows_accent(setting):
+    """The default folder colour setting (folder_color): "accent", unset, or the old fixed default (#d9652f, which
+    Preferences used to save every time) follow the desktop's accent colour; anything else is a fixed colour."""
+    return not setting or setting == "accent" or str(setting).lower() == "#d9652f"
+
+
 # ---------------------------------------------------------------- phones and cameras
 
 def device_preview(uri, size):
@@ -602,7 +608,8 @@ class ThumbnailManager(QObject):
         self.max_file_mb = 200
         self.folder_count = 4
         self.folder_order = "name"
-        self.folder_color = "#d9652f"
+        self.folder_color = "#d9652f"  # the default colour in use (the accent's, when folder_accent)
+        self.folder_accent = True
         self.covers = self._load_covers()
         self.styles = self._load_json(STYLES_FILE)
         self._plain = {}   # (color, size) -> QPixmap of a plain folder

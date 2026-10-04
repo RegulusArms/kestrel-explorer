@@ -398,9 +398,11 @@ class Card(QFrame):
         super().__init__(parent)
         self.setObjectName("card")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setStyleSheet("""
-            QFrame#card { background: palette(base); border: 1px solid palette(midlight); border-radius: 10px; }
-            QFrame#card:hover { border: 1px solid palette(highlight); }
+        # colours from the theme (the page rebuilds its cards when the desktop's colours change)
+        self.setStyleSheet(f"""
+            QFrame#card {{ background: {util.card_color().name()}; border: 1px solid {util.card_border().name()};
+                           border-radius: 10px; }}
+            QFrame#card:hover {{ border: 1px solid palette(highlight); }}
         """)
 
     def mouseReleaseEvent(self, ev):
@@ -464,7 +466,7 @@ class DriveCard(Card):
             bar.setTextVisible(False)
             bar.setFixedHeight(8)
             color = "#c01c28" if pct >= 90 else ("#e5a50a" if pct >= 75 else "palette(highlight)")
-            bar.setStyleSheet(f"QProgressBar {{ border: none; border-radius: 4px; background: palette(midlight); }}"
+            bar.setStyleSheet(f"QProgressBar {{ border: none; border-radius: 4px; background: {util.card_border().name()}; }}"
                               f"QProgressBar::chunk {{ border-radius: 4px; background: {color}; }}")
             col.addWidget(bar)
             col.addWidget(_small(QLabel(f"{util.human_size(free)} free of {util.human_size(total)}  ({pct:.0f}% used)")))
@@ -540,6 +542,7 @@ class OverviewPage(QScrollArea):
         self.refresh_timer = QTimer(self, singleShot=True, interval=300, timeout=self.refresh)
         self.usage_timer = QTimer(self, interval=15000, timeout=self.refresh)
         self.thumbs.updated.connect(self._thumb_ready)
+        util.on_palette_change(self, self._rebuild)  # a light/dark switch: cards and icons in the new colours
         if util.Gio:
             self.monitor = util.Gio.VolumeMonitor.get()
             for sig in ("volume-added", "volume-removed", "volume-changed", "mount-added", "mount-removed",

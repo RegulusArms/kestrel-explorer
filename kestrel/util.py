@@ -261,6 +261,94 @@ def setup_icon_theme():
     QIcon.setFallbackThemeName("Adwaita")
 
 
+# ---------------------------------------------------------------- theme
+# Colours derived from the desktop's palette, so they suit any theme, light or dark.
+
+def dark_theme():
+    """The window background is dark."""
+    from PyQt6.QtGui import QGuiApplication, QPalette
+    return QGuiApplication.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
+
+def blend(a, b, t):
+    """QColor between a (t = 0) and b (t = 1)."""
+    from PyQt6.QtGui import QColor
+    return QColor.fromRgbF(a.redF() + (b.redF() - a.redF()) * t, a.greenF() + (b.greenF() - a.greenF()) * t,
+                           a.blueF() + (b.blueF() - a.blueF()) * t)
+
+
+def card_color():
+    """A card (Overview) that stands out a little from the window background: the theme's base colour when it differs
+    from the window's (most light themes); otherwise a shade towards the text."""
+    from PyQt6.QtGui import QGuiApplication, QPalette
+    pal = QGuiApplication.palette()
+    base, window = pal.color(QPalette.ColorRole.Base), pal.color(QPalette.ColorRole.Window)
+    if abs(base.lightness() - window.lightness()) >= 8:
+        return base
+    return blend(window, pal.color(QPalette.ColorRole.Text), 0.05)
+
+
+def card_border():
+    from PyQt6.QtGui import QGuiApplication, QPalette
+    pal = QGuiApplication.palette()
+    return blend(pal.color(QPalette.ColorRole.Window), pal.color(QPalette.ColorRole.Text), 0.14)
+
+
+def error_color():
+    """Red text that is readable on the window background (GNOME's error colours)."""
+    from PyQt6.QtGui import QColor
+    return QColor("#ff7b63" if dark_theme() else "#c01c28")
+
+
+def accent_color():
+    """The desktop's accent (the theme's selection colour)."""
+    from PyQt6.QtGui import QGuiApplication, QPalette
+    return QGuiApplication.palette().color(QPalette.ColorRole.Highlight)
+
+
+_palette_watcher = None
+
+
+def on_palette_change(owner, fn):
+    """Call fn whenever the desktop's colours change (a light/dark switch, another theme). Qt updates its palette, but
+    a stylesheet resolves palette(...) once and colours read earlier stay as they were: stylesheets that use
+    palette(...) are reapplied first, then fn runs. Stops when owner is deleted."""
+    global _palette_watcher
+    if _palette_watcher is None:
+        from PyQt6 import sip
+        from PyQt6.QtCore import QEvent, QTimer
+        from PyQt6.QtWidgets import QApplication, QWidget
+
+        class PaletteWatcher(QWidget):
+            """Hears the application's palette change: every widget gets ApplicationPaletteChange, this hidden one
+            included."""
+
+            def __init__(self):
+                super().__init__()
+                self.fns = []
+                self.queued = False
+
+            def event(self, ev):
+                if ev.type() == QEvent.Type.ApplicationPaletteChange and not self.queued:
+                    self.queued = True  # a theme switch can change the palette several times in a row
+                    QTimer.singleShot(0, self.apply)
+                return super().event(ev)
+
+            def apply(self):
+                self.queued = False
+                for w in QApplication.allWidgets():
+                    ss = w.styleSheet()
+                    if "palette(" in ss:
+                        w.setStyleSheet("")
+                        w.setStyleSheet(ss)
+                self.fns = [(o, f) for o, f in self.fns if not sip.isdeleted(o)]
+                for o, f in list(self.fns):
+                    if not sip.isdeleted(o):
+                        f()
+        _palette_watcher = PaletteWatcher()
+    _palette_watcher.fns.append((owner, fn))
+
+
 # ---------------------------------------------------------------- desktop integration
 
 def open_default(path):

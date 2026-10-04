@@ -2045,11 +2045,25 @@ _thumbs = None
 _settings = None
 
 
+_accent_watched = None
+
+
 def apply_thumb_settings(t, s):
+    global _accent_watched
     t.folder_count = int(s.value("folder_count", 4))
     t.folder_order = s.value("folder_order", "name")
-    t.folder_color = s.value("folder_color", "#d9652f")
+    color = s.value("folder_color", "accent")
+    t.folder_accent = thumbs.follows_accent(color)
+    t.folder_color = util.accent_color().name() if t.folder_accent else color
     t.max_file_mb = int(s.value("thumb_max_mb", 200))
+    if _accent_watched is None:  # runs before the windows' own updates, which then draw folders in the new accent
+        _accent_watched = t
+
+        def accent_changed():
+            if t.folder_accent and t.folder_color != util.accent_color().name():
+                t.folder_color = util.accent_color().name()
+                repaint_all()
+        util.on_palette_change(t, accent_changed)
 
 
 def repaint_all():
