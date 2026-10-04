@@ -194,6 +194,18 @@ def can_extract(path):
     return kind(path)[0] is not None
 
 
+NOT_ARCHIVES = (".jar", ".apk", ".xpi", ".iso", ".deb", ".rpm", ".dmg", ".vhd", ".vhdx", ".msi", ".chm",
+                ".squashfs", ".wim")
+
+
+def opens_as_archive(path):
+    """Opening it (double-click, Enter) shows Kestrel's Extract dialog: an archive whose tool is installed. Not
+    packages, disk images and apps that are archives inside (.deb, .iso, .apk…): those open with the system's app."""
+    if path.lower().endswith(NOT_ARCHIVES):
+        return False
+    return can_extract(path) and not missing_extract_tool(path)
+
+
 def missing_extract_tool(path):
     """Package to install to extract this archive, or None if a tool is available."""
     if extract_tool(path):

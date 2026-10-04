@@ -1287,6 +1287,10 @@ class MainWindow(QMainWindow):
             else:
                 for d in dirs:
                     self.new_tab(d, activate=False)
+        archives = [f for f in files if archive.opens_as_archive(f)]
+        for f in archives:
+            archive_ui.extract_dialog(self, f)  # Kestrel's own extraction, not the system's archive app
+        files = [f for f in files if f not in archives]
         images = [f for f in files if util.is_image(f)]
         videos = [f for f in files if util.is_video(f)]
         others = [f for f in files if f not in images and f not in videos]
