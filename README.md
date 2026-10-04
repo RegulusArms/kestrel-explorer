@@ -1,6 +1,6 @@
 # Kestrel Explorer
 
-**Version 0.1.2-alpha.** This is an early alpha release, so expect rough edges.
+**Version 0.1.3-alpha.** This is an early alpha release, so expect rough edges.
 
 A lightweight file manager for Ubuntu, written in Python and PyQt6. It is built mainly for browsing image galleries. Folder icons show a mosaic of the images inside them. It also covers the everyday jobs you'd do in GNOME Files.
 

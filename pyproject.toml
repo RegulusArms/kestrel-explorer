@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kestrel-explorer"
-dynamic = ["version"]  # from kestrel/__init__.py (__version__ "0.1.2-alpha" is published as 0.1.2a0)
+dynamic = ["version"]  # from kestrel/__init__.py (__version__ "0.1.3-alpha" is published as 0.1.3a0)
 description = "A lightweight, gallery-friendly file manager for Linux: folder preview mosaics, archives, metadata editing"
 readme = "README.md"
 requires-python = ">=3.11.4"  # 3.11.4 added tarfile extraction filters (used by Extract Here)
