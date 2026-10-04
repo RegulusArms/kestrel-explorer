@@ -192,7 +192,10 @@ def measure_folder(app, folder):
     t0 = time.monotonic()
     p = launch(app, folder)
     try:
-        wait_for(lambda: wanted <= thumb_files() or p.poll() is not None, 120, "thumbnails never appeared")
+        try:
+            wait_for(lambda: wanted <= thumb_files() or p.poll() is not None, 120, "thumbnails never appeared")
+        except RuntimeError:   # this app made none of them: noted in the table instead of stopping the run
+            return {"s": None, "rss_mb": peak_mb(p.pid), "n": len(thumb_files()), "all_s": None, "no_thumbs": True}
         s = time.monotonic() - t0
         count, last = len(thumb_files()), time.monotonic()
         while time.monotonic() - last < 2.0 and time.monotonic() - t0 < 180:
@@ -607,7 +610,9 @@ def tables(res, other):
     gallery_n, kes_n = med(other, "open_gallery", "n"), med("cxx", "open_gallery", "n")
     ops = {"copy": "copy files", "move_xdev": "move files to another drive", "trash": "move files to the trash"}
     untimed = [phrase for test, phrase in ops.items() if (other, test) in res and med(other, test) is None]
-    summary = {"vs": "\n".join(vs),
+    kinds = {"open_gallery": "images", "videos": "videos", "pdfs": "PDFs"}
+    no_thumbs = [kinds[t] for t in kinds if res.get((other, t)) and all(r.get("no_thumbs") for r in res[(other, t)])]
+    summary = {"vs": "\n".join(vs), "no_thumbs": no_thumbs,
                "files_n": round(gallery_n) if gallery_n else None,
                "files_all": secs(med(other, "open_gallery", "all_s")),
                "kestrel_n": round(kes_n) if kes_n else None,
@@ -642,14 +647,19 @@ def section(t1, t2, summary, runs, py_link, cxx_link, other):
     cpu, threads, version, distro = machine(other)
     label = OTHERS[other]["label"]
     owns = label + ("'" if label.endswith("s") else "'s")   # GNOME Files', Nemo's
-    if OTHERS[other]["whole_folder"]:
+    if "images" in summary["no_thumbs"]:
+        thumbs = f"{label} made no thumbnails for these images in this setup."
+    elif OTHERS[other]["whole_folder"]:
         thumbs = (f"{label} makes thumbnails for the whole folder in the background. It finished all "
                   f"{summary['files_n']} images {summary['files_all']} after launch.")
     else:
         thumbs = f"{label} made {summary['files_n']} thumbnails in all, the last {summary['files_all']} after launch."
     untimed = ""
+    if summary["no_thumbs"]:
+        untimed += (f"\n- **No thumbnails:** {label} made none for the {' or '.join(summary['no_thumbs'])} within 2 minutes "
+                    f"in this setup (a fresh home folder with its default settings), so those rows show —.")
     if summary["untimed"]:
-        untimed = (f"\n- **Not timed:** {owns} D-Bus file-operations service has no way to "
+        untimed += (f"\n- **Not timed:** {owns} D-Bus file-operations service has no way to "
                    f"{' or '.join(summary['untimed'])}, so those rows show —.")
         if "move files to the trash" in summary["untimed"]:
             untimed += " For \"Empty the trash\", the files were put in the trash with `gio trash` first."
