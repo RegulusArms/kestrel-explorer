@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installer test: --default (folders, trash:///, the file chooser), --dock, asking about the dock, and --uninstall
+# Installer test: --default (folders, trash:///, the file chooser, PATH), --dock, asking about the dock, and --uninstall
 # putting it all back. Runs ../install.sh with a throwaway HOME and a keyfile GSettings backend (never your real settings
 # or dock), with the portal definition going to a throwaway folder, and with stub `pgrep`, `sudo` and `systemctl` so it
 # can't close a running GNOME Files, install packages or restart your desktop portal. run.sh starts it on a private
@@ -43,8 +43,12 @@ fresh() {   # a new HOME where other file managers handle folders (a stand-in fo
     printf '[Desktop Entry]\nType=Application\nName=Nemo\nExec=true\nMimeType=inode/directory;\n' \
         > "$HOME/.local/share/applications/nemo.desktop"
     xdg-mime default nemo.desktop inode/directory
+    printf "alias ll='ls -l'\n" > "$HOME/.bashrc"   # the user's own line, which must stay
     (( HAS_DOCK )) && /usr/bin/gsettings set org.gnome.shell favorite-apps "$DOCK_BEFORE"
+    return 0
 }
+# what a new terminal finds as `kes` (bash reading ~/.bashrc)
+new_terminal_kes() { env -u BASH_ENV bash --norc --noprofile -c '. "$HOME/.bashrc" >/dev/null 2>&1; command -v kes'; }
 STATE_FILE() { echo "$HOME/.config/kestrel-explorer/install-state"; }
 PORTAL_CONF() { echo "$HOME/.config/xdg-desktop-portal/ubuntu-portals.conf"; }
 CHOOSER_SERVICE() { echo "$HOME/.local/share/dbus-1/services/org.freedesktop.impl.portal.desktop.kestrel.service"; }
@@ -68,11 +72,13 @@ check 'grep -q "^org.freedesktop.impl.portal.FileChooser=kestrel;" "$(PORTAL_CON
        grep -q "^org.freedesktop.impl.portal.Secret=gnome-keyring;$" "$(PORTAL_CONF)"' \
     "--default: the desktop's portals.conf picks Kestrel for the file chooser and keeps the rest"
 check 'grep -q "try-restart xdg-desktop-portal.service" "$WORK/systemctl.log"' "--default: restarts the portal"
+check '[[ "$(new_terminal_kes)" == "$HOME/.local/bin/kes" ]]' "--default: a new terminal finds kes (~/.local/bin on PATH)"
 "$INSTALL" --default --dock </dev/null >"$WORK/out2" 2>&1
 dock_check 'grep -q "already in the dock" "$WORK/out2" && [[ "$(fav)" == "$DOCK_AFTER" ]]' "running it again doesn't pin twice"
 check '[[ "$(grep -c "^trash_handler=" "$(STATE_FILE)")" == 1 && "$(grep "^trash_handler=" "$(STATE_FILE)")" == trash_handler=xfce4-file-manager.desktop ]]' \
     "running it again keeps the original trash handler"
 check '[[ "$(grep -c "FileChooser=" "$(PORTAL_CONF)")" == 1 ]]' "running it again keeps one file chooser line"
+check '[[ "$(grep -c "kestrel-explorer: ~/.local/bin on PATH" "$HOME/.bashrc")" == 1 ]]' "running it again adds PATH once"
 "$INSTALL" --uninstall >"$WORK/out3" 2>&1
 check '[[ "$(trash_handler)" == xfce4-file-manager.desktop ]]' "--uninstall: the trash handler is put back"
 check '[[ "$(folder_handler)" == nemo.desktop ]]' "--uninstall: folders open in the previous file manager again"
@@ -81,6 +87,8 @@ check '[[ ! -e "$(STATE_FILE)" && ! -e "$HOME/.local/share/applications/kestrel-
     "--uninstall: removes its files"
 check '[[ ! -e "$(PORTAL_CONF)" && ! -e "$(CHOOSER_SERVICE)" && ! -e "$WORK/portals/kestrel.portal" ]]' \
     "--uninstall: the file chooser is GNOME's again"
+check '! grep -q kestrel-explorer "$HOME/.bashrc" && [[ "$(cat "$HOME/.bashrc")" == "alias ll='"'"'ls -l'"'"'" ]]' \
+    "--uninstall: takes its PATH lines out of ~/.bashrc and keeps the user's own"
 
 fresh   # the user already has a portals.conf of their own
 mkdir -p "$(dirname "$(PORTAL_CONF)")"
