@@ -1,4 +1,4 @@
-"""Kestrel Explorer - a lightweight, gallery-friendly file manager."""
+"""Kestrel Explorer - a file manager that brings terminal tools into the window, alongside GNOME Files."""
 
 __version__ = "0.1.3-alpha"
 

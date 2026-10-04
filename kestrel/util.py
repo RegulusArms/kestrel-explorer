@@ -500,7 +500,7 @@ def ensure_desktop_entry():
         DESKTOP_ENTRY.parent.mkdir(parents=True, exist_ok=True)
         DESKTOP_ENTRY.write_text(
             f"[Desktop Entry]\nType=Application\nName={APP_NAME}\nGenericName=File Manager\n"
-            "Comment=Browse files and image galleries with folder previews\n"
+            "Comment=Manage files, with archive, admin, permission and metadata tools built in\n"
             f"Exec={launcher} %U\nIcon=folder\nTerminal=false\n"
             "Categories=System;FileTools;FileManager;Viewer;\n"
             f"MimeType=inode/directory;x-directory/normal;\nStartupWMClass={APP_ID}\n")

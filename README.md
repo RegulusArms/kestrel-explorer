@@ -2,7 +2,26 @@
 
 **Version 0.1.3-alpha.** This is an early alpha release, so expect rough edges.
 
-A lightweight file manager for Ubuntu, written in Python and PyQt6. It is built mainly for browsing image galleries. Folder icons show a mosaic of the images inside them. It also covers the everyday jobs you'd do in GNOME Files.
+A file manager for Ubuntu that's easy to pick up and puts many jobs you'd normally do in a terminal into the window. It also adds quality-of-life improvements over GNOME Files. It's written in Python with PyQt6.
+
+**Terminal jobs, in the window:**
+- **Archives:** create and extract 7z, zip, rar, zpaq and every tar format, with the options the command-line tools offer (level, method, threads, passwords, split volumes), and a preview of the exact command that will run.
+- **Admin rights only when needed:** when something fails with "permission denied", choose **Retry as Administrator** and enter your password once per session, instead of running `sudo` or a file manager as root.
+- **Permissions and links:** permissions, including setuid, setgid and the sticky bit; symbolic, relative and hard links; and MD5/SHA checksums with verification.
+- **Metadata:** view and edit EXIF, XMP and other metadata with `exiftool`, from a searchable list of tags.
+- **Search and rename:** search subfolders with wildcards or inside files, and batch rename with templates or regular expressions.
+- **Shortcuts out:** Open in Terminal or VS Code, your Nautilus scripts, and Samba network sharing.
+
+**Improvements over GNOME Files:**
+- Undo for moves, renames, Move to Trash and new files.
+- One Trash for every drive, and an Overview page of drives with usage bars.
+- Folder icons that preview the images inside, plus per-folder colours.
+- A built-in image viewer, and GIF/WebM playback in the file view.
+- Background copies with progress and Cancel in the status bar.
+- Several windows that stay in sync.
+- Faster in most measurements (see [Performance](#performance-kestrel-vs-gnome-files)).
+
+**Installs alongside GNOME Files:** Kestrel installs next to GNOME Files instead of replacing it. The two share bookmarks, thumbnails, the clipboard, the trash and Recent files, so you can use either. `./install.sh --default` makes Kestrel open folders and "Show in folder" requests, and `./install.sh --uninstall` hands them back.
 
 ## Install / run
 
@@ -106,30 +125,6 @@ sudo apt install python3-pyqt6 python3-pil python3-gi gir1.2-glib-2.0 libglib2.0
 
 ## Features
 
-**Galleries**
-- Folder icons show a 1–4 image mosaic. If a folder has no images of its own, the mosaic is taken from its subfolders.
-- A folder with only videos uses a still from the middle of each video, marked with a ▶ badge.
-- Right-click a folder → **Generate Previews Recursively** pre-builds every thumbnail and folder preview below it in the background. Progress shows in the status bar, and ✕ stops it.
-- The **Folder previews** checkbox in the toolbar (Ctrl+Shift+P) turns the mosaics off for speed in large or slow folders. Image file thumbnails stay on.
-- If a folder contains an image named `cover`, `folder`, `front` or `poster` (any extension, also hidden as `.cover` or `.folder`), that image is used as the cover. You can also right-click an image and choose "Use as Folder Cover", and "Reset Folder Cover" to undo it.
-- Right-click a folder → **Regenerate Preview** rebuilds its mosaic. The ☰ menu has **Clear Folder Preview Cache** and **Delete All Thumbnails…** to free disk space or start fresh.
-- Right-click one or more folders → **Folder Colour** to give their icons one of 10 colours (or back to Default). Only the folder behind the image mosaic changes colour; the previews stay. **Show Image Previews** turns the mosaic off for just those folders (they keep their colour). Both settings are also on the folder's Properties → General tab.
-- Thumbnails are generated in background threads and support JPEG, PNG, GIF, WebP, TIFF, SVG and video (with `ffmpeg`). AVIF, HEIC, JPEG XL, PSD and camera RAW also work when `kimageformat6-plugins` is installed (see [Dependencies](#dependencies)).
-- Thumbnails are shared with GNOME Files through the freedesktop cache (`~/.cache/thumbnails`).
-- Zoom with Ctrl+scroll or the slider, from 48 to 320 px.
-- **Animated GIFs and WebM videos can play right in the file view** (Preferences → *Play animated GIFs* / *Play WebM videos in the file view*, both off by default). WebM files play as silent looping previews of their first 15 seconds, made once with `ffmpeg` and cached in `~/.cache/kestrel-explorer/animated`. Only items on screen play.
-- Built-in viewer: arrow keys or the scroll wheel to move between images, zoom and pan, fullscreen (F), slideshow (S), rotate (R/L) and flip (H), an info overlay (I), copy the image (Ctrl+C), trash (Delete), and animated GIF/WebP.
-- Images and videos open in your system's default app unless you choose otherwise. In Preferences you can pick **Open images with** (system default, Kestrel's built-in viewer, or any installed image app) and **Open videos with** (system default or any installed video app). "View Image" in the right-click menu always uses the built-in viewer.
-- The info panel (F3) shows EXIF details: camera, lens, exposure and GPS.
-- It also shows Stable Diffusion / ComfyUI prompts and settings embedded in PNG, WebP and JPEG files.
-
-**Overview (default homepage)**
-- Like the old GNOME Files "Other Locations" page:
-  - **Drives:** every drive with a usage bar (amber at 75%, red at 90%) and eject/unmount buttons. Unmounted drives can be mounted with a click, and encrypted drives ask for their passphrase. A ZFS pool appears as one card with pool-level numbers.
-  - **Network:** connected shares, plus a "Connect to Server" box for `smb://`, `sftp://`, `nfs://`, `ftp://` and similar addresses. Recent servers are remembered.
-  - **Bookmarks:** your bookmarks as cards with folder previews. Right-click a card to edit or remove it.
-- Preferences → Homepage can be the Overview, your home folder, or any folder or network address. The homepage opens at launch and with the Home button (Alt+Home).
-
 **File management**
 - Tabs, back/forward history, a clickable path bar (Ctrl+L to type a path), and a sidebar.
 - The sidebar shows standard places, your GTK bookmarks (shared with GNOME Files) and mounted drives, with an unmount option.
@@ -185,6 +180,30 @@ sudo apt install python3-pyqt6 python3-pil python3-gi gir1.2-glib-2.0 libglib2.0
 - When something fails because you don't have permission (copying into `/opt`, deleting files owned by root, renaming in a system folder…), Kestrel offers **Retry as Administrator**.
 - You enter your password once. After that, a 🛡 **Admin** indicator shows in the status bar, and further operations that need admin rights run without asking again, until you end the session or it's unused for 15 minutes.
 - Kestrel itself never runs as root.
+
+**Overview (default homepage)**
+- Like the old GNOME Files "Other Locations" page:
+  - **Drives:** every drive with a usage bar (amber at 75%, red at 90%) and eject/unmount buttons. Unmounted drives can be mounted with a click, and encrypted drives ask for their passphrase. A ZFS pool appears as one card with pool-level numbers.
+  - **Network:** connected shares, plus a "Connect to Server" box for `smb://`, `sftp://`, `nfs://`, `ftp://` and similar addresses. Recent servers are remembered.
+  - **Bookmarks:** your bookmarks as cards with folder previews. Right-click a card to edit or remove it.
+- Preferences → Homepage can be the Overview, your home folder, or any folder or network address. The homepage opens at launch and with the Home button (Alt+Home).
+
+**Images and galleries**
+- Folder icons show a 1–4 image mosaic. If a folder has no images of its own, the mosaic is taken from its subfolders.
+- A folder with only videos uses a still from the middle of each video, marked with a ▶ badge.
+- Right-click a folder → **Generate Previews Recursively** pre-builds every thumbnail and folder preview below it in the background. Progress shows in the status bar, and ✕ stops it.
+- The **Folder previews** checkbox in the toolbar (Ctrl+Shift+P) turns the mosaics off for speed in large or slow folders. Image file thumbnails stay on.
+- If a folder contains an image named `cover`, `folder`, `front` or `poster` (any extension, also hidden as `.cover` or `.folder`), that image is used as the cover. You can also right-click an image and choose "Use as Folder Cover", and "Reset Folder Cover" to undo it.
+- Right-click a folder → **Regenerate Preview** rebuilds its mosaic. The ☰ menu has **Clear Folder Preview Cache** and **Delete All Thumbnails…** to free disk space or start fresh.
+- Right-click one or more folders → **Folder Colour** to give their icons one of 10 colours (or back to Default). Only the folder behind the image mosaic changes colour; the previews stay. **Show Image Previews** turns the mosaic off for just those folders (they keep their colour). Both settings are also on the folder's Properties → General tab.
+- Thumbnails are generated in background threads and support JPEG, PNG, GIF, WebP, TIFF, SVG and video (with `ffmpeg`). AVIF, HEIC, JPEG XL, PSD and camera RAW also work when `kimageformat6-plugins` is installed (see [Dependencies](#dependencies)).
+- Thumbnails are shared with GNOME Files through the freedesktop cache (`~/.cache/thumbnails`).
+- Zoom with Ctrl+scroll or the slider, from 48 to 320 px.
+- **Animated GIFs and WebM videos can play right in the file view** (Preferences → *Play animated GIFs* / *Play WebM videos in the file view*, both off by default). WebM files play as silent looping previews of their first 15 seconds, made once with `ffmpeg` and cached in `~/.cache/kestrel-explorer/animated`. Only items on screen play.
+- Built-in viewer: arrow keys or the scroll wheel to move between images, zoom and pan, fullscreen (F), slideshow (S), rotate (R/L) and flip (H), an info overlay (I), copy the image (Ctrl+C), trash (Delete), and animated GIF/WebP.
+- Images and videos open in your system's default app unless you choose otherwise. In Preferences you can pick **Open images with** (system default, Kestrel's built-in viewer, or any installed image app) and **Open videos with** (system default or any installed video app). "View Image" in the right-click menu always uses the built-in viewer.
+- The info panel (F3) shows EXIF details: camera, lens, exposure and GPS.
+- It also shows Stable Diffusion / ComfyUI prompts and settings embedded in PNG, WebP and JPEG files.
 
 Press F1 in the app for all keyboard shortcuts. Settings are in the ☰ menu under Preferences: homepage, how many images a mosaic uses, whether it picks images by name or newest first, folder colour, the thumbnail size limit, which apps open images and videos, single-click, folder previews in list view, slideshow speed, playing GIFs and WebM videos, sharing undo between windows, and opening folders from other apps as tabs.
 

@@ -125,7 +125,7 @@ cat > "$DESKTOP" <<DESK
 Type=Application
 Name=Kestrel Explorer
 GenericName=File Manager
-Comment=Browse files and image galleries with folder previews
+Comment=Manage files, with archive, admin, permission and metadata tools built in
 Exec=$BIN %U
 Icon=folder
 Terminal=false
