@@ -2,6 +2,7 @@
 # Install Kestrel Explorer for the current user (command: kes).
 #   ./install.sh                        install launcher + app menu entry
 #   ./install.sh --default              also make it the default app for opening folders and the trash
+#                                       and the system's file chooser for Save/Open dialogs (asks for sudo once)
 #                                       (and offer to put it in the dock in place of GNOME Files)
 #   ./install.sh --dock                 put it in the dock in place of GNOME Files (without asking)
 #   ./install.sh --install-recommended  also install the recommended packages (RAW/HEIC previews, network, drives…)
@@ -14,6 +15,16 @@ DESKTOP="$HOME/.local/share/applications/kestrel-explorer.desktop"
 # D-Bus activation file for org.freedesktop.FileManager1 ("Show in folder" in browsers and other apps).
 # A per-user file overrides GNOME Files' system one, so the bus starts Kestrel for those requests.
 FM1_SERVICE="$HOME/.local/share/dbus-1/services/org.freedesktop.FileManager1.service"
+# The system's file chooser (the Open/Save dialogs apps get through xdg-desktop-portal): a D-Bus activation file for
+# Kestrel's portal backend, its portal definition (xdg-desktop-portal reads those only from /usr/share, so installing it
+# needs sudo), and the user's portals.conf for this desktop, choosing it for FileChooser.
+CHOOSER_SERVICE="$HOME/.local/share/dbus-1/services/org.freedesktop.impl.portal.desktop.kestrel.service"
+PORTAL_DIR="${KESTREL_PORTAL_DIR:-/usr/share/xdg-desktop-portal/portals}"
+PORTAL_FILE="$PORTAL_DIR/kestrel.portal"
+PORTAL_DESKTOP="$(printf '%s' "${XDG_CURRENT_DESKTOP:-GNOME}" | cut -d: -f1 | tr '[:upper:]' '[:lower:]')"
+PORTAL_CONF="$HOME/.config/xdg-desktop-portal/$PORTAL_DESKTOP-portals.conf"
+PORTAL_BACKUP="$HOME/.config/kestrel-explorer/portals.conf.backup"
+PORTAL_MARK="# kestrel-explorer: Kestrel is the file chooser (install.sh --default; --uninstall puts this back)"
 # previous name of this app
 LEGACY_BIN="$HOME/.local/bin/folder-explorer"
 LEGACY_DESKTOP="$HOME/.local/share/applications/folder-explorer.desktop"
@@ -40,7 +51,7 @@ for arg in "$@"; do
         --dock) DOCK=1 ;;
         --install-recommended) WITH_RECOMMENDED=1 ;;
         --uninstall) UNINSTALL=1 ;;
-        -h|--help) sed -n '2,10s/^# \{0,1\}//p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,11s/^# \{0,1\}//p' "$0"; exit 0 ;;
         *) echo "Unknown option: $arg (see ./install.sh --help)" >&2; exit 2 ;;
     esac
 done
@@ -69,6 +80,25 @@ reload_dbus() {   # make the session bus re-read its service files
     gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
         --method org.freedesktop.DBus.ReloadConfig >/dev/null 2>&1 || true
 }
+portal_root() {   # run a command on the portal folder: with sudo unless it is writable
+    if [[ -w "$PORTAL_DIR" ]]; then "$@"; else sudo "$@"; fi
+}
+restart_portal() {   # xdg-desktop-portal reads portals.conf when it starts
+    systemctl --user try-restart xdg-desktop-portal.service >/dev/null 2>&1 || true
+}
+portal_base() {   # the portals.conf this desktop uses now (before ours): the first DESKTOP-portals.conf, then portals.conf
+    local IFS=: d dir name
+    local dirs="${XDG_CONFIG_DIRS:-/etc/xdg}:/etc:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+    for name in $(printf '%s' "${XDG_CURRENT_DESKTOP:-GNOME}" | tr '[:upper:]' '[:lower:]'); do
+        for dir in $dirs; do
+            [[ -f "$dir/xdg-desktop-portal/$name-portals.conf" ]] && { cat "$dir/xdg-desktop-portal/$name-portals.conf"; return; }
+        done
+    done
+    for dir in $dirs; do
+        [[ -f "$dir/xdg-desktop-portal/portals.conf" ]] && { cat "$dir/xdg-desktop-portal/portals.conf"; return; }
+    done
+    printf '[preferred]\ndefault=gnome;gtk;\n'
+}
 
 if (( UNINSTALL )); then
     rm -f "$BIN" "$DESKTOP" "$LEGACY_BIN" "$LEGACY_DESKTOP"
@@ -84,6 +114,23 @@ if (( UNINSTALL )); then
     if [[ "$(state_get dock)" == swapped ]] && dock_replace kestrel-explorer.desktop org.gnome.Nautilus.desktop; then
         echo "Put GNOME Files back in the dock."
     fi
+    # the file chooser: GNOME's again
+    if grep -qsF "$PORTAL_MARK" "$PORTAL_CONF"; then
+        if [[ "$(state_get chooser_conf)" == backup && -f "$PORTAL_BACKUP" ]]; then
+            mv "$PORTAL_BACKUP" "$PORTAL_CONF"
+        else
+            rm -f "$PORTAL_CONF"
+        fi
+        echo "The file chooser is GNOME's again."
+    fi
+    if grep -qs -- "--file-chooser" "$CHOOSER_SERVICE"; then
+        rm -f "$CHOOSER_SERVICE"
+        reload_dbus
+    fi
+    if [[ -f "$PORTAL_FILE" ]]; then
+        portal_root rm -f "$PORTAL_FILE" || echo "Couldn't remove $PORTAL_FILE; delete it with sudo." >&2
+    fi
+    restart_portal
     rm -f "$STATE"
     if grep -qs -- "--dbus-service" "$FM1_SERVICE"; then
         rm -f "$FM1_SERVICE"
@@ -148,6 +195,41 @@ if (( DEFAULT )); then
     mkdir -p "$(dirname "$FM1_SERVICE")"
     printf '[D-BUS Service]\nName=org.freedesktop.FileManager1\nExec=%s --dbus-service\n' "$BIN" > "$FM1_SERVICE"
     reload_dbus
+    # the system's file chooser: browsers' "Save as" and "Open", Flatpak and Snap apps, GTK 4 and Qt apps using the portal
+    portal_tmp="$(mktemp)"
+    printf '[portal]\nDBusName=org.freedesktop.impl.portal.desktop.kestrel\nInterfaces=org.freedesktop.impl.portal.FileChooser;\n' \
+        > "$portal_tmp"
+    if cmp -s "$portal_tmp" "$PORTAL_FILE" || { echo "Installing $PORTAL_FILE (needs sudo)…";
+                                                portal_root install -m 644 "$portal_tmp" "$PORTAL_FILE"; }; then
+        mkdir -p "$(dirname "$CHOOSER_SERVICE")" "$(dirname "$PORTAL_CONF")"
+        printf '[D-BUS Service]\nName=org.freedesktop.impl.portal.desktop.kestrel\nExec=%s --file-chooser\n' "$BIN" \
+            > "$CHOOSER_SERVICE"
+        reload_dbus
+        if ! grep -qsF "$PORTAL_MARK" "$PORTAL_CONF"; then
+            if [[ -f "$PORTAL_CONF" ]]; then   # the user's own: keep a copy to put back
+                mkdir -p "$(dirname "$PORTAL_BACKUP")"
+                cp "$PORTAL_CONF" "$PORTAL_BACKUP"
+                state_set chooser_conf backup
+                base="$(cat "$PORTAL_CONF")"
+            else
+                state_set chooser_conf created
+                base="$(portal_base)"
+            fi
+            { echo "$PORTAL_MARK"
+              printf '%s\n' "$base" | awk -v line="org.freedesktop.impl.portal.FileChooser=kestrel;gnome;gtk;" '
+                  /^org\.freedesktop\.impl\.portal\.FileChooser=/ { next }
+                  { print }
+                  /^\[preferred\]/ && !done { print line; done = 1 }
+                  END { if (!done) { print "[preferred]"; print line } }'
+            } > "$PORTAL_CONF"
+        fi
+        restart_portal
+        echo "Kestrel is now the file chooser (Open/Save dialogs) for apps that use the desktop portal: browsers," \
+             "Flatpak and Snap apps…"
+    else
+        echo "Couldn't install $PORTAL_FILE, so the file chooser stays GNOME's." >&2
+    fi
+    rm -f "$portal_tmp"
     if pgrep -x nautilus >/dev/null; then
         echo "Closing GNOME Files so it releases the file-manager D-Bus service (it starts again when you open it)."
         nautilus -q 2>/dev/null || true

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Installer test: --default (folders, trash:///), --dock, asking about the dock, and --uninstall putting it all back.
-# Runs ../install.sh with a throwaway HOME and a keyfile GSettings backend (never your real settings or dock), and with
-# stub `pgrep` and `sudo` so it can't close a running GNOME Files or install packages. run.sh starts it on a private
+# Installer test: --default (folders, trash:///, the file chooser), --dock, asking about the dock, and --uninstall
+# putting it all back. Runs ../install.sh with a throwaway HOME and a keyfile GSettings backend (never your real settings
+# or dock), with the portal definition going to a throwaway folder, and with stub `pgrep`, `sudo` and `systemctl` so it
+# can't close a running GNOME Files, install packages or restart your desktop portal. run.sh starts it on a private
 # D-Bus session bus.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,8 +12,14 @@ trap 'case "$WORK" in */kestrel-installer-test.*) rm -rf "$WORK" ;; esac' EXIT
 mkdir -p "$WORK/stubs"
 printf '#!/bin/sh\nexit 1\n' > "$WORK/stubs/pgrep"
 printf '#!/bin/sh\necho "sudo is disabled in the installer test" >&2\nexit 1\n' > "$WORK/stubs/sudo"
-chmod +x "$WORK/stubs/pgrep" "$WORK/stubs/sudo"
-export GSETTINGS_BACKEND=keyfile PATH="$WORK/stubs:$PATH"
+printf '#!/bin/sh\necho "$@" >> "%s/systemctl.log"\n' "$WORK" > "$WORK/stubs/systemctl"
+chmod +x "$WORK/stubs/pgrep" "$WORK/stubs/sudo" "$WORK/stubs/systemctl"
+# the desktop's portals.conf (as /usr/share/xdg-desktop-portal/ubuntu-portals.conf would be), and the portal folder
+mkdir -p "$WORK/xdg/xdg-desktop-portal" "$WORK/portals"
+printf '[preferred]\ndefault=gnome;gtk;\norg.freedesktop.impl.portal.Secret=gnome-keyring;\n' \
+    > "$WORK/xdg/xdg-desktop-portal/ubuntu-portals.conf"
+export GSETTINGS_BACKEND=keyfile PATH="$WORK/stubs:$PATH" XDG_CONFIG_DIRS="$WORK/xdg" XDG_CURRENT_DESKTOP=ubuntu:GNOME
+export KESTREL_PORTAL_DIR="$WORK/portals"
 unset XDG_CONFIG_HOME XDG_DATA_HOME
 
 fails=0
@@ -31,6 +38,8 @@ fresh() {   # a new HOME where another file manager (here a stand-in for Thunar)
     /usr/bin/gsettings set org.gnome.shell favorite-apps "$DOCK_BEFORE"
 }
 STATE_FILE() { echo "$HOME/.config/kestrel-explorer/install-state"; }
+PORTAL_CONF() { echo "$HOME/.config/xdg-desktop-portal/ubuntu-portals.conf"; }
+CHOOSER_SERVICE() { echo "$HOME/.local/share/dbus-1/services/org.freedesktop.impl.portal.desktop.kestrel.service"; }
 
 fresh
 check '[[ "$(trash_handler)" == xfce4-file-manager.desktop ]]' "setup: another app handles trash:///"
@@ -43,15 +52,35 @@ check 'grep -q "^MimeType=.*x-scheme-handler/trash" "$HOME/.local/share/applicat
 check '[[ -f "$HOME/.local/share/dbus-1/services/org.freedesktop.FileManager1.service" ]]' \
     "--default: installs the Show-in-folder service"
 check '[[ "$(fav)" == "$DOCK_AFTER" ]]' "--dock: Kestrel takes GNOME Files' place in the dock"
+check '[[ -f "$WORK/portals/kestrel.portal" ]] && grep -q "^Exec=.* --file-chooser$" "$(CHOOSER_SERVICE)"' \
+    "--default: installs the file chooser's portal definition and D-Bus service"
+check 'grep -q "^org.freedesktop.impl.portal.FileChooser=kestrel;" "$(PORTAL_CONF)" &&
+       grep -q "^default=gnome;gtk;$" "$(PORTAL_CONF)" &&
+       grep -q "^org.freedesktop.impl.portal.Secret=gnome-keyring;$" "$(PORTAL_CONF)"' \
+    "--default: the desktop's portals.conf picks Kestrel for the file chooser and keeps the rest"
+check 'grep -q "try-restart xdg-desktop-portal.service" "$WORK/systemctl.log"' "--default: restarts the portal"
 "$INSTALL" --default --dock </dev/null >"$WORK/out2" 2>&1
 check 'grep -q "already in the dock" "$WORK/out2" && [[ "$(fav)" == "$DOCK_AFTER" ]]' "running it again doesn't pin twice"
 check '[[ "$(grep -c "^trash_handler=" "$(STATE_FILE)")" == 1 && "$(grep "^trash_handler=" "$(STATE_FILE)")" == trash_handler=xfce4-file-manager.desktop ]]' \
     "running it again keeps the original trash handler"
+check '[[ "$(grep -c "FileChooser=" "$(PORTAL_CONF)")" == 1 ]]' "running it again keeps one file chooser line"
 "$INSTALL" --uninstall >"$WORK/out3" 2>&1
 check '[[ "$(trash_handler)" == xfce4-file-manager.desktop ]]' "--uninstall: the trash handler is put back"
 check '[[ "$(fav)" == "$DOCK_BEFORE" ]]' "--uninstall: GNOME Files is back in the dock"
 check '[[ ! -e "$(STATE_FILE)" && ! -e "$HOME/.local/share/applications/kestrel-explorer.desktop" ]]' \
     "--uninstall: removes its files"
+check '[[ ! -e "$(PORTAL_CONF)" && ! -e "$(CHOOSER_SERVICE)" && ! -e "$WORK/portals/kestrel.portal" ]]' \
+    "--uninstall: the file chooser is GNOME's again"
+
+fresh   # the user already has a portals.conf of their own
+mkdir -p "$(dirname "$(PORTAL_CONF)")"
+printf '[preferred]\ndefault=gtk;\n' > "$(PORTAL_CONF)"
+cp "$(PORTAL_CONF)" "$WORK/own-portals.conf"
+"$INSTALL" --default </dev/null >/dev/null 2>&1
+check 'grep -q "^org.freedesktop.impl.portal.FileChooser=kestrel;" "$(PORTAL_CONF)" && grep -q "^default=gtk;$" "$(PORTAL_CONF)"' \
+    "--default adds the file chooser to the user's own portals.conf"
+"$INSTALL" --uninstall >/dev/null 2>&1
+check 'cmp -s "$(PORTAL_CONF)" "$WORK/own-portals.conf"' "--uninstall puts the user's own portals.conf back"
 
 fresh
 "$INSTALL" --default </dev/null >"$WORK/out4" 2>&1
