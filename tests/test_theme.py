@@ -1,11 +1,48 @@
-"""The desktop's theme: colours derived from its palette, and following a change (a light/dark switch, another theme)."""
-from common import A, check, finish, home_path as P, setup_app, spin
-from PyQt6.QtCore import QObject, Qt
-from PyQt6.QtGui import QColor, QPalette
-from PyQt6.QtWidgets import QApplication, QLabel
+"""The desktop's theme: colours derived from its palette, and following a change (a light/dark switch, another theme);
+and the desktop's own settings (Cinnamon's on Linux Mint)."""
+import os
+import shutil
+import subprocess
 
-from kestrel import thumbs, util
-from kestrel.overview import OVERVIEW, Card
+CINNAMON_SCHEMAS = """<schemalist>
+  <schema id="org.cinnamon.desktop.background" path="/org/cinnamon/desktop/background/">
+    <key name="picture-uri" type="s"><default>''</default></key>
+  </schema>
+  <schema id="org.cinnamon.desktop.privacy" path="/org/cinnamon/desktop/privacy/">
+    <key name="remember-recent-files" type="b"><default>true</default></key>
+  </schema>
+  <schema id="org.cinnamon.desktop.interface" path="/org/cinnamon/desktop/interface/">
+    <key name="icon-theme" type="s"><default>'Mint-Y'</default></key>
+  </schema>
+</schemalist>
+"""
+
+
+def cinnamon_schemas():
+    """Stand-ins for Cinnamon's settings (Linux Mint), compiled before GLib first reads the schemas. False if the
+    schema compiler is missing."""
+    d = os.path.join(os.path.expanduser("~"), "schemas")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "org.cinnamon.test.gschema.xml"), "w") as f:
+        f.write(CINNAMON_SCHEMAS)
+    compiler = "/usr/lib/x86_64-linux-gnu/glib-2.0/glib-compile-schemas"
+    if not os.path.isfile(compiler):
+        compiler = shutil.which("glib-compile-schemas")
+    if not compiler or subprocess.run([compiler, d]).returncode != 0:
+        return False
+    os.environ["GSETTINGS_SCHEMA_DIR"] = d
+    return True
+
+
+schemas = cinnamon_schemas()
+
+from common import A, check, finish, home_path as P, setup_app, skip, spin  # noqa: E402
+from PyQt6.QtCore import QObject, Qt  # noqa: E402
+from PyQt6.QtGui import QColor, QPalette  # noqa: E402
+from PyQt6.QtWidgets import QApplication, QLabel  # noqa: E402
+
+from kestrel import thumbs, util  # noqa: E402
+from kestrel.overview import OVERVIEW, Card  # noqa: E402
 
 
 def palette_of(window, highlight):
@@ -16,6 +53,27 @@ def palette_of(window, highlight):
 
 
 app = setup_app()
+
+# -- the desktop's own settings
+desktop = os.environ.get("XDG_CURRENT_DESKTOP", "")
+if schemas:
+    os.environ["XDG_CURRENT_DESKTOP"] = "X-Cinnamon"
+    check(util.desktop_schema("org.gnome.desktop.background") == "org.cinnamon.desktop.background"
+          and util.desktop_schema("org.gnome.desktop.privacy") == "org.cinnamon.desktop.privacy"
+          and util.desktop_schema("org.gnome.desktop.interface") == "org.cinnamon.desktop.interface",
+          "on Cinnamon, its own settings are used (wallpaper, file history, icon theme)")
+    check(util.has_schema_key("org.cinnamon.desktop.background", "picture-uri")
+          and not util.has_schema_key("org.cinnamon.desktop.background", "picture-uri-dark"),
+          "Cinnamon's wallpaper has no dark picture, so only the one is set")
+    check(util.desktop_schema("org.gnome.desktop.a11y") == "org.gnome.desktop.a11y",
+          "a setting Cinnamon has no copy of stays GNOME's")
+    os.environ["XDG_CURRENT_DESKTOP"] = "ubuntu:GNOME"
+    check(util.desktop_schema("org.gnome.desktop.background") == "org.gnome.desktop.background",
+          "other desktops use GNOME's settings")
+else:
+    skip("the desktop's own settings (no glib-compile-schemas)")
+os.environ["XDG_CURRENT_DESKTOP"] = desktop
+
 LIGHT, DARK = palette_of("#fafafa", "#e95420"), palette_of("#2a2a2a", "#3584e4")
 QApplication.setPalette(LIGHT)
 w = A.open_window([util.HOME])

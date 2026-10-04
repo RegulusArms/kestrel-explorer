@@ -34,6 +34,7 @@ else:
 PY_ROOT, CXX_ROOT = os.path.realpath(PY_ROOT), os.path.realpath(CXX_ROOT)
 DATA = os.environ.get("KESTREL_BENCH_DATA", "/tmp/kestrel-bench-data")
 CMAKE = "/usr/bin/cmake" if os.access("/usr/bin/cmake", os.X_OK) else "cmake"
+BUILD = os.environ.get("KESTREL_BUILD_DIR", "build")  # build folder name (another machine sharing these folders)
 APPS = ("python", "cxx", "nautilus")
 # measured the same way for all three apps
 COMMON = ("startup", "open_gallery", "videos", "pdfs", "copy", "move_xdev", "trash", "windows", "idle")
@@ -54,7 +55,7 @@ def home():
 
 def app_command(app, folder=None):
     cmd = {"python": ["/usr/bin/python3", os.path.join(PY_ROOT, "kes")],
-           "cxx": [os.path.join(CXX_ROOT, "build", "kes")],
+           "cxx": [os.path.join(CXX_ROOT, BUILD, "kes")],
            "nautilus": ["nautilus"]}[app]
     return cmd + ([folder] if folder else [])
 
@@ -374,7 +375,7 @@ def harness(app, test, arg=None):
     if app == "python":
         cmd = ["/usr/bin/python3", os.path.join(HERE, "kestrel_py.py"), PY_ROOT, test, DATA]
     else:
-        cmd = [os.path.join(HERE, "build", "kestrel_cpp"), test, DATA]
+        cmd = [os.path.join(HERE, BUILD, "kestrel_cpp"), test, DATA]
     out = subprocess.run(cmd + ([arg] if arg else []), env=env, capture_output=True, text=True, timeout=900)
     line = next((ln for ln in out.stdout.splitlines() if ln.startswith("{")), None)
     if line is None:
@@ -640,10 +641,10 @@ def update_readmes(t1, t2, summary, runs):
 def build():
     print("Building the C++ version and its benchmark harness…", flush=True)
     log = open(os.path.join(HERE, "build.log"), "w")
-    for cmd in ([CMAKE, "-S", CXX_ROOT, "-B", os.path.join(CXX_ROOT, "build"), "-DCMAKE_BUILD_TYPE=Release"],
-                [CMAKE, "--build", os.path.join(CXX_ROOT, "build"), f"-j{os.cpu_count()}"],
-                [CMAKE, "-S", HERE, "-B", os.path.join(HERE, "build"), f"-DKES_SRC={CXX_ROOT}/src"],
-                [CMAKE, "--build", os.path.join(HERE, "build"), f"-j{os.cpu_count()}"]):
+    for cmd in ([CMAKE, "-S", CXX_ROOT, "-B", os.path.join(CXX_ROOT, BUILD), "-DCMAKE_BUILD_TYPE=Release"],
+                [CMAKE, "--build", os.path.join(CXX_ROOT, BUILD), f"-j{os.cpu_count()}"],
+                [CMAKE, "-S", HERE, "-B", os.path.join(HERE, BUILD), f"-DKES_SRC={CXX_ROOT}/src"],
+                [CMAKE, "--build", os.path.join(HERE, BUILD), f"-j{os.cpu_count()}"]):
         if subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT).returncode:
             sys.exit(f"Build failed (log: {os.path.join(HERE, 'build.log')})")
 

@@ -115,7 +115,8 @@ for i in range(24):
 state = {"gone": False}
 t = fileops.start_ops(w, [("copy", P("big"), P("big2"))], "Test")
 t.finished.connect(lambda: state.__setitem__("gone", True))
-wait_for(lambda: state["gone"] or t.fraction > 0, 5000)
+# at once: on a fast disk (the test's home is in /tmp, often in memory) the whole copy can finish before the first
+# progress report arrives
 t.cancel()
 check(wait_for(lambda: state["gone"], 10000), "a cancelled copy stops")
 copied = os.listdir(P("big2")) if os.path.isdir(P("big2")) else []

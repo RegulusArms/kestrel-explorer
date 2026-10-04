@@ -30,7 +30,7 @@ A full run takes about 12 minutes, plus about a minute and a half the first time
 - **Headless display:** all three apps run on an Xvfb X server with software rendering: Qt's raster engine, and GTK with `GSK_RENDERER=cairo`. No windows appear on your screen.
 - **Fresh home folder:** each run gets a new one, so the thumbnail cache is empty and settings are defaults.
 - **Private session bus:** only the services every GNOME desktop runs can be started on it: settings (dconf) and the virtual file system (gvfs, which provides `trash:///`, the drive list and file metadata). Both are started before each measurement, because on a desktop they are already running when an app starts. No file indexer, portal or online-accounts service runs in the background, and your own running apps never see the benchmark.
-- **RAM disk:** the data is in `/tmp/kestrel-bench-data`, so disk speed doesn't count. Set `KESTREL_BENCH_DATA` to use another place.
+- **RAM disk:** the data is in `/tmp/kestrel-bench-data`, so disk speed doesn't count. Set `KESTREL_BENCH_DATA` to use another place. `KESTREL_BUILD_DIR` builds the C++ version and the harness into another folder name than `build` (for a machine that shares these folders with another).
 - **Medians:** each measurement runs several times, and the tables show the median.
 
 ### Compared with GNOME Files (measured from outside)

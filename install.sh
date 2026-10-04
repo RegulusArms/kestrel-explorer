@@ -31,9 +31,11 @@ LEGACY_DESKTOP="$HOME/.local/share/applications/folder-explorer.desktop"
 
 # Recommended apt packages (see "Dependencies" in README.md). Most come with a standard Ubuntu desktop;
 # kimageformat6-plugins (camera RAW, HEIC, AVIF, JPEG XL, PSD previews) usually doesn't.
-RECOMMENDED=(libglib2.0-bin xdg-utils gvfs gvfs-backends udisks2 qt6-image-formats-plugins qt6-svg-plugins
+RECOMMENDED=(libglib2.0-bin xdg-utils gvfs gvfs-backends udisks2 qt6-image-formats-plugins 'qt6-svg-plugins|libqt6svg6'
              kimageformat6-plugins adwaita-icon-theme qt6-gtk-platformtheme
-             7zip unrar zip unzip pigz zpaq zstd xz-utils bzip2 lzip)   # archives (unrar is in multiverse)
+             '7zip|p7zip-full' unrar zip unzip pigz zpaq zstd xz-utils bzip2 lzip)   # archives (unrar is in multiverse)
+# a|b: the first of these the system has (7zip is p7zip-full on Debian 12 and older Ubuntu releases; the SVG plugins
+# come with libqt6svg6 on Ubuntu 24.04 / Linux Mint 22)
 
 # MIME types for folders: inode/directory, plus the older alias some apps still ask for
 FOLDER_TYPES=(inode/directory x-directory/normal)
@@ -102,9 +104,10 @@ portal_base() {   # the portals.conf this desktop uses now (before ours): the fi
 
 if (( UNINSTALL )); then
     rm -f "$BIN" "$DESKTOP" "$LEGACY_BIN" "$LEGACY_DESKTOP"
+    prev="$(state_get folder_handler)"   # GNOME Files, Nemo on Linux Mint, …
     for mt in "${FOLDER_TYPES[@]}"; do
         if [[ "$(xdg-mime query default "$mt")" =~ ^(kestrel-explorer|folder-explorer)\.desktop$ ]]; then
-            xdg-mime default org.gnome.Nautilus.desktop "$mt"
+            xdg-mime default "${prev:-org.gnome.Nautilus.desktop}" "$mt"
         fi
     done
     if [[ "$(default_for "$TRASH_TYPE")" =~ ^(kestrel-explorer|folder-explorer)\.desktop$ ]]; then
@@ -146,10 +149,25 @@ missing=()
 /usr/bin/python3 -c "import PyQt6.QtWidgets" 2>/dev/null || missing+=(python3-pyqt6)
 /usr/bin/python3 -c "import PIL" 2>/dev/null || missing+=(python3-pil)
 /usr/bin/python3 -c "import gi" 2>/dev/null || missing+=(python3-gi)
-missing_rec=()
-for p in "${RECOMMENDED[@]}"; do
-    dpkg -s "$p" >/dev/null 2>&1 || missing_rec+=("$p")
+missing_rec=() unavailable=()
+apt_has() { apt-cache policy "$1" 2>/dev/null | grep -q 'Candidate: [^(]'; }   # in the system's package lists
+for entry in "${RECOMMENDED[@]}"; do
+    IFS='|' read -r -a alts <<< "$entry"
+    have=0 pick=""
+    for p in "${alts[@]}"; do
+        dpkg -s "$p" >/dev/null 2>&1 && have=1
+        [[ -z "$pick" ]] && apt_has "$p" && pick="$p"
+    done
+    (( have )) && continue
+    if [[ -n "$pick" ]]; then
+        missing_rec+=("$pick")
+    else   # e.g. kimageformat6-plugins on Ubuntu 24.04 / Linux Mint 22
+        unavailable+=("${alts[0]}")
+    fi
 done
+if (( ${#unavailable[@]} )); then
+    echo "Not available on this system (skipped): ${unavailable[*]}"
+fi
 if (( WITH_RECOMMENDED )); then
     missing+=("${missing_rec[@]}")
 fi
@@ -188,6 +206,11 @@ DESK
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 
 if (( DEFAULT )); then
+    # remembering which app opened folders (to put back on --uninstall)
+    prev="$(default_for inode/directory)"
+    if [[ -n "$prev" && ! "$prev" =~ ^(kestrel-explorer|folder-explorer)\.desktop$ ]]; then
+        state_set folder_handler "$prev"
+    fi
     for mt in "${FOLDER_TYPES[@]}"; do
         xdg-mime default kestrel-explorer.desktop "$mt"
     done
@@ -233,6 +256,10 @@ if (( DEFAULT )); then
     if pgrep -x nautilus >/dev/null; then
         echo "Closing GNOME Files so it releases the file-manager D-Bus service (it starts again when you open it)."
         nautilus -q 2>/dev/null || true
+    fi
+    if pgrep -x nemo >/dev/null; then   # Linux Mint's file manager (its desktop icons are nemo-desktop: left alone)
+        echo "Closing Nemo so it releases the file-manager D-Bus service (it starts again when you open it)."
+        nemo --quit 2>/dev/null || true
     fi
     if [[ "$(xdg-mime query default inode/directory)" == kestrel-explorer.desktop ]]; then
         echo "Set as default folder handler (${FOLDER_TYPES[*]})."

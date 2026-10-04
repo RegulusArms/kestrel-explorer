@@ -34,6 +34,7 @@ class Request:
         self.current_filter = -1
         self.files = []  # SaveFiles: the names to save into the chosen folder
         self.choices = []  # (id, default): returned as given
+        self.parent_window = ""  # the app's window: "x11:<hex id>" or "wayland:<handle>"
 
     def saving(self):
         return self.method != "OpenFile"
@@ -105,6 +106,18 @@ def results(req, res):
     return out
 
 
+def x11_parent(parent_window):
+    """The X11 window id in a parent_window ("x11:<hex>"), 0 for anything else. On X11 the chooser becomes that
+    window's dialog (on top of it, and focused by the window manager); Wayland handles need xdg-foreign, which Qt
+    doesn't offer."""
+    if not parent_window.startswith("x11:"):
+        return 0
+    try:
+        return int(parent_window[4:], 16)
+    except ValueError:
+        return 0
+
+
 def button_text(req):
     """accept_label without its GTK mnemonic, or Open / Save / Select."""
     if req.accept_label:
@@ -169,8 +182,9 @@ def serve(opener):
     s = _service = _Service(opener)
 
     def on_call(conn, _sender, _path, _iface, method, params, invocation):
-        handle, _app_id, _parent, title, options = params.unpack()
+        handle, _app_id, parent, title, options = params.unpack()
         req = parse(method, title, options)
+        req.parent_window = parent
         state = {"answered": False, "close": None, "request_id": 0}
         s.pending.add(id(state))
 

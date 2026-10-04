@@ -240,6 +240,24 @@ def icon_for_path(path, is_dir=None):
     return theme_icon(m.iconName(), m.genericIconName(), "text-x-generic")
 
 
+def has_schema_key(schema, key=None):
+    """The settings schema is installed, and has that key (None: any)."""
+    source = Gio.SettingsSchemaSource.get_default() if Gio else None
+    s = source.lookup(schema, True) if source else None
+    return s is not None and (key is None or s.has_key(key))
+
+
+def desktop_schema(gnome_schema):
+    """The desktop's settings schema for a GNOME one: Cinnamon (Linux Mint) keeps its own copies,
+    org.cinnamon.desktop.*, and uses those; everything else uses GNOME's."""
+    desktops = os.environ.get("XDG_CURRENT_DESKTOP", "").lower().split(":")
+    if "x-cinnamon" in desktops and gnome_schema.startswith("org.gnome."):
+        cinnamon = "org.cinnamon." + gnome_schema[len("org.gnome."):]
+        if has_schema_key(cinnamon):
+            return cinnamon
+    return gnome_schema
+
+
 def setup_icon_theme():
     paths = list(QIcon.themeSearchPaths())
     data_dirs = os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":")
@@ -251,7 +269,7 @@ def setup_icon_theme():
     if not QIcon.themeName() or QIcon.themeName() == "hicolor":
         theme = "Adwaita"
         try:
-            out = subprocess.run(["gsettings", "get", "org.gnome.desktop.interface", "icon-theme"],
+            out = subprocess.run(["gsettings", "get", desktop_schema("org.gnome.desktop.interface"), "icon-theme"],
                                  capture_output=True, text=True, timeout=2).stdout.strip().strip("'")
             if out:
                 theme = out
@@ -442,13 +460,15 @@ def open_terminal(directory):
 
 
 def set_wallpaper(path):
-    """Through UWP when it's installed (new UWP profile with the image on every monitor), else GNOME's own."""
+    """Through UWP when it's installed (new UWP profile with the image on every monitor), else the desktop's own."""
     from . import uwp
     if uwp.set_wallpaper(path):
         return
     uri = file_uri(path)
-    for key in ("picture-uri", "picture-uri-dark"):
-        subprocess.run(["gsettings", "set", "org.gnome.desktop.background", key, uri], timeout=5)
+    schema = desktop_schema("org.gnome.desktop.background")
+    for key in ("picture-uri", "picture-uri-dark"):  # Cinnamon has no -dark one
+        if has_schema_key(schema, key):
+            subprocess.run(["gsettings", "set", schema, key, uri], timeout=5)
 
 
 def trash(path):
