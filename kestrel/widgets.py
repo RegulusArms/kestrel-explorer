@@ -441,7 +441,9 @@ class PathBar(QWidget):
         if obj is self.edit and ev.type() == ev.Type.KeyPress and ev.key() == Qt.Key.Key_Escape:
             self.cancel_edit()
             return True
-        if obj is self.edit and ev.type() == ev.Type.FocusOut and not self.edit.completer().popup().isVisible():
+        # a popup (the right-click menu, the completer) takes focus while still editing
+        if (obj is self.edit and ev.type() == ev.Type.FocusOut and ev.reason() != Qt.FocusReason.PopupFocusReason
+                and not self.edit.completer().popup().isVisible()):
             QTimer.singleShot(0, self.cancel_edit)
         return False
 
@@ -560,6 +562,14 @@ class Sidebar(QListWidget):
         self.itemClicked.connect(self._clicked)
         self.setStyleSheet("QListWidget { background: palette(window); } QListWidget::item { padding: 3px; }")
         self._mounts = None
+        self._phones = []  # phones and cameras (Gio), in the order shown
+        # phones and cameras come and go through Gio's volume monitor (QStorageInfo doesn't see them)
+        self._phone_timer = QTimer(self, singleShot=True, interval=300, timeout=self.refresh)
+        self._monitor = util.Gio.VolumeMonitor.get() if util.Gio else None
+        if self._monitor is not None:
+            for sig in ("volume-added", "volume-removed", "volume-changed", "mount-added", "mount-removed",
+                        "mount-changed"):
+                self._monitor.connect(sig, lambda *a: self._phone_timer.start())
         self.refresh()
         self.timer = QTimer(self, interval=4000, timeout=self._check_mounts)
         self.timer.start()
@@ -631,6 +641,14 @@ class Sidebar(QListWidget):
             label = f"{name} ({util.human_size(total)})" if total else name
             icon = "drive-removable-media" if root.startswith(("/media/", "/run/media/")) else "drive-harddisk"
             self._add(label, root, icon, "mount", dev)
+        from .overview import phone_infos
+        self._phones = phone_infos(self._monitor)
+        for i, ph in enumerate(self._phones):
+            # a phone that isn't mounted yet opens its URI: open_location mounts it
+            mounted = ph.get("mounted", True)
+            icon = ph["icon"] if not ph["icon"].isNull() else util.theme_icon("phone", "drive-removable-media")
+            self._add(ph["name"], ph["root"] if mounted else ph["uri"], icon, "phone", i)
+            self.item(self.count() - 1).setToolTip(ph["fs"] if mounted else ph["fs"] + " — click to connect")
         if current:
             self.select_path(current)
 
@@ -666,7 +684,7 @@ class Sidebar(QListWidget):
         m = QMenu(self)
         m.addAction("Open", lambda: self.open_path.emit(path, False))
         m.addAction("Open in New Tab", lambda: self.open_path.emit(path, True))
-        if os.path.isdir(path):
+        if kind != "phone" and os.path.isdir(path):  # a stat on a phone can wait behind its transfers
             m.addAction("Open in Terminal", lambda: util.open_terminal(path))
         if kind == "bookmark":
             m.addSeparator()
@@ -680,6 +698,10 @@ class Sidebar(QListWidget):
         elif kind == "mount":
             m.addSeparator()
             m.addAction("Unmount", lambda: self._unmount(path))
+        elif kind == "phone" and extra < len(self._phones) and self._phones[extra].get("mount") is not None:
+            m.addSeparator()
+            m.addAction("Eject" if self._phones[extra]["mount"].can_eject() else "Unmount",
+                        lambda: self._eject_phone(extra))
         m.exec(self.viewport().mapToGlobal(pos))
 
     def _unmount(self, path):
@@ -691,6 +713,18 @@ class Sidebar(QListWidget):
             from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Unmount", r.stderr or "Unmount failed")
         self.refresh()
+
+    def _eject_phone(self, i):
+        if i >= len(self._phones) or self._phones[i].get("mount") is None:
+            return
+        from .overview import unmount
+
+        def done(err):
+            if err:
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.warning(self, "Unmount", err)
+            self.refresh()
+        unmount(self, self._phones[i]["mount"], done)
 
     def _edit_bookmark(self, path):
         from .dialogs import edit_bookmark

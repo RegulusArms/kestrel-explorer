@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QHBoxLa
 
 from . import (__version__, admin, animate, archive, archive_ui, atc, dialogs, env, fileops, fm1, places, sharing, thumbs,
                undo, util, uwp)
-from .overview import OVERVIEW, OVERVIEW_TITLE, OverviewPage, is_uri, mount_uri
+from .overview import OVERVIEW, OVERVIEW_TITLE, OverviewPage, is_phone_scheme, is_uri, mount_uri, phone_hint
 from .viewer import ImageViewer
 from .widgets import (FSModel, GridDelegate, InfoPanel, PathBar, PathRole, SearchModel, SearchThread, Sidebar,
                       can_search_contents)
@@ -1064,7 +1064,8 @@ class MainWindow(QMainWindow):
         self.a_up.setEnabled(not pane.is_overview() and not pane.is_virtual() and pane.path != "/")
         self._sync_view_btn()
         self.sync_zoom_slider()
-        vol = QStorageInfo(pane.dir) if pane.dir else None
+        # statfs on a phone waits behind its file transfers
+        vol = QStorageInfo(pane.dir) if pane.dir and not util.is_device_path(pane.dir) else None
         self.free_label.setText(f"{util.human_size(vol.bytesAvailable())} free" if vol and vol.isValid() else "")
         self.update_status()
 
@@ -1099,7 +1100,12 @@ class MainWindow(QMainWindow):
             def done(path, err):
                 self.statusBar().clearMessage()
                 if err:
-                    QMessageBox.warning(self, "Connect to Server", f"Could not open {target}:\n\n{err}")
+                    scheme = target.split(":", 1)[0]
+                    msg = f"Could not open {target}:\n\n{err}"
+                    if is_phone_scheme(scheme):
+                        msg += "\n\n" + phone_hint(scheme, target)
+                    title = "Connect to Device" if is_phone_scheme(scheme) else "Connect to Server"
+                    QMessageBox.warning(self, title, msg)
                 elif path:
                     self._remember_server(target)
                     self.sidebar.refresh()
@@ -1284,6 +1290,11 @@ class MainWindow(QMainWindow):
         images = [f for f in files if util.is_image(f)]
         videos = [f for f in files if util.is_video(f)]
         others = [f for f in files if f not in images and f not in videos]
+        # a player would download these again on every open/seek
+        fetch = [f for f in videos if util.needs_local_copy(f)]
+        videos = [f for f in videos if f not in fetch]
+        if fetch:
+            fileops.fetch_local(self, fetch, self._open_videos)
         img_choice = self.settings.value("image_opener", "system")
         if images and img_choice == "builtin":
             if len(images) == 1:
@@ -1295,8 +1306,13 @@ class MainWindow(QMainWindow):
         elif images:
             others += self._open_with_choice(images, img_choice)
         if videos:
-            others += self._open_with_choice(videos, self.settings.value("video_opener", "system"))
+            self._open_videos(videos)
         for f in others:
+            if not self.open_file(f):
+                QMessageBox.warning(self, "Open", f"Could not open {f}")
+
+    def _open_videos(self, videos):
+        for f in self._open_with_choice(videos, self.settings.value("video_opener", "system")):
             if not self.open_file(f):
                 QMessageBox.warning(self, "Open", f"Could not open {f}")
 

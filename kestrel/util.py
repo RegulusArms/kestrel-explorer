@@ -80,6 +80,37 @@ def is_video(path):
     return ext_of(path) in VIDEO_EXTS
 
 
+DEVICE_PATH_RE = re.compile(r"^/run/user/\d+/gvfs/(afc|gphoto2|mtp):")
+
+
+def is_device_path(path):
+    """A phone or camera mounted by gvfs (/run/user/<uid>/gvfs/afc:…, gphoto2:…, mtp:…): each read is slow (gphoto2
+    downloads the whole file) and the backend serves one request at a time, so nothing may scan it in bulk."""
+    return bool(DEVICE_PATH_RE.match(path or ""))
+
+
+LOCAL_COPY_RE = re.compile(r"^/run/user/\d+/gvfs/gphoto2:")
+
+
+def needs_local_copy(path):
+    """On a device whose backend downloads the whole file on every open (gvfs gphoto2), so a player that opens and
+    seeks it repeatedly downloads it again each time: open a local copy instead (fileops.fetch_local)."""
+    return bool(LOCAL_COPY_RE.match(path or ""))
+
+
+def device_uri(path):
+    """The gvfs URI (gphoto2://…, mtp://…) of a file on a device, from the mount that holds its FUSE path; None if
+    none. Main thread: uses Gio's volume monitor."""
+    if not Gio:
+        return None
+    for m in Gio.VolumeMonitor.get().get_mounts():
+        root = m.get_root()
+        r = root.get_path()
+        if r and path.startswith(r + "/"):
+            return root.resolve_relative_path(path[len(r) + 1:]).get_uri()
+    return None
+
+
 def file_uri(path):
     """URI escaped the way GLib does it (needed for the freedesktop thumbnail cache)."""
     return "file://" + quote(os.path.abspath(path), safe="/!$&'()*+,;=:@")

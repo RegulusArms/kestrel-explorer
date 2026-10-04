@@ -333,7 +333,7 @@ tests/run.sh                  # every test
 tests/run.sh fileops atc_undo # only some
 ```
 
-There are 130 checks in 6 tests: file operations (copy, move, merge, delete, cancel, trash, links, undo), the tower that keeps several Kestrels in sync (shared changes, the shared task list, shared undo, opening folders as tabs), and `install.sh`. Each test runs with a throwaway home folder on a private D-Bus bus, so your files, settings, dock and open windows are never touched. The [C++ version](../kes-c/tests) has the same tests, and some checks launch the other version to test the two together. Details: [tests/README.md](tests/README.md).
+There are 152 checks in 7 tests: file operations (copy, move, merge, delete, cancel, trash, links, undo), the tower that keeps several Kestrels in sync (shared changes, the shared task list, shared undo, opening folders as tabs), phones and cameras, and `install.sh`. Each test runs with a throwaway home folder on a private D-Bus bus, so your files, settings, dock and open windows are never touched. The [C++ version](../kes-c/tests) has the same tests, and some checks launch the other version to test the two together. Details: [tests/README.md](tests/README.md).
 
 ## Layout
 
