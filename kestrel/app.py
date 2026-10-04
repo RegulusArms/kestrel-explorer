@@ -1932,6 +1932,7 @@ class MainWindow(QMainWindow):
 
     def _preferences_saved(self):
         apply_preferences()
+        _settings.sync()  # other Kestrels read the file as soon as they hear the report
         atc.announce("settings")
 
     def clear_cache(self):
@@ -2071,6 +2072,11 @@ def apply_preferences():
 def on_atc(msg):
     """A change reported by another Kestrel through the tower (see atc.py), or by this one ("own")."""
     kind = msg.get("type")
+    if kind == "sidebar":   # its order or collapsed sections; also refreshes this process's other windows
+        if not msg.get("own"):
+            _settings.sync()
+        for w in WINDOWS:
+            w.sidebar.refresh()
     if kind == "bookmarks":   # also refreshes this process's other windows
         for w in WINDOWS:
             w.sidebar.refresh()
