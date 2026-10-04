@@ -72,13 +72,15 @@ class Pane(QWidget):
         self.search_contents.setToolTip("Search inside files too, using the desktop's search index (localsearch).\n"
                                         "Includes subfolders; only finds files in indexed folders.")
         self.search_contents.setChecked(self.settings.value("search_contents", False, type=bool))
-        self.search_contents.setVisible(can_search_contents())
         self.search_contents.toggled.connect(lambda v: (self.settings.setValue("search_contents", v),
                                                         self._do_search()))
         sl.addWidget(self.search_edit, 1)
         sl.addWidget(self.search_sub)
         sl.addWidget(self.search_contents)
         sl.addWidget(close)
+        # only once it has a parent: showing a parentless widget opens it as a window of its own, which on Wayland
+        # uses up the launch's activation token and leaves GNOME's busy cursor spinning until it times out
+        self.search_contents.setVisible(can_search_contents())
         self.search_bar.hide()
         self.search_timer = QTimer(self, singleShot=True, interval=250, timeout=self._do_search)
         self.search_edit.textChanged.connect(lambda: self.search_timer.start())
