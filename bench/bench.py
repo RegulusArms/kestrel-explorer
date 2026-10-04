@@ -233,6 +233,10 @@ def listing(path):
         return []
 
 
+class Stuck(RuntimeError):
+    """A file operation another file manager accepted but didn't finish (for example waiting for a confirmation)."""
+
+
 class FileOps:
     """Another file manager's file-operations D-Bus service, as other apps use it. Its calls return at once, so each
     operation is timed by watching the files until it has finished (checked every 50 ms). The service's methods and
@@ -280,12 +284,23 @@ class FileOps:
         t0 = time.monotonic()
         while not done():
             if time.monotonic() - t0 > timeout:
-                raise RuntimeError(f"{self.app}: the operation never finished")
+                raise Stuck(f"{self.app}: the operation didn't finish within {timeout} s")
+            self.sample()
             time.sleep(0.05)
+        self.sample()
         return time.monotonic() - t0
 
+    def sample(self):
+        # read while it runs: a service with no window may quit as soon as the operation is done (Nemo does)
+        m = peak_mb(self.p.pid)
+        if m is not None:
+            self.peak_seen = max(self.peak_seen or 0, m)
+
+    peak_seen = None
+
     def peak(self):
-        return peak_mb(self.p.pid)
+        self.sample()
+        return self.peak_seen
 
     def close(self):
         stop(self.p)
@@ -368,7 +383,10 @@ def measure_trash(app):
             return {"s": s, "rss_mb": n.peak()}
         t0 = time.monotonic()
         n.call("EmptyTrash")
-        n.wait(lambda: not listing(f"{trash}/files") and not listing(f"{trash}/info"))
+        try:
+            n.wait(lambda: not listing(f"{trash}/files") and not listing(f"{trash}/info"))
+        except Stuck as e:
+            return {"s": s, "rss_mb": n.peak(), "stuck_empty": str(e)}
         return {"s": s, "empty_s": time.monotonic() - t0, "rss_mb": n.peak()}
     finally:
         n.close()
@@ -453,12 +471,15 @@ def measure(app, test):
         return measure_startup(app)
     if test in FOLDER_TESTS:
         return measure_folder(app, f"{DATA}/{'gallery' if test == 'open_gallery' else test}")
-    if test == "copy" and app in OTHERS:
-        return measure_copy_other(app)
-    if test == "move_xdev":
-        return measure_move_xdev(app)
-    if test == "trash":
-        return measure_trash(app)
+    try:
+        if test == "copy" and app in OTHERS:
+            return measure_copy_other(app)
+        if test == "move_xdev":
+            return measure_move_xdev(app)
+        if test == "trash":
+            return measure_trash(app)
+    except Stuck as e:   # noted in the table instead of stopping the run
+        return {"s": None, "stuck": str(e)}
     if test in ("windows", "windows_tabs"):
         return measure_windows(app, tabs=test == "windows_tabs")
     if test == "idle":
@@ -616,7 +637,12 @@ def tables(res, other):
         vs[-1] = vs[-1][:-1] + "."
     gallery_n, kes_n = med(other, "open_gallery", "n"), med("cxx", "open_gallery", "n")
     ops = {"copy": "copy files", "move_xdev": "move files to another drive", "trash": "move files to the trash"}
-    untimed = [phrase for test, phrase in ops.items() if (other, test) in res and med(other, test) is None]
+    runs_of = lambda test: res.get((other, test), [])   # noqa: E731
+    stuck = [phrase for test, phrase in ops.items() if runs_of(test) and all(r.get("stuck") for r in runs_of(test))]
+    if runs_of("trash") and all(r.get("stuck_empty") for r in runs_of("trash")):
+        stuck.append("empty the trash")
+    untimed = [phrase for test, phrase in ops.items()
+               if runs_of(test) and med(other, test) is None and phrase not in stuck]
     kinds = {"open_gallery": "images", "videos": "videos", "pdfs": "PDFs"}
     no_thumbs = [kinds[t] for t in kinds if res.get((other, t)) and all(r.get("no_thumbs") for r in res[(other, t)])]
     summary = {"vs": "\n".join(vs), "no_thumbs": no_thumbs,
@@ -625,7 +651,7 @@ def tables(res, other):
                "kestrel_n": round(kes_n) if kes_n else None,
                "kestrel_all": secs(med("cxx", "bulk_thumbs")),
                "procs": round(med("cxx", "windows", "procs") or 0),
-               "untimed": untimed}
+               "untimed": untimed, "stuck": stuck}
     return t1, t2, summary
 
 
@@ -676,6 +702,10 @@ def section(t1, t2, summary, runs, py_link, cxx_link, other):
                    f"{' or '.join(summary['untimed'])}, so those rows show —.")
         if "move files to the trash" in summary["untimed"]:
             untimed += " For \"Empty the trash\", the files were put in the trash with `gio trash` first."
+    if summary["stuck"]:
+        untimed += (f"\n- **Didn't finish:** asked through its D-Bus service to {' or '.join(summary['stuck'])}, "
+                    f"{label} didn't finish within 2 minutes (it may have been waiting for a confirmation), so those "
+                    f"rows show —.")
     return f"""{OTHERS[other]["heading"]}
 
 Kestrel Explorer exists in two versions with the same features: the original [Python/PyQt6 version]({py_link}) and the [C++/Qt 6 port]({cxx_link}). They share settings, bookmarks and caches, so you can switch between them. Both are compared here with {version}, the file manager they replace.
@@ -832,7 +862,10 @@ def main():
                     detail = "".join(f", {k} {r[k]:.0f}" for k in ("rss_mb", "mem_mb", "cpu_ms") if r.get(k))
                     if r.get("empty_s") is not None:
                         detail += f", empty {r['empty_s']:.3f} s"
-                    took = "not offered" if r["s"] is None else f"{r['s']:.3f} s"
+                    elif r.get("stuck_empty"):
+                        detail += ", emptying didn't finish"
+                    took = (f"{r['s']:.3f} s" if r["s"] is not None else "didn't finish" if r.get("stuck")
+                            else "no thumbnails" if r.get("no_thumbs") else "not offered")
                     print(f"  {test:13} {app:9} run {i + 1}/{n}: {took}{detail}", flush=True)
                 with open(results_file, "w") as f:   # saved as it goes, so an interrupted run isn't lost
                     json.dump({f"{a} {t}": v for (a, t), v in res.items()}, f, indent=1)
