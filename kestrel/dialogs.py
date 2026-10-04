@@ -5,6 +5,7 @@ import html
 import os
 import pwd
 import re
+import shutil
 import stat
 import time
 
@@ -290,7 +291,12 @@ class PropertiesDialog(QDialog):
         icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         icon.setPixmap(util.icon_for_path(self.path).pixmap(96, 96))
         form.addRow(icon)
-        if self.single and (util.is_image(self.path) or util.is_video(self.path)):
+        if self.single and os.path.isdir(self.path) and thumbs.manager() is not None:
+            t = thumbs.manager()
+            pm = t.folder_pixmap(self.path, os.stat(self.path).st_mtime, 128)
+            if pm is not None:
+                icon.setPixmap(t.scaled(pm, 128))
+        if self.single and not os.path.isdir(self.path) and thumbs.can_thumbnail(self.path):
             st = os.stat(self.path)
             self._run(lambda: thumbs.file_thumb(self.path, st.st_mtime, 128),
                       lambda img: img is not None and icon.setPixmap(QPixmap.fromImage(img)))
@@ -319,6 +325,8 @@ class PropertiesDialog(QDialog):
             form.addRow("Accessed:", _sel_label(_fmt_time(st.st_atime)))
             form.addRow("Changed:", _sel_label(_fmt_time(st.st_ctime) + "  (metadata)"))
             form.addRow("Inode / links:", _sel_label(f"{st.st_ino} / {st.st_nlink}  (device {st.st_dev})"))
+            if is_dir:
+                self._folder_style_rows(form)
             if os.path.isfile(self.path):
                 app = util.default_app(self.path)
                 row = QHBoxLayout()
@@ -352,6 +360,35 @@ class PropertiesDialog(QDialog):
                 f"{vol.rootPath()} ({bytes(vol.fileSystemType()).decode()}) — "
                 f"{util.human_size(vol.bytesAvailable())} free of {util.human_size(vol.bytesTotal())}"))
         return w
+
+    def _folder_style_rows(self, form):
+        """Folder colour and image previews for this folder (also in the folder's right-click menu)."""
+        t = thumbs.manager()
+        if t is None:
+            return
+        self.style_color = QComboBox()
+        self.style_color.addItem(thumbs.color_swatch(t.folder_color), "Default", "")
+        for name, color in thumbs.FOLDER_COLORS:
+            self.style_color.addItem(thumbs.color_swatch(color), name, color)
+        cur = t.custom_color(self.path) or ""
+        if cur and self.style_color.findData(cur) < 0:
+            self.style_color.addItem(thumbs.color_swatch(cur), f"Custom ({cur})", cur)
+        self.style_color.setCurrentIndex(max(0, self.style_color.findData(cur)))
+        form.addRow("Folder colour:", self.style_color)
+        self.style_previews = QCheckBox("Show image previews on this folder's icon")
+        self.style_previews.setChecked(t.previews_for(self.path))
+        form.addRow("", self.style_previews)
+
+    def _apply_folder_style(self):
+        t = thumbs.manager()
+        if t is None or getattr(self, "style_color", None) is None:
+            return
+        color = self.style_color.currentData() or None
+        if color != t.custom_color(self.path):
+            t.set_folder_color([self.path], color)
+        on = self.style_previews.isChecked()
+        if on != t.previews_for(self.path):
+            t.set_folder_previews([self.path], on)
 
     def _show_dir_size(self, res):
         size, files, dirs = res
@@ -672,6 +709,7 @@ class PropertiesDialog(QDialog):
 
     def _apply(self):
         if self.single:
+            self._apply_folder_style()   # before a rename: styles are kept by path
             if hasattr(self, "perm_boxes"):
                 m = self._mode()
                 if m != self.orig_mode:
@@ -689,6 +727,9 @@ class PropertiesDialog(QDialog):
             if new and new != os.path.basename(self.path.rstrip("/")):
                 try:
                     err = do_rename(self.path, new)
+                    if not err:
+                        from . import undo
+                        undo.record("rename", "Rename", [(self.path, os.path.join(os.path.dirname(self.path), new))])
                 except PermissionError:
                     from . import admin
                     target = os.path.join(os.path.dirname(self.path), new)
@@ -948,6 +989,10 @@ class BatchRenameDialog(QDialog):
                 temps.append((tmp, p))
             for (tmp, p), new in zip(temps, names):
                 os.rename(tmp, os.path.join(os.path.dirname(p), new))
+            from . import undo
+            undo.record("rename", f"Rename {len(names)} Items",
+                        [(p, os.path.join(os.path.dirname(p), new)) for (_, p), new in zip(temps, names) if
+                         os.path.basename(p) != new])
         except OSError as e:
             for tmp, p in temps:
                 if os.path.exists(tmp):
@@ -1012,6 +1057,20 @@ class PreferencesDialog(QDialog):
         self.slide.setRange(1, 120)
         self.slide.setSuffix(" s")
         self.slide.setValue(int(settings.value("slideshow_secs", 4)))
+        self.play_gifs = QCheckBox("Play animated GIFs in the file view")
+        self.play_gifs.setChecked(settings.value("play_gifs", False, type=bool))
+        self.play_webm = QCheckBox("Play WebM videos in the file view (silent looping previews)")
+        self.play_webm.setChecked(settings.value("play_webm", False, type=bool))
+        if not shutil.which("ffmpeg"):
+            self.play_webm.setEnabled(False)
+            self.play_webm.setToolTip("Needs ffmpeg:  sudo apt install ffmpeg")
+        self.shared_undo = QCheckBox("Share undo between all Kestrel windows")
+        self.shared_undo.setChecked(settings.value("shared_undo", False, type=bool))
+        self.shared_undo.setToolTip("On: Ctrl+Z in any Kestrel window undoes the newest action from any of them.\nOff: each Kestrel undoes only what was done in it.")
+        self.open_in_tabs = QCheckBox("Open folders from other apps as tabs in an open Kestrel window")
+        self.open_in_tabs.setChecked(settings.value("open_in_tabs", False, type=bool))
+        self.open_in_tabs.setToolTip("On: a folder opened from another app (or with “Show in folder”) becomes a tab in "
+                                     "the Kestrel window you used last.\nOff: it opens in a new window.")
         form.addRow("Images in folder previews:", self.count)
         form.addRow("Folder preview picks:", self.order)
         form.addRow("Folder colour:", self.color_btn)
@@ -1021,6 +1080,10 @@ class PreferencesDialog(QDialog):
         form.addRow("Open videos with:", self.vid_opener)
         form.addRow(self.single)
         form.addRow(self.dirs_first)
+        form.addRow(self.play_gifs)
+        form.addRow(self.play_webm)
+        form.addRow(self.shared_undo)
+        form.addRow(self.open_in_tabs)
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         bb.accepted.connect(self._save)
         bb.rejected.connect(self.reject)
@@ -1084,6 +1147,10 @@ class PreferencesDialog(QDialog):
         s.setValue("single_click", self.single.isChecked())
         s.setValue("list_folder_previews", self.dirs_first.isChecked())
         s.setValue("slideshow_secs", self.slide.value())
+        s.setValue("play_gifs", self.play_gifs.isChecked())
+        s.setValue("play_webm", self.play_webm.isChecked())
+        s.setValue("shared_undo", self.shared_undo.isChecked())
+        s.setValue("open_in_tabs", self.open_in_tabs.isChecked())
         self.accept()
 
 

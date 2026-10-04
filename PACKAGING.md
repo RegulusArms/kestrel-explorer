@@ -10,7 +10,7 @@
 |---|---|---|
 | Build config | `pyproject.toml` | setuptools backend, package `kestrel` |
 | Name | `pyproject.toml` | `kestrel-explorer` |
-| Version | `kestrel/__init__.py` (`__version__`) | Read from the code at build time, so there's one source of truth. `0.1.2-alpha` is published as `0.1.2a0` (the [PEP 440](https://peps.python.org/pep-0440/) form). |
+| Version | `kestrel/__init__.py` (`__version__`) | Read from the code at build time, so there's one source of truth. `0.1.3-alpha` is published as `0.1.3a0` (the [PEP 440](https://peps.python.org/pep-0440/) form). |
 | Python | `requires-python = ">=3.11.4"` | 3.11.4 added the tar extraction safety filter that Extract Here uses |
 | License | `LICENSE` | MIT |
 | Dependencies | `PyQt6>=6.5`, `Pillow>=9.0` | Installed from PyPI wheels |

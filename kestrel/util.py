@@ -472,6 +472,8 @@ def write_bookmarks(items):
         uri = file_uri(target) if target.startswith("/") else target
         lines.append(uri + ("" if label == default else " " + label))
     GTK_BOOKMARKS.write_text("\n".join(lines) + "\n")
+    from . import atc
+    atc.announce("bookmarks")
 
 
 def url_list(paths):
@@ -498,10 +500,10 @@ def ensure_desktop_entry():
         DESKTOP_ENTRY.parent.mkdir(parents=True, exist_ok=True)
         DESKTOP_ENTRY.write_text(
             f"[Desktop Entry]\nType=Application\nName={APP_NAME}\nGenericName=File Manager\n"
-            "Comment=Browse files and image galleries with folder previews\n"
+            "Comment=Manage files, with archive, admin, permission and metadata tools built in\n"
             f"Exec={launcher} %U\nIcon=folder\nTerminal=false\n"
             "Categories=System;FileTools;FileManager;Viewer;\n"
-            f"MimeType=inode/directory;\nStartupWMClass={APP_ID}\n")
+            f"MimeType=inode/directory;x-directory/normal;\nStartupWMClass={APP_ID}\n")
     except OSError:
         pass
 

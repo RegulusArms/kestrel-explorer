@@ -8,6 +8,8 @@ Folder previews are a mosaic of the first images in the folder, cached in
 import io
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -17,11 +19,17 @@ from collections import OrderedDict
 from PyQt6.QtCore import QObject, QRectF, QRunnable, QSize, Qt, QThread, QThreadPool, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QIcon, QImage, QPainter, QPainterPath, QPixmap
 
-from . import util
+from . import atc, util
 
 FLAVORS = {128: "normal", 256: "large", 512: "x-large"}
 COVER_NAMES = ("cover", "folder", ".cover", ".folder", "front", "poster")
 COVERS_FILE = util.CONFIG_DIR / "covers.json"
+STYLES_FILE = util.CONFIG_DIR / "folder_styles.json"   # per-folder {"color": "#rrggbb", "previews": false}
+
+# colours offered for folder icons (right-click a folder → Folder Colour, or its Properties)
+FOLDER_COLORS = [("Red", "#e01b24"), ("Orange", "#ff7800"), ("Yellow", "#f6d32d"), ("Green", "#33d17a"),
+                 ("Teal", "#2aa198"), ("Blue", "#3584e4"), ("Purple", "#9141ac"), ("Pink", "#e66ba5"),
+                 ("Brown", "#986a44"), ("Grey", "#77767b")]
 
 
 def bucket_for(size):
@@ -108,6 +116,110 @@ def video_frame(path, size):
     return None
 
 
+# ---------------------------------------------------------------- system thumbnailers (PDF, fonts, audio, …)
+
+_thumbnailers = None
+
+
+def thumbnailers():
+    """{mime type: [Exec line, …]} from the freedesktop .thumbnailer files (the same ones GNOME Files uses), in
+    order of preference: a user's own ~/.local/share/thumbnailers comes first."""
+    global _thumbnailers
+    if _thumbnailers is None:
+        table = {}
+        data_dirs = [os.environ.get("XDG_DATA_HOME", os.path.join(util.HOME, ".local/share"))]
+        data_dirs += os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":")
+        for d in data_dirs:
+            folder = os.path.join(d, "thumbnailers")
+            try:
+                names = sorted(os.listdir(folder))
+            except OSError:
+                continue
+            for name in names:
+                if not name.endswith(".thumbnailer"):
+                    continue
+                entry = {}
+                try:
+                    with open(os.path.join(folder, name), errors="replace") as f:
+                        for line in f:
+                            key, eq, value = line.strip().partition("=")
+                            if eq:
+                                entry[key] = value
+                except OSError:
+                    continue
+                exe, try_exec = entry.get("Exec", ""), entry.get("TryExec", "")
+                if not exe or (try_exec and not shutil.which(try_exec)):
+                    continue
+                for mt in entry.get("MimeType", "").split(";"):
+                    if mt and exe not in table.setdefault(mt, []):
+                        table[mt].append(exe)
+        _thumbnailers = table
+    return _thumbnailers
+
+
+def thumbnailers_for(path):
+    """The system thumbnailers' Exec lines for this file's type, best first (empty if there are none)."""
+    table = thumbnailers()
+    if not table:
+        return []
+    m = util.mime_for(path, False)
+    for name in [m.name(), *m.aliases(), *m.allAncestors()]:
+        if name in table:
+            return table[name]
+    return []
+
+
+def can_thumbnail(path):
+    """Whether a file can get a thumbnail: images and videos (Kestrel's own), anything else a system
+    thumbnailer handles."""
+    return util.is_image(path) or util.is_video(path) or bool(thumbnailers_for(path))
+
+
+_tries = {}   # Exec line -> [successes, failures]: one that only ever fails is skipped after a few tries
+
+
+def _run_thumbnailer(exe, path, size):
+    # The output goes to /tmp/gnome-desktop-thumbnailer-*.png like GNOME's own: Ubuntu's AppArmor profiles only let
+    # thumbnailers such as evince/papers write there.
+    fd, out = tempfile.mkstemp(prefix="gnome-desktop-thumbnailer-", suffix=".png", dir="/tmp")
+    os.close(fd)
+    try:
+        subst = {"%i": os.path.abspath(path), "%u": util.file_uri(path), "%o": out, "%s": str(size), "%%": "%"}
+        argv = []
+        for arg in shlex.split(exe):
+            for k, v in subst.items():
+                arg = arg.replace(k, v)
+            argv.append(arg)
+        subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=30, start_new_session=True)
+        img = QImage(out)
+        return None if img.isNull() else img
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    finally:
+        try:
+            os.unlink(out)
+        except OSError:
+            pass
+
+
+def system_thumb(path, size):
+    """A thumbnail from the system thumbnailers for this file's type (QImage or None); if one fails, the next one
+    registered for the type is tried."""
+    for exe in thumbnailers_for(path):
+        ok, bad = _tries.setdefault(exe, [0, 0])
+        if not ok and bad >= 3:
+            continue
+        img = _run_thumbnailer(exe, path, size)
+        _tries[exe][0 if img is not None else 1] += 1
+        if img is not None:
+            if img.width() > size or img.height() > size:
+                img = img.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio,
+                                 Qt.TransformationMode.SmoothTransformation)
+            return img
+    return None
+
+
 def file_thumb(path, mtime, size):
     """Return a QImage thumbnail (max size x size) using the freedesktop cache."""
     flavor = FLAVORS[bucket_for(size)]
@@ -124,10 +236,13 @@ def file_thumb(path, mtime, size):
         img = video_frame(path, size)
     else:
         img = None
+    own = img is not None
+    if img is None:   # PDFs, fonts, … (and images Qt can't decode): the system thumbnailers
+        img = system_thumb(path, size)
     if img is None:
         return None
     # don't bother caching images that are already thumbnail sized
-    if not in_cache_dir and (img.width() >= size or img.height() >= size or util.is_video(path)):
+    if not in_cache_dir and (img.width() >= size or img.height() >= size or util.is_video(path) or not own):
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             img.setText("Thumb::URI", uri)
@@ -243,6 +358,9 @@ def compose_folder(images, size, color, videos=()):
     body = QRectF(m, m + s * 0.19, s - 2 * m, s * 0.75)
     p.setBrush(front)
     p.drawRoundedRect(body, s * 0.06, s * 0.06)
+    if not images:  # a plain folder in this colour (no previews)
+        p.end()
+        return canvas
     # mosaic
     inner = body.adjusted(s * 0.035, s * 0.035, -s * 0.035, -s * 0.035)
     clip = QPainterPath()
@@ -339,8 +457,9 @@ def purge_thumbnails(include_shared=False):
     """
     files = size = 0
     targets = []
-    for root, _, names in os.walk(util.APP_CACHE / "folders"):
-        targets += [os.path.join(root, n) for n in names]
+    for sub in ("folders", "animated"):   # folder mosaics, looping video previews
+        for root, _, names in os.walk(util.APP_CACHE / sub):
+            targets += [os.path.join(root, n) for n in names]
     for flavor in FLAVORS.values():
         d = util.THUMB_DIR / flavor
         if not d.is_dir():
@@ -360,6 +479,27 @@ def purge_thumbnails(include_shared=False):
         except OSError:
             pass
     return files, size
+
+
+_manager = None
+
+
+def manager():
+    """The app's ThumbnailManager (the first one created)."""
+    return _manager
+
+
+def color_swatch(color, size=16):
+    """A small rounded square of `color` for menus and lists."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(QColor(0, 0, 0, 80))
+    p.setBrush(QColor(color))
+    p.drawRoundedRect(QRectF(0.5, 0.5, size - 1, size - 1), 3, 3)
+    p.end()
+    return QIcon(pm)
 
 
 class _Signals(QObject):
@@ -392,6 +532,8 @@ class ThumbnailManager(QObject):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        global _manager
+        _manager = _manager or self
         # Keep the pools small: decoding releases the GIL, but every thread still
         # competes with the UI thread for it between C++ calls.
         self.pool = QThreadPool(self)
@@ -399,6 +541,7 @@ class ThumbnailManager(QObject):
         self.dir_pool = QThreadPool(self)  # folder mosaics (directory scans)
         self.dir_pool.setMaxThreadCount(2)
         util.image_exts()  # initialise on the main thread
+        thumbnailers()
         self.batch_total = 0
         self.batch_done = 0
         self._progress_timer = QTimer(self, singleShot=True, interval=100, timeout=self._emit_progress)
@@ -414,6 +557,8 @@ class ThumbnailManager(QObject):
         self.folder_order = "name"
         self.folder_color = "#d9652f"
         self.covers = self._load_covers()
+        self.styles = self._load_json(STYLES_FILE)
+        self._plain = {}   # (color, size) -> QPixmap of a plain folder
         self._prio = 0
         self._scaled = OrderedDict()
 
@@ -424,7 +569,79 @@ class ThumbnailManager(QObject):
         except Exception:
             return {}
 
+    @staticmethod
+    def _load_json(path):
+        try:
+            return json.loads(path.read_text())
+        except Exception:
+            return {}
+
+    # -- per-folder style: colour and previews on/off
+    def custom_color(self, folder):
+        """The colour chosen for this folder, or None for the default."""
+        return self.styles.get(folder, {}).get("color")
+
+    def color_for(self, folder):
+        return self.custom_color(folder) or self.folder_color
+
+    def previews_for(self, folder):
+        """False if image previews are turned off for this folder."""
+        return self.styles.get(folder, {}).get("previews", True)
+
+    def reload_styles(self):
+        """Re-read covers and folder styles (another Kestrel changed them)."""
+        self.covers = self._load_covers()
+        self.styles = self._load_json(STYLES_FILE)
+
+    def _set_style(self, folders, key, value):
+        self.reload_styles()   # another Kestrel may have changed them since
+        for f in folders:
+            st = dict(self.styles.get(f, {}))
+            if value is None:
+                st.pop(key, None)
+            else:
+                st[key] = value
+            if st:
+                self.styles[f] = st
+            else:
+                self.styles.pop(f, None)
+        try:
+            STYLES_FILE.parent.mkdir(parents=True, exist_ok=True)
+            STYLES_FILE.write_text(json.dumps(self.styles, indent=1))
+        except OSError:
+            pass
+        for f in folders:
+            self.invalidate(f)
+        atc.announce("folders", paths=list(folders))
+
+    def set_folder_color(self, folders, color):
+        """color "#rrggbb", or None for the default."""
+        self._set_style(folders, "color", color)
+
+    def set_folder_previews(self, folders, on):
+        self._set_style(folders, "previews", None if on else False)
+
+    def plain_folder(self, color, size):
+        """A plain folder icon in `color` (cached; cheap enough to draw on the UI thread)."""
+        k = (color, bucket_for(size))
+        pm = self._plain.get(k)
+        if pm is None:
+            pm = self._plain[k] = QPixmap.fromImage(compose_folder([], k[1], color))
+        return pm
+
+    def folder_pixmap(self, path, mtime, size, previews=True):
+        """What to draw for a folder: its preview mosaic (in its colour), a plain folder in its custom colour while
+        there is no mosaic, or None for the theme's folder icon. previews=False skips the mosaic (e.g. when folder
+        previews are switched off globally)."""
+        if previews and self.previews_for(path):
+            pm = self.get(path, mtime, True, size)
+            if pm is not None:
+                return pm
+        color = self.custom_color(path)
+        return self.plain_folder(color, size) if color else None
+
     def set_cover(self, folder, image):
+        self.reload_styles()
         if image:
             self.covers[folder] = image
         else:
@@ -432,12 +649,13 @@ class ThumbnailManager(QObject):
         COVERS_FILE.parent.mkdir(parents=True, exist_ok=True)
         COVERS_FILE.write_text(json.dumps(self.covers, indent=1))
         self.invalidate(folder)
+        atc.announce("folders", paths=[folder])
 
     # -- api
     def key(self, path, mtime, is_dir, size):
         b = bucket_for(size)
         if is_dir:
-            return ("d", b, path, int(mtime), self.folder_count, self.folder_order, self.folder_color,
+            return ("d", b, path, int(mtime), self.folder_count, self.folder_order, self.color_for(path),
                     self.covers.get(path, ""))
         return ("f", b, path, int(mtime))
 
@@ -457,7 +675,7 @@ class ThumbnailManager(QObject):
             self.pending.add(k)
             self._prio += 1
             opts = {"count": self.folder_count, "order": self.folder_order,
-                    "color": self.folder_color, "cover": self.covers.get(path)}
+                    "color": self.color_for(path), "cover": self.covers.get(path)}
             job = _Job(k, path, mtime, is_dir, bucket_for(size), opts, self.signals)
             (self.dir_pool if is_dir else self.pool).start(job, self._prio)
             self.batch_total += 1
@@ -505,12 +723,13 @@ class ThumbnailManager(QObject):
             self.batch_total = self.batch_done = 0
         self.progress.emit(self.batch_done, self.batch_total)
 
-    def invalidate(self, path):
+    def invalidate(self, path, disk=True):
+        """disk=False keeps the cached mosaic on disk."""
         for d in (self.cache, self.icons):
             for k in [k for k in d if k[2] == path]:
                 d.pop(k, None)
         self.failed = {k for k in self.failed if k[2] != path}
-        for size in (128, 256, 512):
+        for size in (128, 256, 512) if disk else ():
             try:
                 (util.APP_CACHE / "folders" / f"{util.md5(path)}-{size}.png").unlink()
             except OSError:
@@ -564,6 +783,8 @@ class RecursiveBuilder(QThread):
         self.opts = {"count": manager.folder_count, "order": manager.folder_order,
                      "color": manager.folder_color}
         self.covers = dict(manager.covers)
+        self.colors = {f: st["color"] for f, st in manager.styles.items() if st.get("color")}
+        self.no_previews = {f for f, st in manager.styles.items() if st.get("previews") is False}
         self.done = self.total = 0
         self.scanning = True
         self.current = root
@@ -589,7 +810,8 @@ class RecursiveBuilder(QThread):
                 return
             st = os.stat(path)
             if kind == "d":
-                folder_thumb(path, st.st_mtime, self.size, dict(self.opts, cover=self.covers.get(path)))
+                folder_thumb(path, st.st_mtime, self.size, dict(self.opts, cover=self.covers.get(path),
+                                                                color=self.colors.get(path, self.opts["color"])))
             elif st.st_size <= self.max_bytes or util.is_video(path):
                 file_thumb(path, st.st_mtime, self.size)
                 if self.size != 128:  # mosaic tiles use the small size
@@ -625,7 +847,7 @@ class RecursiveBuilder(QThread):
                     if not f.startswith(".") and os.path.splitext(f)[1].lower() in exts:
                         if not submit(("f", os.path.join(root, f))):
                             break
-                if self.stop or not submit(("d", root)):
+                if self.stop or (root not in self.no_previews and not submit(("d", root))):
                     break
                 self._emit()
             with self._lock:

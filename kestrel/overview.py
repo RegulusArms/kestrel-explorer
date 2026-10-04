@@ -31,7 +31,10 @@ URI_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
 
 
 def is_uri(target):
-    return bool(URI_RE.match(target or "")) and not target.startswith("file://") and target != OVERVIEW
+    """A network location to mount (smb://, sftp://, …), not a local path, the Overview, Starred or Recent."""
+    from .places import VIRTUAL
+    return bool(URI_RE.match(target or "")) and not target.startswith("file://") and target != OVERVIEW \
+        and target not in VIRTUAL
 
 
 # ---------------------------------------------------------------- data gathering
@@ -438,7 +441,7 @@ class BookmarkCard(Card):
         if self.local:
             if os.path.isdir(self.target):
                 fi = QFileInfo(self.target)
-                pm = self.thumbs.get(self.target, fi.lastModified().toSecsSinceEpoch(), True, 128)
+                pm = self.thumbs.folder_pixmap(self.target, fi.lastModified().toSecsSinceEpoch(), 128)
                 if pm is not None:
                     self.pic.setPixmap(self.thumbs.scaled(pm, 128))
                     return

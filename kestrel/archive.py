@@ -34,7 +34,11 @@ class WrongPassword(Exception):
 
 
 def tool(name):
-    """Full path of a command-line tool, preferring the system's copy over e.g. conda's."""
+    """Full path of a command-line tool, preferring the system's copy over e.g. conda's (unless Kestrel was started
+    from an explicitly activated conda environment; see env.py)."""
+    from .env import explicit_conda_env
+    if explicit_conda_env():
+        return shutil.which(name)
     return shutil.which(name, path=_SYSTEM_PATH) or shutil.which(name)
 
 
