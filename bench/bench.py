@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Benchmark Kestrel Explorer (Python and C++) against GNOME Files. See README.md.
+"""Benchmark Kestrel Explorer (Python and C++) against GNOME Files, or Nemo on Linux Mint. See README.md.
 
   bench/run.sh                      build, generate the data (first time), run everything, print the tables
   bench/run.sh --runs 5             more runs per measurement (medians are reported)
@@ -35,16 +35,32 @@ PY_ROOT, CXX_ROOT = os.path.realpath(PY_ROOT), os.path.realpath(CXX_ROOT)
 DATA = os.environ.get("KESTREL_BENCH_DATA", "/tmp/kestrel-bench-data")
 CMAKE = "/usr/bin/cmake" if os.access("/usr/bin/cmake", os.X_OK) else "cmake"
 BUILD = os.environ.get("KESTREL_BUILD_DIR", "build")  # build folder name (another machine sharing these folders)
-APPS = ("python", "cxx", "nautilus")
-# measured the same way for all three apps
+# The file managers Kestrel is compared with; the ones installed are measured (GNOME Files on Ubuntu, Nemo on Linux
+# Mint). File operations go through each one's D-Bus file-operations service, as other apps use it: "service" starts
+# it, "ops" is (bus name, object path, interface), and "settings" are set in the throwaway home first (gsettings).
+OTHERS = {
+    "nautilus": {"label": "GNOME Files", "cmd": ["nautilus"], "service": ["nautilus", "--gapplication-service"],
+                 "ops": ("org.gnome.Nautilus", "/org/gnome/Nautilus/FileOperations2",
+                         "org.gnome.Nautilus.FileOperations2"),
+                 "settings": [],
+                 "heading": "## Performance: Kestrel vs GNOME Files",
+                 "helpers": "separate sandboxed helper processes", "search": " without its file indexer",
+                 "whole_folder": True},   # thumbnails the whole folder in the background
+    "nemo": {"label": "Nemo", "cmd": ["nemo"], "service": ["nemo", "--no-default-window"],
+             "ops": ("org.Nemo", "/org/Nemo", "org.Nemo.FileOperations"),
+             "settings": [("org.nemo.preferences", "confirm-trash", "false")],   # Empty Trash would ask first
+             "heading": "## Performance: Kestrel vs Nemo",
+             "helpers": "separate helper processes", "search": "", "whole_folder": False},
+}
+APPS = ("python", "cxx") + tuple(OTHERS)
+# measured the same way for every app
 COMMON = ("startup", "open_gallery", "videos", "pdfs", "copy", "move_xdev", "trash", "windows", "idle")
-# Kestrel only: its "open folders as tabs" setting, and features GNOME Files has no equivalent of
+# Kestrel only: its "open folders as tabs" setting, and features the other file managers have no equivalent of
 KESTREL_ONLY = ("windows_tabs", "bulk_thumbs", "mosaics", "search", "metadata")
 FIRST = 12          # "open a folder": time until the first FIRST files (by name) have thumbnails
 WINDOWS = 5         # "several windows": folders opened from outside, one after another
 IDLE_SECONDS = 30   # "idle": CPU used in this long with a folder open and nothing happening
 THUMB_FLAVORS = ("normal", "large", "x-large", "xx-large")
-FILE_OPS = ("org.gnome.Nautilus", "/org/gnome/Nautilus/FileOperations2", "org.gnome.Nautilus.FileOperations2")
 
 
 # ---------------------------------------------------------------- measurements (run inside the sandbox)
@@ -54,9 +70,11 @@ def home():
 
 
 def app_command(app, folder=None):
-    cmd = {"python": ["/usr/bin/python3", os.path.join(PY_ROOT, "kes")],
-           "cxx": [os.path.join(CXX_ROOT, BUILD, "kes")],
-           "nautilus": ["nautilus"]}[app]
+    if app in OTHERS:
+        cmd = list(OTHERS[app]["cmd"])
+    else:
+        cmd = {"python": ["/usr/bin/python3", os.path.join(PY_ROOT, "kes")],
+               "cxx": [os.path.join(CXX_ROOT, BUILD, "kes")]}[app]
     return cmd + ([folder] if folder else [])
 
 
@@ -78,7 +96,7 @@ def stop(p):
 
 
 def app_pids(app):
-    """Every process of this app in this run (Kestrel: its windows and its tower; GNOME Files: its process)."""
+    """Every process of this app in this run (Kestrel: its windows and its tower; the others: their process)."""
     marker = f"HOME={home()}".encode() + b"\0"
     exe = app_command(app)[-1]
     out = []
@@ -93,7 +111,7 @@ def app_pids(app):
                 args = f.read().split(b"\0")
         except OSError:
             continue
-        if exe.encode() in args[:2] or (app == "nautilus" and os.path.basename(args[0]) == b"nautilus"):
+        if exe.encode() in args[:2] or (app in OTHERS and os.path.basename(args[0]) == exe.encode()):
             out.append(int(pid))
     return out
 
@@ -207,37 +225,54 @@ def listing(path):
         return []
 
 
-class Nautilus:
-    """GNOME Files' file-operations D-Bus service, as other apps use it. Its calls return at once, so each operation
-    is timed by watching the files until it has finished (checked every 50 ms)."""
+class FileOps:
+    """Another file manager's file-operations D-Bus service, as other apps use it. Its calls return at once, so each
+    operation is timed by watching the files until it has finished (checked every 50 ms). The service's methods and
+    their arguments are read from the service itself (Nemo's, a fork of an older GNOME Files, has fewer)."""
 
-    def __init__(self):
+    def __init__(self, app):
         from gi.repository import Gio, GLib
-        self.Gio, self.GLib = Gio, GLib
-        self.p = subprocess.Popen(["nautilus", "--gapplication-service"], stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.DEVNULL, start_new_session=True)
+        self.Gio, self.GLib, self.app = Gio, GLib, app
+        conf = OTHERS[app]
+        for schema, key, value in conf["settings"]:
+            subprocess.run(["gsettings", "set", schema, key, value], capture_output=True)
+        self.ops = conf["ops"]
+        self.p = subprocess.Popen(conf["service"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  start_new_session=True)
         self.bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
         t0 = time.monotonic()
         while True:
             try:
-                self.bus.call_sync(FILE_OPS[0], FILE_OPS[1], "org.freedesktop.DBus.Introspectable", "Introspect",
-                                   None, None, Gio.DBusCallFlags.NONE, 1000, None)
-                return
+                xml = self.bus.call_sync(self.ops[0], self.ops[1], "org.freedesktop.DBus.Introspectable",
+                                         "Introspect", None, None, Gio.DBusCallFlags.NONE, 1000, None).unpack()[0]
+                iface = Gio.DBusNodeInfo.new_for_xml(xml).lookup_interface(self.ops[2])
+                if iface is not None:
+                    self.methods = {m.name: [a.signature for a in m.in_args] for m in iface.methods}
+                    return
             except GLib.Error:
-                if time.monotonic() - t0 > 30:
-                    stop(self.p)
-                    raise RuntimeError("nautilus: no file-operations service")
-                time.sleep(0.05)
+                pass
+            if time.monotonic() - t0 > 30:
+                stop(self.p)
+                raise RuntimeError(f"{app}: no file-operations service")
+            time.sleep(0.05)
 
-    def call(self, method, signature, args):
-        self.bus.call_sync(*FILE_OPS, method, self.GLib.Variant(signature, args), None, self.Gio.DBusCallFlags.NONE,
-                           -1, None)
+    def has(self, method):
+        return method in self.methods
+
+    def call(self, method, uris=(), dest=""):
+        """The method's arguments in its own order: as = the files, s = the destination folder, a{sv} = no platform
+        data, b = no confirmation."""
+        values = {"as": list(uris), "s": dest, "a{sv}": {}, "b": False}
+        sig = self.methods[method]
+        args = tuple(values[t] for t in sig)
+        self.bus.call_sync(*self.ops, method, self.GLib.Variant(f"({''.join(sig)})", args) if sig else None, None,
+                           self.Gio.DBusCallFlags.NONE, -1, None)
 
     def wait(self, done, timeout=120):
         t0 = time.monotonic()
         while not done():
             if time.monotonic() - t0 > timeout:
-                raise RuntimeError("nautilus: the operation never finished")
+                raise RuntimeError(f"{self.app}: the operation never finished")
             time.sleep(0.05)
         return time.monotonic() - t0
 
@@ -248,16 +283,18 @@ class Nautilus:
         stop(self.p)
 
 
-def measure_copy_nautilus():
+def measure_copy_other(app):
     src = f"{DATA}/copysrc"
     want = tree_size(src)
     dst_parent = os.path.join(home(), "copydst")
     os.makedirs(dst_parent)
     dst = os.path.join(dst_parent, "copysrc")
-    n = Nautilus()
+    n = FileOps(app)
     try:
+        if not n.has("CopyURIs"):
+            return {"s": None}
         t0 = time.monotonic()
-        n.call("CopyURIs", "(assa{sv})", ([f"file://{src}"], f"file://{dst_parent}", {}))
+        n.call("CopyURIs", [f"file://{src}"], f"file://{dst_parent}")
         n.wait(lambda: os.path.isdir(dst) and count_files(dst) == want[0] and tree_size(dst) == want)
         return {"s": time.monotonic() - t0, "rss_mb": n.peak()}
     finally:
@@ -273,13 +310,15 @@ def measure_move_xdev(app):
     dst_parent = tempfile.mkdtemp(prefix="kestrel-bench-move.", dir="/dev/shm")
     dst = os.path.join(dst_parent, "movesrc")
     try:
-        if app != "nautilus":
+        if app not in OTHERS:
             r = harness(app, "move_xdev", dst)
         else:
-            n = Nautilus()
+            n = FileOps(app)
             try:
+                if not n.has("MoveURIs"):   # Nemo's service can only copy
+                    return {"s": None}
                 t0 = time.monotonic()
-                n.call("MoveURIs", "(assa{sv})", ([f"file://{src}"], f"file://{dst_parent}", {}))
+                n.call("MoveURIs", [f"file://{src}"], f"file://{dst_parent}")
                 n.wait(lambda: not os.path.exists(src) and os.path.isdir(dst) and count_files(dst) == want[0]
                        and tree_size(dst) == want)
                 r = {"s": time.monotonic() - t0, "rss_mb": n.peak()}
@@ -299,21 +338,28 @@ def measure_trash(app):
     shutil.copytree(f"{DATA}/flat", victim)
     total = len(os.listdir(victim))
     trash = os.path.join(home(), ".local", "share", "Trash")
-    if app != "nautilus":
+    if app not in OTHERS:
         r = harness(app, "trash")
         if r.get("n") != total or r.get("empty_left"):
             raise RuntimeError(f"{app}: trash {r}")
         return r
-    n = Nautilus()
+    n = FileOps(app)
     try:
         uris = [f"file://{victim}/{name}" for name in sorted(os.listdir(victim))]
+        s = None
+        if n.has("TrashURIs"):
+            t0 = time.monotonic()
+            n.call("TrashURIs", uris)
+            n.wait(lambda: not listing(victim) and len(listing(f"{trash}/files")) == total
+                   and len(listing(f"{trash}/info")) == total)
+            s = time.monotonic() - t0
+        else:   # Nemo's service can't move to the trash: put them there with gio (not timed), to time emptying it
+            subprocess.run(["gio", "trash", "--"] + [f"{victim}/{name}" for name in sorted(os.listdir(victim))],
+                           check=True)
+        if not n.has("EmptyTrash"):
+            return {"s": s, "rss_mb": n.peak()}
         t0 = time.monotonic()
-        n.call("TrashURIs", "(asa{sv})", (uris, {}))
-        n.wait(lambda: not listing(victim) and len(listing(f"{trash}/files")) == total
-               and len(listing(f"{trash}/info")) == total)
-        s = time.monotonic() - t0
-        t0 = time.monotonic()
-        n.call("EmptyTrash", "(ba{sv})", (False, {}))
+        n.call("EmptyTrash")
         n.wait(lambda: not listing(f"{trash}/files") and not listing(f"{trash}/info"))
         return {"s": s, "empty_s": time.monotonic() - t0, "rss_mb": n.peak()}
     finally:
@@ -336,9 +382,9 @@ def measure_windows(app, tabs=False):
             # each launch either shows its own window, or hands the folder over and exits
             wait_for(lambda: windows_of(p.pid) or p.poll() is not None, 60, "no window")
             if i == 0:
-                time.sleep(1.0)   # the first one also starts the tower (Kestrel) or the service (GNOME Files)
+                time.sleep(1.0)   # the first one also starts the tower (Kestrel) or the other app's service
         first = procs[0].pid
-        if app == "nautilus":
+        if app in OTHERS:   # one process: the later launches hand their folder to it
             wait_for(lambda: windows_of(first) >= WINDOWS, 30, "not all windows opened")
         elif not tabs:
             wait_for(lambda: all(windows_of(p.pid) for p in procs), 30, "not all windows opened")
@@ -399,8 +445,8 @@ def measure(app, test):
         return measure_startup(app)
     if test in ("open_gallery", "videos", "pdfs"):
         return measure_folder(app, f"{DATA}/{'gallery' if test == 'open_gallery' else test}")
-    if test == "copy" and app == "nautilus":
-        return measure_copy_nautilus()
+    if test == "copy" and app in OTHERS:
+        return measure_copy_other(app)
     if test == "move_xdev":
         return measure_move_xdev(app)
     if test == "trash":
@@ -490,7 +536,7 @@ def mb(v):
     return "—" if v is None else f"{round(v)}"
 
 
-# (label, test, key) for the rows timed in all three apps
+# (label, test, key) for the rows timed in every app
 TIMED = [("Startup (launch to window shown)", "startup", "s"),
          (f"Open a 600-image folder (launch to the first {FIRST} thumbnails)", "open_gallery", "s"),
          (f"Open a folder of 40 videos (launch to the first {FIRST} thumbnails)", "videos", "s"),
@@ -501,14 +547,18 @@ TIMED = [("Startup (launch to window shown)", "startup", "s"),
          ("Empty the trash (those 10,000 files)", "trash", "empty_s")]
 
 
-def tables(res):
+def tables(res, other):
+    """The tables comparing Kestrel with `other` (a key of OTHERS), the summary for the README text, and notes on what
+    `other` couldn't be timed on."""
+    apps = ("python", "cxx", other)
+
     def med(app, test, key="s"):
         vals = [r[key] for r in res.get((app, test), []) if r.get(key) is not None]
         return statistics.median(vals) if vals else None
 
-    t1 = ["| Test | Kestrel (Python) | Kestrel (C++) | GNOME Files |", "|---|---|---|---|"]
+    t1 = [f"| Test | Kestrel (Python) | Kestrel (C++) | {OTHERS[other]['label']} |", "|---|---|---|---|"]
     for label, test, key in TIMED:
-        t1.append(f"| {label} | {' | '.join(secs(med(a, test, key)) for a in APPS)} |")
+        t1.append(f"| {label} | {' | '.join(secs(med(a, test, key)) for a in apps)} |")
 
     def mem(app):
         a, b = med(app, "startup", "rss_mb"), med(app, "open_gallery", "rss_mb")
@@ -524,9 +574,9 @@ def tables(res):
         v = med(app, "idle", "cpu_ms")
         return "—" if v is None else f"{round(v)} ms ({v / (IDLE_SECONDS * 10):.2f}% of a core)"
 
-    t1.append(f"| Peak memory (startup / 600-image folder open) | {' | '.join(mem(a) for a in APPS)} |")
-    t1.append(f"| Memory with {WINDOWS} folders opened from other apps | {' | '.join(windows(a) for a in APPS)} |")
-    t1.append(f"| CPU time used in {IDLE_SECONDS} s with a folder open, idle | {' | '.join(idle(a) for a in APPS)} |")
+    t1.append(f"| Peak memory (startup / 600-image folder open) | {' | '.join(mem(a) for a in apps)} |")
+    t1.append(f"| Memory with {WINDOWS} folders opened from other apps | {' | '.join(windows(a) for a in apps)} |")
+    t1.append(f"| CPU time used in {IDLE_SECONDS} s with a folder open, idle | {' | '.join(idle(a) for a in apps)} |")
 
     def row2(label, test):
         a, b = med("python", test), med("cxx", test)
@@ -550,72 +600,94 @@ def tables(res):
                  "videos": "first video thumbnails", "pdfs": "first PDF thumbnails", "copy": "copying",
                  "move_xdev": "moving to another drive"}.get(test, "moving to the trash" if key == "s" else
                                                               "emptying the trash")
-        vs.append(f"- {short}: {ratio(med('nautilus', test, key), med('cxx', test, key))};")
-    vs[-1] = vs[-1][:-1] + "."
-    gallery_n, kes_n = med("nautilus", "open_gallery", "n"), med("cxx", "open_gallery", "n")
+        if med(other, test, key) is not None:
+            vs.append(f"- {short}: {ratio(med(other, test, key), med('cxx', test, key))};")
+    if vs:
+        vs[-1] = vs[-1][:-1] + "."
+    gallery_n, kes_n = med(other, "open_gallery", "n"), med("cxx", "open_gallery", "n")
+    ops = {"copy": "copy files", "move_xdev": "move files to another drive", "trash": "move files to the trash"}
+    untimed = [phrase for test, phrase in ops.items() if (other, test) in res and med(other, test) is None]
     summary = {"vs": "\n".join(vs),
                "files_n": round(gallery_n) if gallery_n else None,
-               "files_all": secs(med("nautilus", "open_gallery", "all_s")),
+               "files_all": secs(med(other, "open_gallery", "all_s")),
                "kestrel_n": round(kes_n) if kes_n else None,
                "kestrel_all": secs(med("cxx", "bulk_thumbs")),
-               "procs": round(med("cxx", "windows", "procs") or 0)}
+               "procs": round(med("cxx", "windows", "procs") or 0),
+               "untimed": untimed}
     return t1, t2, summary
 
 
-def machine():
+def machine(other):
     cpu = "unknown CPU"
     with open("/proc/cpuinfo") as f:
         for ln in f:
             if ln.startswith("model name"):
                 cpu = ln.split(":", 1)[1].strip()
                 break
-    nautilus = subprocess.run(["nautilus", "--version"], capture_output=True, text=True).stdout.strip()
+    try:
+        version = subprocess.run(OTHERS[other]["cmd"] + ["--version"], capture_output=True, text=True).stdout.strip()
+    except OSError:   # a report made on another machine
+        version = ""
     distro = ""
     try:
         with open("/etc/os-release") as f:
             distro = next((ln.split("=", 1)[1].strip().strip('"') for ln in f if ln.startswith("PRETTY_NAME=")), "")
     except OSError:
         pass
-    return cpu, os.cpu_count(), nautilus.replace("GNOME nautilus", "GNOME Files"), distro
+    version = version.replace("GNOME nautilus", "GNOME Files").replace("nemo", "Nemo")
+    return cpu, os.cpu_count(), version or OTHERS[other]["label"], distro
 
 
-def section(t1, t2, summary, runs, py_link, cxx_link):
-    cpu, threads, nautilus, distro = machine()
-    return f"""## Performance: Kestrel vs GNOME Files
+def section(t1, t2, summary, runs, py_link, cxx_link, other):
+    cpu, threads, version, distro = machine(other)
+    label = OTHERS[other]["label"]
+    owns = label + ("'" if label.endswith("s") else "'s")   # GNOME Files', Nemo's
+    if OTHERS[other]["whole_folder"]:
+        thumbs = (f"{label} makes thumbnails for the whole folder in the background. It finished all "
+                  f"{summary['files_n']} images {summary['files_all']} after launch.")
+    else:
+        thumbs = f"{label} made {summary['files_n']} thumbnails in all, the last {summary['files_all']} after launch."
+    untimed = ""
+    if summary["untimed"]:
+        untimed = (f"\n- **Not timed:** {owns} D-Bus file-operations service has no way to "
+                   f"{' or '.join(summary['untimed'])}, so those rows show —.")
+        if "move files to the trash" in summary["untimed"]:
+            untimed += " For \"Empty the trash\", the files were put in the trash with `gio trash` first."
+    return f"""{OTHERS[other]["heading"]}
 
-Kestrel Explorer exists in two versions with the same features: the original [Python/PyQt6 version]({py_link}) and the [C++/Qt 6 port]({cxx_link}). They share settings, bookmarks and caches, so you can switch between them. Both are compared here with {nautilus}, the file manager they replace.
+Kestrel Explorer exists in two versions with the same features: the original [Python/PyQt6 version]({py_link}) and the [C++/Qt 6 port]({cxx_link}). They share settings, bookmarks and caches, so you can switch between them. Both are compared here with {version}, the file manager they replace.
 
 **Test machine:** {cpu} ({threads} threads), {distro}. The test data is on a RAM disk: 600 JPEGs at 1600×1200 with camera EXIF, 40 videos, 40 PDFs, 150 folders of 4 images, a tree of 50,000 files, 20,000 small files plus 250 MB, a folder of 10,000 files, and 200 PNGs with AI-generation metadata.
 
 **How it was measured:** each test ran {runs} times, and the tables show medians. Every run started with a fresh home folder, so the thumbnail cache was empty. All three apps ran on a headless X server with software rendering (Qt's raster engine, GTK's cairo renderer), on a private session bus where only the desktop's settings and virtual file system (gvfs) services could start, so no file indexer ran. The benchmark is in [bench/](bench) and is run with `bench/run.sh`.
 
-### Compared with GNOME Files
+### Compared with {label}
 
 All three apps are measured in the same way:
 - **Startup:** timed until the window is on screen.
 - **Opening a folder:** timed from launch until the first {FIRST} files' thumbnails are in the shared thumbnail cache.
-- **File operations:** Kestrel runs them with its own copy and trash code, the same code its menus use. GNOME Files receives them through its D-Bus file-operations service, as when another app asks it to.
+- **File operations:** Kestrel runs them with its own copy and trash code, the same code its menus use. {label} receives them through its D-Bus file-operations service, as when another app asks it to.
 - **"Peak memory":** the app's highest memory use.
 - **Several folders opened from other apps:** the {WINDOWS} folders are opened one after another, as from a browser's "Show in folder". The figure is the private memory of everything the app then runs: what closing it would give back, not counting the libraries it shares with other apps. Kestrel normally starts a new process for each window ({summary['procs']} processes here, counting the tower that keeps them in sync); with "open folders as tabs" on, they become tabs in one window.
 - **CPU while idle:** the CPU time all the app's processes use in {IDLE_SECONDS} s with a folder open and nothing happening. It's counted in 10 ms steps.
 
 {chr(10).join(t1)}
 
-Kestrel (C++) compared with GNOME Files:
+Kestrel (C++) compared with {label}:
 {summary['vs']}
 
 **Limits of this comparison:**
 - **Opening a folder:** the two apps don't do the same amount of work.
-  - GNOME Files makes thumbnails for the whole folder in the background. It finished all {summary['files_n']} images {summary['files_all']} after launch.
+  - {thumbs}
   - Kestrel makes them only for what's on screen ({summary['kestrel_n']} images here), and the rest as you scroll.
   - To thumbnail a whole folder at once, Kestrel has "Generate Previews": {summary['kestrel_all']} for these 600 images in the C++ version (table below).
-- **File operations:** GNOME Files' D-Bus service returns straight away, so its times were measured by watching the files until the operation had finished, to within about 50 ms.
-- **Memory:** GNOME Files makes thumbnails in separate sandboxed helper processes, whose memory isn't counted in its figures. Kestrel makes them inside the app.
-- **Search:** GNOME Files' search can't be timed from outside without its file indexer, so it isn't compared.
+- **File operations:** {owns} D-Bus service returns straight away, so its times were measured by watching the files until the operation had finished, to within about 50 ms.{untimed}
+- **Memory:** {label} makes thumbnails in {OTHERS[other]['helpers']}, whose memory isn't counted in its figures. Kestrel makes them inside the app.
+- **Search:** {owns} search can't be timed from outside{OTHERS[other]['search']}, so it isn't compared.
 
 ### Kestrel's own features (Python vs C++)
 
-These are measured inside the app, because GNOME Files has no equivalent ("Generate Previews", folder mosaics, metadata panels) or can't be timed from outside (search).
+These are measured inside the app, because {label} has no equivalent ("Generate Previews", folder mosaics, metadata panels) or can't be timed from outside (search).
 
 {chr(10).join(t2)}
 
@@ -623,14 +695,22 @@ Thumbnails and mosaics take about as long in both versions, because both decode 
 """
 
 
-def update_readmes(t1, t2, summary, runs):
+def update_readmes(t1, t2, summary, runs, other):
+    """Write the section for `other` into both READMEs: in place of its old one, or after the other Performance
+    sections (a run on Linux Mint adds "vs Nemo" and leaves "vs GNOME Files" as it was)."""
+    heading = OTHERS[other]["heading"]
     for root, py_link, cxx_link in ((CXX_ROOT, "../kestrel-explorer", "."), (PY_ROOT, ".", "../kes-c")):
         path = os.path.join(root, "README.md")
         with open(path) as f:
             s = f.read()
-        start = s.index("## Performance")
-        end = s.index("\n## ", start + 1) + 1
-        s = s[:start] + section(t1, t2, summary, runs, py_link, cxx_link) + "\n" + s[end:]
+        text = section(t1, t2, summary, runs, py_link, cxx_link, other) + "\n"
+        if heading + "\n" in s:
+            start = s.index(heading + "\n")
+            end = s.index("\n## ", start + 1) + 1
+        else:
+            last = max(s.rfind("\n" + o["heading"] + "\n") for o in OTHERS.values())
+            start = end = s.index("\n## ", last + 1) + 1 if last >= 0 else len(s)
+        s = s[:start] + text + s[end:]
         with open(path, "w") as f:
             f.write(s)
         print(f"Updated {path}")
@@ -659,13 +739,16 @@ def runs_for(test, runs):
 
 def report(res, args):
     runs = max((len(v) for (a, t), v in res.items() if t not in ("startup", "idle")), default=args.runs)
-    t1, t2, summary = tables(res)
-    print()
-    print("\n".join(t1))
+    others = [o for o in OTHERS if any(a == o for a, _t in res)]
+    t2 = None
+    for other in others or [next(iter(OTHERS))]:
+        t1, t2, summary = tables(res, other)
+        print()
+        print("\n".join(t1))
+        if args.update_readme and others:
+            update_readmes(t1, t2, summary, runs, other)
     print()
     print("\n".join(t2))
-    if args.update_readme:
-        update_readmes(t1, t2, summary, runs)
 
 
 def main():
@@ -697,7 +780,7 @@ def main():
     for need in (os.path.join(PY_ROOT, "kes"), os.path.join(CXX_ROOT, "CMakeLists.txt")):
         if not os.path.exists(need):
             sys.exit(f"Both projects are needed side by side; not found: {need}")
-    apps = [a for a in APPS if a != "nautilus" or shutil.which("nautilus")]
+    apps = [a for a in APPS if a not in OTHERS or shutil.which(OTHERS[a]["cmd"][0])]
     only = [t for t in args.only.split(",") if t]
     unknown = [t for t in only if t not in COMMON + KESTREL_ONLY]
     if unknown:
@@ -711,7 +794,7 @@ def main():
     try:
         for test in tests:
             for app in apps:
-                if app == "nautilus" and test in KESTREL_ONLY:
+                if app in OTHERS and test in KESTREL_ONLY:
                     continue
                 if test == "videos" and not os.path.isdir(f"{DATA}/videos"):
                     continue
@@ -723,7 +806,8 @@ def main():
                     detail = "".join(f", {k} {r[k]:.0f}" for k in ("rss_mb", "mem_mb", "cpu_ms") if r.get(k))
                     if r.get("empty_s") is not None:
                         detail += f", empty {r['empty_s']:.3f} s"
-                    print(f"  {test:13} {app:9} run {i + 1}/{n}: {r['s']:.3f} s{detail}", flush=True)
+                    took = "not offered" if r["s"] is None else f"{r['s']:.3f} s"
+                    print(f"  {test:13} {app:9} run {i + 1}/{n}: {took}{detail}", flush=True)
                 with open(results_file, "w") as f:   # saved as it goes, so an interrupted run isn't lost
                     json.dump({f"{a} {t}": v for (a, t), v in res.items()}, f, indent=1)
     finally:
