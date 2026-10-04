@@ -336,27 +336,73 @@ There are 130 checks in 6 tests: file operations (copy, move, merge, delete, can
 | `kestrel/uwp.py` | Integration with the UWP wallpaper manager (over D-Bus and the `uwp` command) |
 | `kestrel/atc.py` | The tower (`kes --atc`) and each window's link to it, which keep several running Kestrels in sync |
 | `tests/` | The test suite (see [Tests](#tests)) |
+| `bench/` | The benchmark against GNOME Files (see [Performance](#performance-kestrel-vs-gnome-files)) |
 | `pyproject.toml` | PyPI packaging metadata (not ready for release yet — see [PACKAGING.md](PACKAGING.md)) |
 
-## Performance: Python vs C++
+## Performance: Kestrel vs GNOME Files
 
-Kestrel Explorer exists in two versions with the same features: the original [Python/PyQt6 version](.) and the [C++/Qt 6 port](../kes-c). They share settings, bookmarks and caches, so you can switch between them.
+Kestrel Explorer exists in two versions with the same features: the original [Python/PyQt6 version](.) and the [C++/Qt 6 port](../kes-c). They share settings, bookmarks and caches, so you can switch between them. Both are compared here with GNOME Files 50.2.2, the file manager they replace.
 
-Both were tested on the same generated data: 600 JPEGs at 1600×1200, 150 folders of 4 images, a tree of 50,000 files, and 20,000 small files plus 250 MB. Each test ran 3 times with empty caches, on a 32-thread machine with the data on a RAM disk. Times are medians.
+**Test machine:** AMD Ryzen Threadripper 2950X 16-Core Processor (32 threads), Ubuntu 26.04.1 LTS. The test data is on a RAM disk: 600 JPEGs at 1600×1200 with camera EXIF, 40 videos, 40 PDFs, 150 folders of 4 images, a tree of 50,000 files, 20,000 small files plus 250 MB, a folder of 10,000 files, and 200 PNGs with AI-generation metadata.
+
+**How it was measured:** each test ran 3 times, and the tables show medians. Every run started with a fresh home folder, so the thumbnail cache was empty. All three apps ran on a headless X server with software rendering (Qt's raster engine, GTK's cairo renderer), on a private session bus where only the desktop's settings and virtual file system (gvfs) services could start, so no file indexer ran. The benchmark is in [bench/](bench) and is run with `bench/run.sh`.
+
+### Compared with GNOME Files
+
+All three apps are measured in the same way:
+- **Startup:** timed until the window is on screen.
+- **Opening a folder:** timed from launch until the first 12 files' thumbnails are in the shared thumbnail cache.
+- **File operations:** Kestrel runs them with its own copy and trash code, the same code its menus use. GNOME Files receives them through its D-Bus file-operations service, as when another app asks it to.
+- **"Peak memory":** the app's highest memory use.
+- **Several folders opened from other apps:** the 5 folders are opened one after another, as from a browser's "Show in folder". The figure is the private memory of everything the app then runs: what closing it would give back, not counting the libraries it shares with other apps. Kestrel normally starts a new process for each window (6 processes here, counting the tower that keeps them in sync); with "open folders as tabs" on, they become tabs in one window.
+- **CPU while idle:** the CPU time all the app's processes use in 30 s with a folder open and nothing happening. It's counted in 10 ms steps.
+
+| Test | Kestrel (Python) | Kestrel (C++) | GNOME Files |
+|---|---|---|---|
+| Startup (launch to window shown) | 0.49 s | 0.37 s | 0.44 s |
+| Open a 600-image folder (launch to the first 12 thumbnails) | 0.60 s | 0.39 s | 1.36 s |
+| Open a folder of 40 videos (launch to the first 12 thumbnails) | 2.32 s | 2.23 s | 8.63 s |
+| Open a folder of 40 PDFs (launch to the first 12 thumbnails) | 1.08 s | 0.80 s | 0.92 s |
+| Copy 20,000 small files + 5 × 50 MB | 1.72 s | 0.94 s | 2.33 s |
+| Move the same to another drive | 1.94 s | 1.20 s | 4.49 s |
+| Move 10,000 files to the trash (all selected in one folder) | 1.97 s | 1.67 s | 1.98 s |
+| Empty the trash (those 10,000 files) | 0.42 s | 0.34 s | 8.95 s |
+| Peak memory (startup / 600-image folder open) | 176 / 188 MB | 137 / 148 MB | 196 / 305 MB |
+| Memory with 5 folders opened from other apps | 213 MB (90 MB as tabs) | 78 MB (44 MB as tabs) | 95 MB |
+| CPU time used in 30 s with a folder open, idle | 30 ms (0.10% of a core) | 20 ms (0.07% of a core) | 10 ms (0.03% of a core) |
+
+Kestrel (C++) compared with GNOME Files:
+- startup: 1.2× faster;
+- first thumbnails in a 600-image folder: 3.5× faster;
+- first video thumbnails: 3.9× faster;
+- first PDF thumbnails: 1.1× faster;
+- copying: 2.5× faster;
+- moving to another drive: 3.8× faster;
+- moving to the trash: 1.2× faster;
+- emptying the trash: about 27× faster.
+
+**Limits of this comparison:**
+- **Opening a folder:** the two apps don't do the same amount of work.
+  - GNOME Files makes thumbnails for the whole folder in the background. It finished all 600 images 12.10 s after launch.
+  - Kestrel makes them only for what's on screen (40 images here), and the rest as you scroll.
+  - To thumbnail a whole folder at once, Kestrel has "Generate Previews": 4.98 s for these 600 images in the C++ version (table below).
+- **File operations:** GNOME Files' D-Bus service returns straight away, so its times were measured by watching the files until the operation had finished, to within about 50 ms.
+- **Memory:** GNOME Files makes thumbnails in separate sandboxed helper processes, whose memory isn't counted in its figures. Kestrel makes them inside the app.
+- **Search:** GNOME Files' search can't be timed from outside without its file indexer, so it isn't compared.
+
+### Kestrel's own features (Python vs C++)
+
+These are measured inside the app, because GNOME Files has no equivalent ("Generate Previews", folder mosaics, metadata panels) or can't be timed from outside (search).
 
 | Test | Python | C++ | C++ speed-up |
 |---|---|---|---|
-| Startup (launch to window shown) | 0.38 s | 0.18 s | 2.1× faster |
-| Open a 600-image folder (visible thumbnails ready) | 0.29 s | 0.23 s | 1.3× faster |
-| Thumbnail all 600 images ("Generate Previews") | 2.29 s | 2.13 s | 1.1× faster |
-| Build 150 folder mosaics | 3.06 s | 2.78 s | 1.1× faster |
-| Recursive search over 50,000 files | 0.21 s | 0.15 s | 1.4× faster |
-| Copy 20,000 small files + 5 × 50 MB | 1.75 s | 0.98 s | 1.8× faster |
-| Read EXIF / AI metadata for 400 images | 0.95 s | 0.024 s | about 40× faster |
-| Peak memory (startup / folder open) | 105 / 119 MB | 65 / 79 MB | about 40 MB less |
-| Peak memory (background jobs) | 73–81 MB | 35–39 MB | about half |
+| Thumbnail all 600 images ("Generate Previews") | 5.25 s | 4.98 s | 1.1× faster |
+| Build 150 folder mosaics | 6.83 s | 6.47 s | 1.1× faster |
+| Recursive search over 50,000 files | 0.18 s | 0.12 s | 1.5× faster |
+| Read EXIF / AI metadata for 400 images | 1.67 s | 0.040 s | about 42× faster |
+| Peak memory (background jobs) | 74–82 MB | 37–42 MB | |
 
-The largest gains are in work the Python version does in Python itself: reading metadata, copying files and starting up. Thumbnails are only about 10% faster, because both versions decode images with the same Qt C++ code, which the Python version already runs in parallel.
+Thumbnails and mosaics take about as long in both versions, because both decode images with the same Qt C++ code, which the Python version already runs on several threads. The C++ version is much faster where the Python version does the work in Python itself, such as reading metadata, searching and copying, and it uses about half the memory.
 
 ## License
 
