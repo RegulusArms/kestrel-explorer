@@ -74,7 +74,7 @@ The packaging setup for PyPI is in place (`pyproject.toml`), but **Kestrel is no
 
 Package names are for Ubuntu (tested on 26.04). Everything else Kestrel uses is in the Python standard library.
 
-**Linux Mint 22 / Ubuntu 24.04** (not tested yet; work in progress): these have Qt 6.4, the oldest Qt Kestrel builds with. `kimageformat6-plugins` doesn't exist there, so the installer skips it and RAW/HEIC files get no preview. On Cinnamon, Kestrel uses Cinnamon's own settings for the wallpaper, file history and icon theme, `--default` remembers Nemo and puts it back on `--uninstall`, and the file chooser opens as the app's dialog (X11). The dock swap is GNOME-only for now.
+**Linux Mint 22 / Ubuntu 24.04** (not tested yet; work in progress): these have Qt 6.4, the oldest Qt Kestrel builds with. `kimageformat6-plugins` doesn't exist there, so the installer skips it and RAW/HEIC files get no preview. On Cinnamon, Kestrel uses Cinnamon's own settings for the wallpaper, file history and icon theme, `--default` remembers Nemo and puts it back on `--uninstall`, and the file chooser opens as the app's dialog (X11). Qt 6.4 takes no colours from the GTK theme and doesn't follow theme changes, so there Kestrel reads the theme's colours through GTK (the system's `python3` with `python3-gi` and `gir1.2-gtk-3.0`, which Mint has) and follows theme changes while it runs. The dock swap is GNOME-only for now.
 
 **Anaconda / conda:** if `conda init` put Anaconda first on your PATH, Kestrel still uses the system's programs and libraries (gsettings, gio, ffmpeg, xz…), because Anaconda's copies don't match the desktop (its `gsettings` can't see your real settings, for example). Anaconda's folders are moved to the end of the search paths at startup. If you start Kestrel from an environment you activated yourself (`conda activate myenv`; anything but the auto-activated `base`), the environment is left exactly as it is.
 
@@ -339,7 +339,7 @@ tests/run.sh                  # every test
 tests/run.sh fileops atc_undo # only some
 ```
 
-There are 214 checks in 10 tests: file operations (copy, move, merge, delete, cancel, trash, links, undo), the tower that keeps several Kestrels in sync (shared changes, the shared task list, shared undo, opening folders as tabs), phones and cameras, rearranging the sidebar, following the desktop theme, the file chooser, and `install.sh`. Each test runs with a throwaway home folder on a private D-Bus bus, so your files, settings, dock and open windows are never touched. The [C++ version](../kes-c/tests) has the same tests, and some checks launch the other version to test the two together. Details: [tests/README.md](tests/README.md).
+There are 217 checks in 10 tests: file operations (copy, move, merge, delete, cancel, trash, links, undo), the tower that keeps several Kestrels in sync (shared changes, the shared task list, shared undo, opening folders as tabs), phones and cameras, rearranging the sidebar, following the desktop theme, the file chooser, and `install.sh`. Each test runs with a throwaway home folder on a private D-Bus bus, so your files, settings, dock and open windows are never touched. The [C++ version](../kes-c/tests) has the same tests, and some checks launch the other version to test the two together. Details: [tests/README.md](tests/README.md).
 
 ## Layout
 

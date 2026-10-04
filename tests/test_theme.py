@@ -74,6 +74,21 @@ else:
     skip("the desktop's own settings (no glib-compile-schemas)")
 os.environ["XDG_CURRENT_DESKTOP"] = desktop
 
+# -- the GTK theme's colours (Qt before 6.5)
+check(util.needs_gtk_palette("6.4.2") and util.needs_gtk_palette("6.4.0") and not util.needs_gtk_palette("6.5.0")
+      and not util.needs_gtk_palette("6.10.2"),
+      "Qt before 6.5 needs Kestrel to read the GTK theme's colours; 6.5 and newer do it themselves")
+gp = util.gtk_palette_from({"theme_bg_color": "#2b2b2b", "theme_fg_color": "#dadada", "theme_base_color": "#323232",
+                            "theme_text_color": "#ffffff", "theme_selected_bg_color": "#35a854",
+                            "theme_selected_fg_color": "#ffffff", "insensitive_fg_color": "#888888"})
+R = QPalette.ColorRole
+check(gp is not None and gp.color(R.Window) == QColor("#2b2b2b") and gp.color(R.WindowText) == QColor("#dadada")
+      and gp.color(R.Base) == QColor("#323232") and gp.color(R.Text) == QColor("#ffffff")
+      and gp.color(R.Highlight) == QColor("#35a854")
+      and gp.color(QPalette.ColorGroup.Disabled, R.Text) == QColor("#888888"),
+      "a GTK theme's colours become the palette (window, text, selection, disabled text)")
+check(util.gtk_palette_from({"theme_fg_color": "#dadada"}) is None, "a theme without the basic colours changes nothing")
+
 LIGHT, DARK = palette_of("#fafafa", "#e95420"), palette_of("#2a2a2a", "#3584e4")
 QApplication.setPalette(LIGHT)
 w = A.open_window([util.HOME])

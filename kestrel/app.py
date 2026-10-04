@@ -2353,6 +2353,7 @@ def main(argv=None):
     QApplication.setDesktopFileName(util.APP_ID)
     app = QApplication(argv)
     util.setup_icon_theme()
+    util.follow_gtk_theme()  # Qt < 6.5: the GTK theme's colours, following changes
     app.setWindowIcon(util.theme_icon("folder"))
     util.migrate_legacy()
     util.ensure_desktop_entry()
