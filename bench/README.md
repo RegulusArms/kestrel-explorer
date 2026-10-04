@@ -35,7 +35,7 @@ A full run takes about 12 minutes, plus about a minute and a half the first time
 
 ### Compared with GNOME Files or Nemo (measured from outside)
 
-Nemo is measured exactly like GNOME Files below, through its own D-Bus service (`org.Nemo.FileOperations`). Nemo is a fork of an older GNOME Files, and its service offers fewer operations: the benchmark asks the service which ones it has, and an operation it doesn't have shows "—" with a note under the table. Emptying the trash then starts from files put there with `gio trash`. Nemo's "confirm before emptying the trash" setting is turned off in the throwaway home, so Empty Trash doesn't wait for a click.
+Nemo is measured exactly like GNOME Files below, through its own D-Bus service (`org.Nemo.FileOperations`). Nemo is a fork of an older GNOME Files, and its service offers fewer operations: the benchmark asks the service which ones it has, and an operation it doesn't have shows "—" with a note under the table. Emptying the trash then starts from files put there with `gio trash`. Nemo's "confirm before emptying the trash" setting is turned off in the throwaway home, so Empty Trash doesn't wait for a click. Nemo makes no thumbnails in this setup, so "Open a folder" isn't measured for it: each run would only wait out the 2-minute timeout. Those rows, and its peak memory with the 600-image folder open, show "—".
 
 | Measurement | How |
 |---|---|

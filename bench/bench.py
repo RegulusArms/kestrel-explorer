@@ -38,6 +38,8 @@ BUILD = os.environ.get("KESTREL_BUILD_DIR", "build")  # build folder name (anoth
 # The file managers Kestrel is compared with; the ones installed are measured (GNOME Files on Ubuntu, Nemo on Linux
 # Mint). File operations go through each one's D-Bus file-operations service, as other apps use it: "service" starts
 # it, "ops" is (bus name, object path, interface), and "settings" are set in the throwaway home first (gsettings).
+# "thumbnails": False skips the FOLDER_TESTS: Nemo makes no thumbnails in the sandbox, so each run would only wait
+# out the 2-minute timeout.
 OTHERS = {
     "nautilus": {"label": "GNOME Files", "cmd": ["nautilus"], "service": ["nautilus", "--gapplication-service"],
                  "ops": ("org.gnome.Nautilus", "/org/gnome/Nautilus/FileOperations2",
@@ -45,18 +47,21 @@ OTHERS = {
                  "settings": [],
                  "heading": "## Performance: Kestrel vs GNOME Files",
                  "helpers": "separate sandboxed helper processes", "search": " without its file indexer",
-                 "whole_folder": True},   # thumbnails the whole folder in the background
+                 "whole_folder": True,   # thumbnails the whole folder in the background
+                 "thumbnails": True},
     "nemo": {"label": "Nemo", "cmd": ["nemo"], "service": ["nemo", "--no-default-window"],
              "ops": ("org.Nemo", "/org/Nemo", "org.Nemo.FileOperations"),
              "settings": [("org.nemo.preferences", "confirm-trash", "false")],   # Empty Trash would ask first
              "heading": "## Performance: Kestrel vs Nemo",
-             "helpers": "separate helper processes", "search": "", "whole_folder": False},
+             "helpers": "separate helper processes", "search": "", "whole_folder": False,
+             "thumbnails": False},
 }
 APPS = ("python", "cxx") + tuple(OTHERS)
 # measured the same way for every app
 COMMON = ("startup", "open_gallery", "videos", "pdfs", "copy", "move_xdev", "trash", "windows", "idle")
 # Kestrel only: its "open folders as tabs" setting, and features the other file managers have no equivalent of
 KESTREL_ONLY = ("windows_tabs", "bulk_thumbs", "mosaics", "search", "metadata")
+FOLDER_TESTS = ("open_gallery", "videos", "pdfs")   # "open a folder": timed by the thumbnails it makes
 FIRST = 12          # "open a folder": time until the first FIRST files (by name) have thumbnails
 WINDOWS = 5         # "several windows": folders opened from outside, one after another
 IDLE_SECONDS = 30   # "idle": CPU used in this long with a folder open and nothing happening
@@ -446,7 +451,7 @@ def measure(app, test):
     start_desktop_services()
     if test == "startup":
         return measure_startup(app)
-    if test in ("open_gallery", "videos", "pdfs"):
+    if test in FOLDER_TESTS:
         return measure_folder(app, f"{DATA}/{'gallery' if test == 'open_gallery' else test}")
     if test == "copy" and app in OTHERS:
         return measure_copy_other(app)
@@ -554,6 +559,8 @@ def tables(res, other):
     """The tables comparing Kestrel with `other` (a key of OTHERS), the summary for the README text, and notes on what
     `other` couldn't be timed on."""
     apps = ("python", "cxx", other)
+    if not OTHERS[other]["thumbnails"]:   # also drops results saved before its folder tests were skipped
+        res = {k: v for k, v in res.items() if not (k[0] == other and k[1] in FOLDER_TESTS)}
 
     def med(app, test, key="s"):
         vals = [r[key] for r in res.get((app, test), []) if r.get(key) is not None]
@@ -647,7 +654,9 @@ def section(t1, t2, summary, runs, py_link, cxx_link, other):
     cpu, threads, version, distro = machine(other)
     label = OTHERS[other]["label"]
     owns = label + ("'" if label.endswith("s") else "'s")   # GNOME Files', Nemo's
-    if "images" in summary["no_thumbs"]:
+    if not OTHERS[other]["thumbnails"]:
+        thumbs = f"{label} wasn't timed on this (see below)."
+    elif "images" in summary["no_thumbs"]:
         thumbs = f"{label} made no thumbnails for these images in this setup."
     elif OTHERS[other]["whole_folder"]:
         thumbs = (f"{label} makes thumbnails for the whole folder in the background. It finished all "
@@ -655,6 +664,10 @@ def section(t1, t2, summary, runs, py_link, cxx_link, other):
     else:
         thumbs = f"{label} made {summary['files_n']} thumbnails in all, the last {summary['files_all']} after launch."
     untimed = ""
+    if not OTHERS[other]["thumbnails"]:
+        untimed += (f"\n- **Opening a folder not timed:** {label} makes no thumbnails in this setup (a fresh home folder "
+                    f"with its default settings), so the folder tests are skipped for it and those rows show —, as does "
+                    f"its peak memory with the 600-image folder open.")
     if summary["no_thumbs"]:
         untimed += (f"\n- **No thumbnails:** {label} made none for the {' or '.join(summary['no_thumbs'])} within 2 minutes "
                     f"in this setup (a fresh home folder with its default settings), so those rows show —.")
@@ -805,6 +818,9 @@ def main():
         for test in tests:
             for app in apps:
                 if app in OTHERS and test in KESTREL_ONLY:
+                    continue
+                if app in OTHERS and test in FOLDER_TESTS and not OTHERS[app]["thumbnails"]:
+                    res.pop((app, test), None)   # --only keeps saved results: drop any from before
                     continue
                 if test == "videos" and not os.path.isdir(f"{DATA}/videos"):
                     continue
