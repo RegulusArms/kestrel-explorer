@@ -23,6 +23,8 @@ SEL = QItemSelectionModel.SelectionFlag
 
 GRID_MIN, GRID_MAX = 48, 320
 LIST_MIN, LIST_MAX = 16, 128
+GRID_DEFAULT, LIST_DEFAULT = 160, 28
+CHOOSER_GRID, CHOOSER_LIST = 96, 24  # a chooser window starts with smaller icons
 SORT_COLUMNS = ["Name", "Size", "Type", "Modified"]
 WINDOWS = []
 
@@ -52,8 +54,8 @@ class Pane(QWidget):
         self._trash_gen = 0          # bumps on every combined-trash reload, so stale loads are dropped
         self._trash_watch = None     # QFileSystemWatcher on every trash files/ folder while showing the trash
         places.signals.starred_changed.connect(self._starred_changed)
-        self.grid_size = int(self.settings.value("grid_size", 160))
-        self.list_size = int(self.settings.value("list_size", 28))
+        self.grid_size = int(win.view_value("grid_size"))
+        self.list_size = int(win.view_value("list_size"))
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -66,7 +68,7 @@ class Pane(QWidget):
         self.search_edit.setPlaceholderText("Search… (supports * and ? wildcards)")
         self.search_edit.setClearButtonEnabled(True)
         self.search_sub = QCheckBox("Include subfolders")
-        self.search_sub.setChecked(self.settings.value("search_recursive", False, type=bool))
+        self.search_sub.setChecked(win.view_value("search_recursive", False, type=bool))
         close = QToolButton()
         close.setIcon(icon("window-close-symbolic", "window-close"))
         close.setAutoRaise(True)
@@ -74,8 +76,8 @@ class Pane(QWidget):
         self.search_contents = QCheckBox("File contents")
         self.search_contents.setToolTip("Search inside files too, using the desktop's search index (localsearch).\n"
                                         "Includes subfolders; only finds files in indexed folders.")
-        self.search_contents.setChecked(self.settings.value("search_contents", False, type=bool))
-        self.search_contents.toggled.connect(lambda v: (self.settings.setValue("search_contents", v),
+        self.search_contents.setChecked(win.view_value("search_contents", False, type=bool))
+        self.search_contents.toggled.connect(lambda v: (self.win.set_view_value("search_contents", v),
                                                         self._do_search()))
         sl.addWidget(self.search_edit, 1)
         sl.addWidget(self.search_sub)
@@ -87,7 +89,7 @@ class Pane(QWidget):
         self.search_bar.hide()
         self.search_timer = QTimer(self, singleShot=True, interval=250, timeout=self._do_search)
         self.search_edit.textChanged.connect(lambda: self.search_timer.start())
-        self.search_sub.toggled.connect(lambda v: (self.settings.setValue("search_recursive", v), self._do_search()))
+        self.search_sub.toggled.connect(lambda v: (self.win.set_view_value("search_recursive", v), self._do_search()))
         self.search_edit.installEventFilter(self)
         lay.addWidget(self.search_bar)
 
@@ -112,7 +114,7 @@ class Pane(QWidget):
         self.model = self._make_model()
         self.search_model = SearchModel(self.thumbs, self)
         self._attach(self.model)
-        self.set_view_mode(self.settings.value("view_mode", "grid"))
+        self.set_view_mode(win.view_value("view_mode", "grid"))
         if win.chooser is not None:
             self.set_type_filter(win.chooser.type_filter())
         self.set_path(path)
@@ -168,8 +170,8 @@ class Pane(QWidget):
         t.setSortingEnabled(True)
         t.setFrameShape(QTreeView.Shape.NoFrame)
         t.setIconSize(QSize(self.list_size, self.list_size))
-        col = int(self.settings.value("sort_col", 0))
-        order = Qt.SortOrder(int(self.settings.value("sort_order", 0)))
+        col = int(self.win.view_value("sort_col", 0))
+        order = Qt.SortOrder(int(self.win.view_value("sort_order", 0)))
         t.header().setSortIndicator(col, order)
         t.header().sortIndicatorChanged.connect(self._sort_changed)
         self._setup_common(t)
@@ -253,14 +255,14 @@ class Pane(QWidget):
             new = absolute if absolute is not None else int(cur * (1.15 if step > 0 else 1 / 1.15))
             self.grid_size = max(GRID_MIN, min(GRID_MAX, new))
             self.delegate.icon_size = self.grid_size
-            self.settings.setValue("grid_size", self.grid_size)
+            self.win.set_view_value("grid_size", self.grid_size)
             self._update_grid_size()
         else:
             cur = self.list_size
             new = absolute if absolute is not None else cur + (8 if step > 0 else -8)
             self.list_size = max(LIST_MIN, min(LIST_MAX, new))
             self.tree.setIconSize(QSize(self.list_size, self.list_size))
-            self.settings.setValue("list_size", self.list_size)
+            self.win.set_view_value("list_size", self.list_size)
         self._apply_folder_previews()
         self.view().viewport().update()
         self.win.sync_zoom_slider()
@@ -691,8 +693,8 @@ class Pane(QWidget):
         self.select_paths([p for p in self.all_paths() if p not in sel])
 
     def _sort_changed(self, col, order):
-        self.settings.setValue("sort_col", col)
-        self.settings.setValue("sort_order", order.value)
+        self.win.set_view_value("sort_col", col)
+        self.win.set_view_value("sort_order", order.value)
 
     def sort_by(self, col, order=None):
         if order is None:
@@ -779,19 +781,23 @@ class Pane(QWidget):
 # ---------------------------------------------------------------- main window
 
 class MainWindow(QMainWindow):
-    def __init__(self, paths, thumb_mgr, settings):
+    def __init__(self, paths, thumb_mgr, settings, chooser_mode=False):
         super().__init__()
         self.settings = settings
         self.thumbs = thumb_mgr
         self.chooser = None  # a file chooser window (see chooser.py)
+        self.chooser_mode = chooser_mode  # a chooser window: has its own view settings (view_value)
         self.cut_paths = set()
-        self.show_hidden = self.settings.value("show_hidden", False, type=bool)
-        self.folder_previews = self.settings.value("folder_previews", True, type=bool)
+        self.show_hidden = self.view_value("show_hidden", False, type=bool)
+        self.folder_previews = self.view_value("folder_previews", True, type=bool)
         self.viewers = []
         self._prefs = None   # the open Preferences window
         self.setWindowTitle(util.APP_NAME)
         self.setWindowIcon(icon("folder"))
-        self.resize(1280, 820)
+        if chooser_mode:
+            self.resize(960, 620)  # a dialog: smaller than a main window
+        else:
+            self.resize(1280, 820)
 
         self._build_toolbar()
         self.sidebar = Sidebar()
@@ -862,10 +868,10 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.zoom_slider)
 
         self._build_actions()
-        geo = self.settings.value("geometry")
+        geo = self.view_value("geometry")
         if geo is not None:
             self.restoreGeometry(geo)
-        st = self.settings.value("splitter")
+        st = self.view_value("splitter")
         if st is not None:
             self.split.restoreState(st)
         for p in paths or [self.homepage()]:
@@ -989,7 +995,7 @@ class MainWindow(QMainWindow):
         vm.addSeparator()
         A("Zoom In", ["Ctrl++", "Ctrl+="], lambda: self.pane().zoom(1), menu=vm)
         A("Zoom Out", "Ctrl+-", lambda: self.pane().zoom(-1), menu=vm)
-        A("Reset Zoom", "Ctrl+0", lambda: self.pane().zoom(absolute=160 if self.pane().is_grid() else 28), menu=vm)
+        A("Reset Zoom", "Ctrl+0", lambda: self.pane().zoom(absolute=self.default_zoom(self.pane().is_grid())), menu=vm)
         vm.addSeparator()
         A("Toggle Folder Previews", "Ctrl+Shift+P", self.preview_box.toggle, menu=vm)
         self.a_hidden = A("Show Hidden Files", "Ctrl+H", self.toggle_hidden, checkable=True, menu=vm)
@@ -1118,9 +1124,33 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(req.title or chooser.button_text(req))
         for p in self.panes():
             p.set_type_filter(self.chooser.type_filter())
-        self.resize(1100, 700)
         if self.chooser.name is not None:
             self.chooser.name.setFocus()
+
+    # A file chooser window keeps its own view settings, under "chooser/": changing the zoom, view, sort, panels and
+    # so on there leaves the main windows alone, and the next chooser starts from them. Until changed in a chooser
+    # they follow the main windows', apart from the size (never the main windows' maximized one) and the smaller icons.
+    def view_value(self, key, default=None, type=None):
+        """The window's and its tabs' view settings (size, zoom, view, sort, panels, hidden files, folder previews,
+        search options); a chooser window keeps its own."""
+        s = self.settings
+        kw = {} if type is None else {"type": type}
+        if self.chooser_mode and s.contains("chooser/" + key):
+            return s.value("chooser/" + key, default, **kw)
+        if key in ("grid_size", "list_size"):
+            grid = key == "grid_size"
+            return self.default_zoom(grid) if self.chooser_mode else s.value(key, self.default_zoom(grid))
+        if self.chooser_mode and key in ("geometry", "splitter"):
+            return None
+        return s.value(key, default, **kw)
+
+    def set_view_value(self, key, value):
+        self.settings.setValue("chooser/" + key if self.chooser_mode else key, value)
+
+    def default_zoom(self, grid):
+        if self.chooser_mode:
+            return CHOOSER_GRID if grid else CHOOSER_LIST
+        return GRID_DEFAULT if grid else LIST_DEFAULT
 
     def cur_dir(self):
         """Current folder of the active tab, or None on the overview page."""
@@ -1163,7 +1193,7 @@ class MainWindow(QMainWindow):
 
     # -- view
     def set_view(self, mode):
-        self.settings.setValue("view_mode", mode)
+        self.set_view_value("view_mode", mode)
         self.pane().set_view_mode(mode)
         self._sync_view_btn()
         self.sync_zoom_slider()
@@ -1190,8 +1220,8 @@ class MainWindow(QMainWindow):
         self.zoom_slider.blockSignals(False)
 
     def set_folder_previews(self, on):
-        """Global switch for folder mosaics; off means no directory scanning at all."""
-        for w in set(WINDOWS) | {self}:
+        """Global switch for folder mosaics; off means no directory scanning at all (a chooser's is its own)."""
+        for w in ({self} if self.chooser_mode else set(WINDOWS) | {self}):
             w.folder_previews = on
             w.info.folder_previews = on
             if w.info.path:
@@ -1202,7 +1232,7 @@ class MainWindow(QMainWindow):
             for p in w.panes():
                 p._apply_folder_previews()
                 p.view().viewport().update()
-        self.settings.setValue("folder_previews", on)
+        self.set_view_value("folder_previews", on)
         if not on:
             self.thumbs.cancel_pending()
 
@@ -1264,13 +1294,13 @@ class MainWindow(QMainWindow):
 
     def toggle_hidden(self, on):
         self.show_hidden = on
-        self.settings.setValue("show_hidden", on)
+        self.set_view_value("show_hidden", on)
         for p in self.panes():
             p.apply_hidden()
 
     def _toggle_panel(self, w, key, on):
         w.setVisible(on)
-        self.settings.setValue(key, on)
+        self.set_view_value(key, on)
         if on and w is self.info:
             self.update_status()
 
@@ -2065,11 +2095,11 @@ class MainWindow(QMainWindow):
                 self.centralWidget().setEnabled(False)  # stay visible (showing "cancelling…") until stopped
                 self._close_when_idle()
             return
+        if not self.chooser_mode or not (self.isMaximized() or self.isFullScreen()):  # a chooser opens smaller
+            self.set_view_value("geometry", self.saveGeometry())
+        self.set_view_value("splitter", self.split.saveState())
         if self.chooser is not None:
             self.chooser.finish(False)  # closed without choosing: cancelled
-        else:
-            self.settings.setValue("geometry", self.saveGeometry())
-            self.settings.setValue("splitter", self.split.saveState())
         for p in self.panes():
             p._stop_search()
         if self.builder:
@@ -2311,7 +2341,7 @@ def open_chooser(req, done):
         start = _settings.value("chooser_folder", "")  # where the last chooser picked something
     if not start or not os.path.isdir(start):
         start = util.HOME
-    w = MainWindow([start], _thumbs, _settings)
+    w = MainWindow([start], _thumbs, _settings, chooser_mode=True)
     w.make_chooser(req, done)
     wid = chooser.x11_parent(req.parent_window)
     if wid and QGuiApplication.platformName() == "xcb":  # the app's window (X11): the chooser is its dialog

@@ -1,6 +1,6 @@
 # Kestrel Explorer
 
-**Version 0.2.0-alpha.** This is an early alpha release, so expect rough edges.
+**Version 0.2.1-alpha.** This is an early alpha release, so expect rough edges.
 
 A file manager for Ubuntu and Linux Mint that's easy to pick up and puts many jobs you'd normally do in a terminal into the window. It also adds quality-of-life improvements over GNOME Files. It's written in Python with PyQt6.
 
