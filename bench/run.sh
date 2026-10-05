@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Benchmark Kestrel Explorer (Python and C++) against GNOME Files (see bench/README.md).
+# Benchmark Kestrel Explorer (Python and C++) against GNOME Files, or Nemo on Linux Mint (see bench/README.md).
 #   bench/run.sh                      run everything and print the tables
 #   bench/run.sh --runs 5             more runs per measurement (medians are reported)
 #   bench/run.sh --update-readme      ...and write the results into both projects' README.md

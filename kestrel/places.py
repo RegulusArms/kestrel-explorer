@@ -130,9 +130,9 @@ def recent_files(limit=500):
 def _remember_recent():
     Gio = util.Gio
     try:
-        source = Gio.SettingsSchemaSource.get_default()
-        if source and source.lookup("org.gnome.desktop.privacy", True):
-            return Gio.Settings.new("org.gnome.desktop.privacy").get_boolean("remember-recent-files")
+        schema = util.desktop_schema("org.gnome.desktop.privacy")  # GNOME's, or Cinnamon's own
+        if util.has_schema_key(schema, "remember-recent-files"):
+            return Gio.Settings.new(schema).get_boolean("remember-recent-files")
     except Exception:
         pass
     return True

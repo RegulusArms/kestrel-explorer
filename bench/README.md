@@ -1,6 +1,6 @@
 # Benchmark
 
-Compares the two versions of Kestrel Explorer (Python and C++) with GNOME Files on the same data and in the same conditions. The results are the "Performance" section of the main README.
+Compares the two versions of Kestrel Explorer (Python and C++) with GNOME Files, or with Nemo on Linux Mint, on the same data and in the same conditions. The results are the "Performance" sections of the main README: `--update-readme` writes "Kestrel vs GNOME Files" and/or "Kestrel vs Nemo", depending on which of the two are installed, and leaves the other section as it is (so a run on Mint adds the Nemo results next to the GNOME ones).
 
 This folder is identical in both projects. It needs both of them side by side (`kes-c` and `kestrel-explorer` in the same parent folder), and it can be run from either.
 
@@ -21,7 +21,7 @@ A full run takes about 12 minutes, plus about a minute and a half the first time
 - `dbus-run-session`;
 - the C++ version's build tools, since its app and benchmark harness are built Release;
 - the Python version's packages;
-- `nautilus`. Without it, the GNOME Files column shows "—".
+- `nautilus` and/or `nemo`: each one installed is measured and gets its own table. Without either, only Kestrel's own tables are made.
 
 ## How it's measured
 
@@ -30,10 +30,12 @@ A full run takes about 12 minutes, plus about a minute and a half the first time
 - **Headless display:** all three apps run on an Xvfb X server with software rendering: Qt's raster engine, and GTK with `GSK_RENDERER=cairo`. No windows appear on your screen.
 - **Fresh home folder:** each run gets a new one, so the thumbnail cache is empty and settings are defaults.
 - **Private session bus:** only the services every GNOME desktop runs can be started on it: settings (dconf) and the virtual file system (gvfs, which provides `trash:///`, the drive list and file metadata). Both are started before each measurement, because on a desktop they are already running when an app starts. No file indexer, portal or online-accounts service runs in the background, and your own running apps never see the benchmark.
-- **RAM disk:** the data is in `/tmp/kestrel-bench-data`, so disk speed doesn't count. Set `KESTREL_BENCH_DATA` to use another place.
+- **RAM disk:** the data is in `/tmp/kestrel-bench-data`, so disk speed doesn't count. Set `KESTREL_BENCH_DATA` to use another place. `KESTREL_BUILD_DIR` builds the C++ version and the harness into another folder name than `build` (for a machine that shares these folders with another).
 - **Medians:** each measurement runs several times, and the tables show the median.
 
-### Compared with GNOME Files (measured from outside)
+### Compared with GNOME Files or Nemo (measured from outside)
+
+Nemo is measured exactly like GNOME Files below, through its own D-Bus service (`org.Nemo.FileOperations`). Nemo is a fork of an older GNOME Files, and its service offers fewer operations: the benchmark asks the service which ones it has, and an operation it doesn't have shows "—" with a note under the table. Emptying the trash then starts from files put there with `gio trash`. Nemo's "confirm before emptying the trash" setting is turned off in the throwaway home, so Empty Trash doesn't wait for a click. Nemo makes no thumbnails in this setup, so "Open a folder" isn't measured for it: each run would only wait out the 2-minute timeout. Those rows, and its peak memory with the 600-image folder open, show "—".
 
 | Measurement | How |
 |---|---|

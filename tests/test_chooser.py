@@ -102,6 +102,9 @@ anyimg = chooser.parse("OpenFile", "t", GLib.Variant("a{sv}", {
 check("*.jpg" in anyimg.filters[0].globs and "*.png" in anyimg.filters[0].globs, "image/* stands for every image type")
 req.accept_label = "_Save"
 check(chooser.button_text(req) == "Save", "a GTK mnemonic is dropped from the button label")
+check(chooser.x11_parent("x11:1a2b") == 0x1a2b and chooser.x11_parent("wayland:abc") == 0
+      and chooser.x11_parent("") == 0 and chooser.x11_parent("x11:zz") == 0,
+      "an X11 app's window id is read from the portal's handle (the chooser becomes its dialog)")
 
 # -- saving
 r = call("SaveFile", {"current_folder": folder(d), "current_name": GLib.Variant("s", "new.png")})

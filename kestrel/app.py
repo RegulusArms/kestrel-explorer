@@ -5,7 +5,7 @@ import sys
 
 from PyQt6 import sip
 from PyQt6.QtCore import QDateTime, QDir, QEvent, QFileSystemWatcher, QItemSelectionModel, QMimeData, QSettings, QSize, QStorageInfo, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QGuiApplication, QKeySequence
+from PyQt6.QtGui import QAction, QGuiApplication, QKeySequence, QWindow
 from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QHBoxLayout, QHeaderView,
                              QInputDialog, QLabel, QLineEdit, QListView, QMainWindow, QMenu, QMessageBox,
                              QProgressBar, QSlider, QSplitter, QStackedWidget, QTabWidget, QToolBar, QToolButton, QTreeView,
@@ -2313,6 +2313,13 @@ def open_chooser(req, done):
         start = util.HOME
     w = MainWindow([start], _thumbs, _settings)
     w.make_chooser(req, done)
+    wid = chooser.x11_parent(req.parent_window)
+    if wid and QGuiApplication.platformName() == "xcb":  # the app's window (X11): the chooser is its dialog
+        w.winId()  # create the native window, to give it a transient parent before it is shown
+        app_window = QWindow.fromWinId(wid)
+        if app_window is not None:
+            w.windowHandle().setTransientParent(app_window)
+            w._app_window = app_window  # kept with the chooser
     w.show()
     w.raise_()
     w.activateWindow()
@@ -2346,6 +2353,7 @@ def main(argv=None):
     QApplication.setDesktopFileName(util.APP_ID)
     app = QApplication(argv)
     util.setup_icon_theme()
+    util.follow_gtk_theme()  # Qt < 6.5: the GTK theme's colours, following changes
     app.setWindowIcon(util.theme_icon("folder"))
     util.migrate_legacy()
     util.ensure_desktop_entry()
