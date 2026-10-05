@@ -1,6 +1,10 @@
 # Kestrel Explorer
 
-**Version 0.2.1-alpha1.** This is an early alpha release, so expect rough edges.
+**Version 0.2.1-alpha2.** This is an early alpha release, so expect rough edges.
+
+> **Why do Linux users still need five separate utilities and a terminal to do normal filesystem work?**
+
+That's the question Kestrel sets out to answer, and why I'm building it.
 
 A file manager for Ubuntu and Linux Mint that's easy to pick up and puts many jobs you'd normally do in a terminal into the window. It also adds quality-of-life improvements over GNOME Files. It's written in Python with PyQt6.
 
@@ -443,6 +447,80 @@ tests/run.sh fileops atc_undo # only some
 ```
 
 There are 236 checks in 10 tests: file operations (copy, move, merge, delete, cancel, trash, links, undo), the tower that keeps several Kestrels in sync (shared changes, the shared task list, shared undo, opening folders as tabs), phones and cameras, rearranging the sidebar, following the desktop theme, the file chooser, and `install.sh`. Each test runs with a throwaway home folder on a private D-Bus bus, so your files, settings, dock and open windows are never touched. The [C++ version](https://github.com/RegulusArms/kes-c/tree/main/tests) has the same tests, and some checks launch the other version to test the two together. Details: [tests/README.md](https://github.com/RegulusArms/kestrel-explorer/blob/main/tests/README.md).
+
+## Architecture
+
+### Inside one Kestrel
+
+```
+                     Kestrel Explorer (kes, Python / PyQt6)
+                                  │
+   ┌──────────────┬───────────────┼──────────────┬──────────────────┬─────────────────┐
+   │              │               │              │                  │                 │
+ File UI      File jobs          GIO        External tools    D-Bus services      Radio
+ panes,       (worker threads)   mounts,    7z, tar, zpaq,    Show in folder,     its link to
+ sidebar,     copy · move ·      Open With, exiftool,         file chooser        the tower
+ viewer,      delete · trash ·   trash      ffmpeg                                (see below)
+ search       undo · extract
+              progress, cancel
+              and errors shown
+              in this window
+   │              │               │              │
+   └──────────────┴───────┬───────┴──────────────┘
+                          │
+                  Linux filesystem ◄── admin_helper.py (root, via pkexec):
+                          │              "Retry as Administrator"
+             ┌────────────┴────────────┐
+           local              GVFS mounts (/run/user/…/gvfs)
+                              SMB · SFTP · phones · cameras
+```
+
+Each Kestrel runs its own file jobs and shows their errors itself. Network shares, phones and cameras are mounted through GIO/GVFS and then read like any other folder.
+
+### Several Kestrels and the tower
+
+Kestrel isn't single-instance: a folder opened from another app may start a Kestrel process of its own, and a crash takes down only that one. The tower (`kes --atc`, no window) keeps them in sync. It talks to Kestrel processes, not windows: the windows of one process share its radio and update each other directly.
+
+```
+ ┌────────────────────────────┐                          ┌────────────────────────────┐
+ │ KESTREL A  (C++ or Python) │                          │ KESTREL B  (C++ or Python) │
+ │                            │                          │                            │
+ │  Window 1      Window 2    │                          │  Window 3                  │
+ │      └────┬───────┘        │                          │      │                     │
+ │         radio              │                          │    radio                   │
+ └───────────┬────────────────┘                          └──────┬─────────────────────┘
+             │  D-Bus (session bus)                             │  D-Bus (session bus)
+             │  check in · report · request                     │  check in · report · request
+             ▼                                                  ▼
+       ┌───────────────────────────────────────────────────────────────┐
+       │ TOWER  (kes --atc)                                            │
+       │                                                               │
+       │ • sends each report to every other Kestrel                    │
+       │ • job progress: keeps each Kestrel's latest, so a new window  │
+       │   can show jobs running elsewhere                             │
+       │ • ✕ Cancel: passed to the Kestrel that owns the job           │
+       │ • shared undo list (optional, off by default)                 │
+       │ • shared changes: Preferences, stars, folder colours,         │
+       │   covers, bookmarks, cleared caches                           │
+       │ • hands folders to an open window ("open folders as tabs")    │
+       │                                                               │
+       │ Never touches files, and runs no jobs. Started by the first   │
+       │ Kestrel, gone shortly after the last one leaves.              │
+       └───────────────────────────────────────────────────────────────┘
+```
+
+Examples:
+
+```
+ Star a file in Window 1    ─► A reports "starred"  ─► tower ─► B: Window 3 shows the star
+ Copy running in A          ─► progress reports     ─► tower ─► B shows it in the status bar
+ ✕ on that copy in B        ─► "cancel" for A       ─► tower ─► A stops its copy
+ Ctrl+Z in B (shared undo)  ─► asks the tower for the newest action, which may be A's
+ Folder opened by an app    ─► handed to the Kestrel whose window was used last (tabs on)
+ Window 1 ↔ Window 2        ─► no tower: they're in the same process
+```
+
+The C++ and Python versions speak the same protocol (JSON messages), so A and B can be one of each. If the tower goes down, the next Kestrel to notice starts a new one and every Kestrel checks in again.
 
 ## Layout
 
