@@ -5,15 +5,15 @@ import re
 import shutil
 import subprocess
 
-from PyQt6.QtCore import (QDir, QFileInfo, QRect, QRectF, QSize, QStorageInfo, Qt, QThread, QTimer,
-                          pyqtSignal)
-from PyQt6.QtGui import (QAbstractFileIconProvider, QColor, QFileSystemModel, QFont, QGuiApplication, QIcon, QPainter, QPainterPath, QPalette,
+from PyQt6.QtCore import (QByteArray, QDir, QFileInfo, QMimeData, QPersistentModelIndex, QRect, QRectF, QSize,
+                          QStorageInfo, Qt, QThread, QTimer, pyqtSignal)
+from PyQt6.QtGui import (QAbstractFileIconProvider, QColor, QDrag, QFileSystemModel, QFont, QGuiApplication, QIcon, QPainter, QPainterPath, QPalette, QPen,
                          QStandardItem, QStandardItemModel)
-from PyQt6.QtWidgets import (QAbstractItemView, QCompleter, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
+from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCompleter, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
                              QListWidget, QListWidgetItem, QMenu, QPlainTextEdit, QPushButton, QScrollArea,
                              QSizePolicy, QStyle, QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget)
 
-from . import metadata, places, thumbs, util
+from . import atc, metadata, places, thumbs, util
 
 ThumbRole = Qt.ItemDataRole.UserRole + 50
 PathRole = Qt.ItemDataRole.UserRole + 51
@@ -441,7 +441,9 @@ class PathBar(QWidget):
         if obj is self.edit and ev.type() == ev.Type.KeyPress and ev.key() == Qt.Key.Key_Escape:
             self.cancel_edit()
             return True
-        if obj is self.edit and ev.type() == ev.Type.FocusOut and not self.edit.completer().popup().isVisible():
+        # a popup (the right-click menu, the completer) takes focus while still editing
+        if (obj is self.edit and ev.type() == ev.Type.FocusOut and ev.reason() != Qt.FocusReason.PopupFocusReason
+                and not self.edit.completer().popup().isVisible()):
             QTimer.singleShot(0, self.cancel_edit)
         return False
 
@@ -541,6 +543,53 @@ class PathBar(QWidget):
 
 # ---------------------------------------------------------------- sidebar
 
+# ---------------------------------------------------------------- sidebar order (shared with the C++ version)
+# settings: sidebar_sections, sidebar_collapsed, sidebar_places_order, sidebar_devices_order; the bookmarks' order is
+# the GTK bookmarks file's
+
+SECTIONS = ["places", "bookmarks", "devices"]  # the default order
+SECTION_ROLE = Qt.ItemDataRole.UserRole + 1
+KEY_ROLE = Qt.ItemDataRole.UserRole + 2
+SIDEBAR_MIME = "application/x-kestrel-sidebar"
+
+
+def section_order(saved):
+    """The saved order, without unknown ids, plus any missing."""
+    out = []
+    for i in list(saved or []) + SECTIONS:
+        if i in SECTIONS and i not in out:
+            out.append(i)
+    return out
+
+
+def ordered(keys, saved):
+    """Keys in the saved order (those present), then the rest in their natural order."""
+    out = [k for k in dict.fromkeys(saved or []) if k in keys]
+    return out + [k for k in keys if k not in out]
+
+
+def moved(keys, key, index):
+    """Keys with `key` moved to insertion point `index` (0 = first, len(keys) = last, counted before the move)."""
+    keys = list(keys)
+    if key not in keys:
+        return keys
+    frm = keys.index(key)
+    to = max(0, min(index, len(keys)))
+    if to > frm:
+        to -= 1
+    keys.insert(to, keys.pop(frm))
+    return keys
+
+
+def _settings():
+    from . import app
+    return app._settings
+
+
+def _setting_list(key):
+    return [str(x) for x in (_settings().value(key, [], type=list) or [])]
+
+
 class Sidebar(QListWidget):
     open_path = pyqtSignal(str, bool)            # path, new tab
     dropped = pyqtSignal(list, str)              # sources, target dir
@@ -559,27 +608,52 @@ class Sidebar(QListWidget):
         self.customContextMenuRequested.connect(self._menu)
         self.itemClicked.connect(self._clicked)
         self.setStyleSheet("QListWidget { background: palette(window); } QListWidget::item { padding: 3px; }")
+        util.on_palette_change(self, self.refresh)  # the headers' colour is set per item
         self._mounts = None
+        self._phones = []  # phones and cameras (Gio)
+        self._press_pos = None
+        self._press_index = QPersistentModelIndex()
+        self._drop_line = -1  # y of the drop indicator while rearranging, -1 = none
+        # phones and cameras come and go through Gio's volume monitor (QStorageInfo doesn't see them)
+        self._phone_timer = QTimer(self, singleShot=True, interval=300, timeout=self.refresh)
+        self._monitor = util.Gio.VolumeMonitor.get() if util.Gio else None
+        if self._monitor is not None:
+            for sig in ("volume-added", "volume-removed", "volume-changed", "mount-added", "mount-removed",
+                        "mount-changed"):
+                self._monitor.connect(sig, lambda *a: self._phone_timer.start())
         self.refresh()
         self.timer = QTimer(self, interval=4000, timeout=self._check_mounts)
         self.timer.start()
 
-    def _header(self, text):
-        it = QListWidgetItem(text)
-        it.setFlags(Qt.ItemFlag.NoItemFlags)
+    def _header(self, section, title, collapsed):
+        it = QListWidgetItem(("▸  " if collapsed else "▾  ") + title)
+        it.setFlags(Qt.ItemFlag.ItemIsEnabled)  # clickable (collapse), not selectable
         f = it.font()
         f.setBold(True)
         f.setPointSizeF(f.pointSizeF() * 0.85)
         it.setFont(f)
         it.setForeground(self.palette().color(QPalette.ColorRole.PlaceholderText))
+        it.setData(Qt.ItemDataRole.UserRole, ("header", section))
+        it.setData(SECTION_ROLE, section)
+        it.setToolTip("Click to expand · drag to move the section" if collapsed
+                      else "Click to collapse · drag to move the section")
         self.addItem(it)
 
-    def _add(self, label, path, icon, kind="place", extra=None):
-        it = QListWidgetItem(icon if isinstance(icon, QIcon) else util.theme_icon(icon, "folder"), label)
-        it.setData(PathRole, path)
-        it.setData(Qt.ItemDataRole.UserRole, (kind, extra))
-        it.setToolTip(path)
+    def _add(self, e, section):
+        """e: dict with label, path, icon, kind, extra, key (what the saved order lists: the path; "phone:<name>" for
+        a phone) and tip."""
+        icon = e["icon"]
+        it = QListWidgetItem(icon if isinstance(icon, QIcon) else util.theme_icon(icon, "folder"), e["label"])
+        it.setData(PathRole, e["path"])
+        it.setData(Qt.ItemDataRole.UserRole, (e.get("kind", "place"), e.get("extra")))
+        it.setData(SECTION_ROLE, section)
+        it.setData(KEY_ROLE, e.get("key") or e["path"])
+        it.setToolTip(e.get("tip") or e["path"])
         self.addItem(it)
+
+    def _in_order(self, entries, setting):
+        keys = [e.get("key") or e["path"] for e in entries]
+        return [entries[keys.index(k)] for k in ordered(keys, _setting_list(setting))]
 
     def _mount_list(self):
         out = []
@@ -603,36 +677,139 @@ class Sidebar(QListWidget):
     def refresh(self):
         current = self.currentItem().data(PathRole) if self.currentItem() else None
         self.clear()
-        from .overview import OVERVIEW, OVERVIEW_TITLE
-        self._header("PLACES")
-        self._add(OVERVIEW_TITLE, OVERVIEW, "computer", "overview")
-        self._add("Home", util.HOME, "user-home")
-        self._add("Recent", places.RECENT, util.theme_icon("document-open-recent", "folder-recent", "folder"), "recent")
-        self._add("Starred", places.STARRED, util.theme_icon("starred", "starred-symbolic", "folder"), "starred")
+        from .overview import OVERVIEW, OVERVIEW_TITLE, phone_infos
+
+        def entry(label, path, icon, kind="place", extra=None, key=None, tip=None):
+            return {"label": label, "path": path, "icon": icon, "kind": kind, "extra": extra, "key": key, "tip": tip}
+        place_list = [entry(OVERVIEW_TITLE, OVERVIEW, "computer", "overview"), entry("Home", util.HOME, "user-home"),
+                      entry("Recent", places.RECENT, util.theme_icon("document-open-recent", "folder-recent", "folder"),
+                            "recent"),
+                      entry("Starred", places.STARRED, util.theme_icon("starred", "starred-symbolic", "folder"),
+                            "starred")]
         for key, label, icon in (("DESKTOP", "Desktop", "user-desktop"), ("DOCUMENTS", "Documents", "folder-documents"),
                                  ("DOWNLOAD", "Downloads", "folder-download"), ("MUSIC", "Music", "folder-music"),
                                  ("PICTURES", "Pictures", "folder-pictures"), ("VIDEOS", "Videos", "folder-videos")):
             p = util.xdg_user_dir(key)
             if os.path.isdir(p):
-                self._add(label, p, icon)
-        trash_files = str(util.TRASH_DIR / "files")
+                place_list.append(entry(label, p, icon))
         empty = util.trash_is_empty()  # home trash and every drive's trash
-        self._add("Trash", trash_files, "user-trash" if empty else "user-trash-full", "trash")
-        bms = util.read_bookmarks()
-        if bms:
-            self._header("BOOKMARKS")
-            for i, (path, label) in enumerate(bms):
-                remote = not path.startswith("/") or path.startswith("/run/user/")
-                self._add(label, path, "folder-remote" if remote else "folder", "bookmark", i)
-        self._header("DEVICES")
-        self._add("Computer", "/", "drive-harddisk", "root")
+        place_list.append(entry("Trash", str(util.TRASH_DIR / "files"), "user-trash" if empty else "user-trash-full",
+                                "trash"))
+        bookmark_list = []  # in the bookmarks file's order (moving one rewrites the file)
+        for i, (path, label) in enumerate(util.read_bookmarks()):
+            remote = not path.startswith("/") or path.startswith("/run/user/")
+            bookmark_list.append(entry(label, path, "folder-remote" if remote else "folder", "bookmark", i))
+        device_list = [entry("Computer", "/", "drive-harddisk", "root")]
         self._mounts = self._mount_list()
         for name, root, dev, total in self._mounts:
             label = f"{name} ({util.human_size(total)})" if total else name
             icon = "drive-removable-media" if root.startswith(("/media/", "/run/media/")) else "drive-harddisk"
-            self._add(label, root, icon, "mount", dev)
+            device_list.append(entry(label, root, icon, "mount", dev))
+        self._phones = phone_infos(self._monitor)
+        for i, ph in enumerate(self._phones):
+            # a phone that isn't mounted yet opens its URI: open_location mounts it
+            mounted = ph.get("mounted", True)
+            icon = ph["icon"] if not ph["icon"].isNull() else util.theme_icon("phone", "drive-removable-media")
+            device_list.append(entry(ph["name"], ph["root"] if mounted else ph["uri"], icon, "phone", i,
+                                     "phone:" + ph["name"], ph["fs"] if mounted else ph["fs"] + " — click to connect"))
+        collapsed = _setting_list("sidebar_collapsed")
+        for sid in section_order(_setting_list("sidebar_sections")):
+            entries = (self._in_order(place_list, "sidebar_places_order") if sid == "places" else
+                       self._in_order(device_list, "sidebar_devices_order") if sid == "devices" else bookmark_list)
+            if not entries:
+                continue
+            shut = sid in collapsed
+            self._header(sid, sid.upper(), shut)
+            if not shut:
+                for e in entries:
+                    self._add(e, sid)
         if current:
             self.select_path(current)
+
+    def shown_sections(self):
+        """In order."""
+        return [self.item(i).data(SECTION_ROLE) for i in range(self.count())
+                if self.item(i).data(Qt.ItemDataRole.UserRole)[0] == "header"]
+
+    def entry_keys(self, section):
+        """In order; empty when collapsed."""
+        return [self.item(i).data(KEY_ROLE) for i in range(self.count())
+                if self.item(i).data(SECTION_ROLE) == section
+                and self.item(i).data(Qt.ItemDataRole.UserRole)[0] != "header"]
+
+    def _section_row(self, section):
+        """Its header's row, -1 if not shown."""
+        for i in range(self.count()):
+            if self.item(i).data(SECTION_ROLE) == section:
+                return i
+        return -1
+
+    def _section_end(self, section):
+        """The row after its last entry."""
+        end = self._section_row(section)
+        if end < 0:
+            return -1
+        while end < self.count() and self.item(end).data(SECTION_ROLE) == section:
+            end += 1
+        return end
+
+    def _save_order(self, setting, keys):
+        # keep the places of entries that aren't shown now (a drive that isn't plugged in)
+        keys = list(keys) + [k for k in _setting_list(setting) if k not in keys]
+        _settings().setValue(setting, keys)
+        _settings().sync()  # other Kestrels read the file as soon as they hear the report
+        atc.announce("sidebar")  # refreshes every sidebar, here and in other Kestrels
+
+    # rearranging (what drag and drop does): an entry within its section, or a whole section, to insertion point
+    # `index` (counted before the move); click a header to collapse/expand it
+    def move_entry(self, section, key, index):
+        keys = self.entry_keys(section)
+        if key not in keys:
+            return
+        if section == "bookmarks":
+            bms = util.read_bookmarks()
+            frm = next((i for i, b in enumerate(bms) if b[0] == key), -1)
+            if frm < 0:
+                return
+            to = max(0, min(index, len(bms)))
+            if to > frm:
+                to -= 1
+            if to == frm:
+                return
+            bms.insert(to, bms.pop(frm))
+            util.write_bookmarks(bms)  # announces "bookmarks": every sidebar refreshes
+            return
+        now = moved(keys, key, index)
+        if now != keys:
+            self._save_order("sidebar_places_order" if section == "places" else "sidebar_devices_order", now)
+
+    def move_section(self, section, index):
+        order = section_order(_setting_list("sidebar_sections"))
+        # index counts the sections shown; hidden ones (no bookmarks) keep their place relative to the next shown one
+        shown = self.shown_sections()
+        now_shown = moved(shown, section, index)
+        if now_shown == shown:
+            return
+        now = []
+        for sid in now_shown:
+            for other in order[:order.index(sid)]:  # hidden sections that came before it
+                if other not in shown and other not in now:
+                    now.append(other)
+            now.append(sid)
+        now += [sid for sid in order if sid not in now]
+        _settings().setValue("sidebar_sections", now)
+        _settings().sync()
+        atc.announce("sidebar")
+
+    def toggle_section(self, section):
+        collapsed = _setting_list("sidebar_collapsed")
+        if section in collapsed:
+            collapsed.remove(section)
+        else:
+            collapsed.append(section)
+        _settings().setValue("sidebar_collapsed", collapsed)
+        _settings().sync()
+        atc.announce("sidebar")
 
     def select_path(self, path):
         self.blockSignals(True)
@@ -644,12 +821,45 @@ class Sidebar(QListWidget):
         self.blockSignals(False)
 
     def _clicked(self, it):
+        if it.data(Qt.ItemDataRole.UserRole)[0] == "header":
+            self.toggle_section(it.data(SECTION_ROLE))
+            return
         p = it.data(PathRole)
         if p:
             mods = QGuiApplication.keyboardModifiers()
             self.open_path.emit(p, bool(mods & Qt.KeyboardModifier.ControlModifier))
 
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.MouseButton.LeftButton:
+            self._press_pos = ev.position().toPoint()
+            self._press_index = QPersistentModelIndex(self.indexAt(self._press_pos))
+        super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev):
+        # press and drag an entry (within its section) or a header (the whole section) to rearrange
+        if (ev.buttons() & Qt.MouseButton.LeftButton and self._press_index.isValid()
+                and (ev.position().toPoint() - self._press_pos).manhattanLength() >= QApplication.startDragDistance()):
+            it = self.item(self._press_index.row())
+            self._press_index = QPersistentModelIndex()
+            if it is None:
+                return
+            is_header = it.data(Qt.ItemDataRole.UserRole)[0] == "header"
+            key = "" if is_header else it.data(KEY_ROLE)
+            mime = QMimeData()
+            mime.setData(SIDEBAR_MIME, QByteArray((it.data(SECTION_ROLE) + "\n" + key).encode()))
+            drag = QDrag(self)
+            drag.setMimeData(mime)
+            r = self.visualItemRect(it)
+            drag.setPixmap(self.viewport().grab(r))
+            drag.setHotSpot(self._press_pos - r.topLeft())
+            drag.exec(Qt.DropAction.MoveAction)
+            self._drop_line = -1
+            self.viewport().update()
+            return
+        super().mouseMoveEvent(ev)
+
     def mouseReleaseEvent(self, ev):
+        self._press_index = QPersistentModelIndex()
         if ev.button() == Qt.MouseButton.MiddleButton:
             it = self.itemAt(ev.position().toPoint())
             if it and it.data(PathRole):
@@ -666,7 +876,7 @@ class Sidebar(QListWidget):
         m = QMenu(self)
         m.addAction("Open", lambda: self.open_path.emit(path, False))
         m.addAction("Open in New Tab", lambda: self.open_path.emit(path, True))
-        if os.path.isdir(path):
+        if kind != "phone" and os.path.isdir(path):  # a stat on a phone can wait behind its transfers
             m.addAction("Open in Terminal", lambda: util.open_terminal(path))
         if kind == "bookmark":
             m.addSeparator()
@@ -680,6 +890,10 @@ class Sidebar(QListWidget):
         elif kind == "mount":
             m.addSeparator()
             m.addAction("Unmount", lambda: self._unmount(path))
+        elif kind == "phone" and extra < len(self._phones) and self._phones[extra].get("mount") is not None:
+            m.addSeparator()
+            m.addAction("Eject" if self._phones[extra]["mount"].can_eject() else "Unmount",
+                        lambda: self._eject_phone(extra))
         m.exec(self.viewport().mapToGlobal(pos))
 
     def _unmount(self, path):
@@ -691,6 +905,18 @@ class Sidebar(QListWidget):
             from PyQt6.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Unmount", r.stderr or "Unmount failed")
         self.refresh()
+
+    def _eject_phone(self, i):
+        if i >= len(self._phones) or self._phones[i].get("mount") is None:
+            return
+        from .overview import unmount
+
+        def done(err):
+            if err:
+                from PyQt6.QtWidgets import QMessageBox
+                QMessageBox.warning(self, "Unmount", err)
+            self.refresh()
+        unmount(self, self._phones[i]["mount"], done)
 
     def _edit_bookmark(self, path):
         from .dialogs import edit_bookmark
@@ -718,19 +944,86 @@ class Sidebar(QListWidget):
             util.write_bookmarks(bms)
         self.refresh()
 
-    # drag & drop onto places
+    def _drop_for(self, pos, section, key):
+        """The insertion point under pos, as (row, index): between the section's entries, or (key empty: a whole
+        section) between sections. row -1: nowhere."""
+        n = self.count()
+        row = n
+        it = self.itemAt(pos)
+        if it is not None:
+            r = self.visualItemRect(it)
+            row = self.row(it) + (1 if pos.y() >= r.center().y() else 0)
+        elif n and pos.y() < self.visualItemRect(self.item(0)).top():
+            row = 0
+        if key:
+            first, end = self._section_row(section) + 1, self._section_end(section)
+            if first <= 0:
+                return -1, -1
+            row = max(first, min(row, end))
+            return row, row - first
+        # a whole section: snap to the nearer edge of the section under the pointer
+        shown = self.shown_sections()
+        target = len(shown)
+        if row < n:
+            over = self.item(row).data(SECTION_ROLE)
+            if over in shown:
+                top, end = self._section_row(over), self._section_end(over)
+                i = shown.index(over)
+                target = i if (row - top) * 2 <= end - top else i + 1
+        return (self._section_row(shown[target]) if target < len(shown) else n), target
+
+    def _sidebar_drag(self, ev):
+        """(section, key) of a rearranging drag from this sidebar, or None."""
+        if not ev.mimeData().hasFormat(SIDEBAR_MIME) or ev.source() is not self:
+            return None
+        section, _, key = bytes(ev.mimeData().data(SIDEBAR_MIME)).decode().partition("\n")
+        return section, key
+
+    # drag & drop: rearranging, or files onto places
     def dragEnterEvent(self, ev):
-        if ev.mimeData().hasUrls():
+        if self._sidebar_drag(ev) is not None or ev.mimeData().hasUrls():
             ev.acceptProposedAction()
 
     def dragMoveEvent(self, ev):
+        if ev.mimeData().hasFormat(SIDEBAR_MIME):
+            sk = self._sidebar_drag(ev)
+            row = self._drop_for(ev.position().toPoint(), *sk)[0] if sk else -1
+            if row < 0:
+                self._drop_line = -1
+                ev.ignore()
+            else:
+                self._drop_line = (self.visualItemRect(self.item(row)).top() if row < self.count()
+                                   else self.visualItemRect(self.item(self.count() - 1)).bottom() + 1)
+                ev.acceptProposedAction()
+            self.viewport().update()
+            return
         it = self.itemAt(ev.position().toPoint())
         if it and it.data(PathRole) and it.data(PathRole).startswith("/") and os.path.isdir(it.data(PathRole)):
             ev.acceptProposedAction()
         else:
             ev.ignore()
 
+    def dragLeaveEvent(self, ev):
+        self._drop_line = -1
+        self.viewport().update()
+        super().dragLeaveEvent(ev)
+
     def dropEvent(self, ev):
+        if ev.mimeData().hasFormat(SIDEBAR_MIME):
+            self._drop_line = -1
+            self.viewport().update()
+            sk = self._sidebar_drag(ev)
+            if sk is None:
+                return
+            row, index = self._drop_for(ev.position().toPoint(), *sk)
+            if row < 0:
+                return
+            ev.acceptProposedAction()
+            section, key = sk
+            # after the drag has finished: moving rebuilds the list
+            QTimer.singleShot(0, lambda: self.move_entry(section, key, index) if key
+                              else self.move_section(section, index))
+            return
         it = self.itemAt(ev.position().toPoint())
         if not it or not it.data(PathRole):
             return
@@ -738,6 +1031,15 @@ class Sidebar(QListWidget):
         target = it.data(PathRole)
         ev.acceptProposedAction()
         QTimer.singleShot(0, lambda: self.dropped.emit(paths, target))
+
+    def paintEvent(self, ev):
+        super().paintEvent(ev)
+        if self._drop_line < 0:
+            return
+        p = QPainter(self.viewport())
+        p.setPen(QPen(self.palette().color(QPalette.ColorRole.Highlight), 2))
+        p.drawLine(4, self._drop_line, self.viewport().width() - 4, self._drop_line)
+        p.end()
 
 
 # ---------------------------------------------------------------- info panel

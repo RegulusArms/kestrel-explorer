@@ -1,4 +1,4 @@
-"""Overview page: drives with usage, network locations, connect-to-server, bookmarks.
+"""Overview page: drives with usage, phones and cameras, network locations, connect-to-server, bookmarks.
 
 Modelled on the old "Other Locations" page in GNOME Files. Volume discovery uses
 Gio's VolumeMonitor (same source as Nautilus, so unmounted and encrypted drives can
@@ -263,6 +263,73 @@ def unmount(parent, mount, on_done):
         mount.unmount_with_operation(Gio.MountUnmountFlags.NONE, op, None, finished)
 
 
+# ---------------------------------------------------------------- phones and cameras
+
+NO_PHONES_HINT = ("No phones or cameras connected. Plug one in and unlock it: on an iPhone, tap “Trust”; "
+                  "on Android, choose “File transfer” in the USB notification.")
+
+
+def is_phone_scheme(scheme):
+    """Phones and cameras: gvfs's afc (Apple devices), gphoto2 (cameras, and an iPhone's photos) and mtp (Android)."""
+    return scheme in ("afc", "gphoto2", "mtp")
+
+
+def phone_kind(scheme):
+    """What a phone/camera mount holds (an iPhone has two: its photos via gphoto2, its apps' files via afc)."""
+    return "Photos and videos" if scheme == "gphoto2" else "Files"
+
+
+def phone_hint(scheme, name):
+    """What to do on the device when it won't mount."""
+    low = (name or "").lower()
+    if scheme == "afc" or any(w in low for w in ("iphone", "ipad", "ipod", "apple")):
+        return "Unlock the iPhone or iPad and tap “Trust” if it asks whether to trust this computer, then try again."
+    if scheme == "mtp":
+        return "Unlock the phone and choose “File transfer” in its USB notification, then try again."
+    return "Make sure the camera is switched on and set to photo transfer (PTP) mode, then try again."
+
+
+def mount_group(scheme, path, shadowed, known_root):
+    """Where the Overview lists a Gio mount: "skip", "local", "phone" or "network". known_root: its path is one of
+    the scanned filesystems."""
+    if shadowed:
+        return "skip"  # hidden behind its volume's own mount (gvfs lists both)
+    if path and known_root:
+        return "local"
+    if is_phone_scheme(scheme):
+        return "phone"
+    if scheme != "file" or (path and "/gvfs/" in path):
+        return "network"  # gvfs network mount (smb, sftp, ...)
+    return "skip"
+
+
+def phone_infos(monitor):
+    """Connected phones (mounted, with their FUSE path) and ones that can be mounted (uri = where to mount them)."""
+    out = []
+    if monitor is None:
+        return out
+    for m in monitor.get_mounts():
+        root = m.get_root()
+        scheme = root.get_uri_scheme()
+        if not m.is_shadowed() and is_phone_scheme(scheme):
+            out.append({"name": m.get_name(), "root": root.get_path(), "uri": root.get_uri(), "fs": phone_kind(scheme),
+                        "icon": util.gicon_to_qicon(m.get_icon()), "mount": m, "status": "Connected",
+                        "kind": "phone"})
+    for v in monitor.get_volumes():
+        if v.get_mount() is not None:
+            continue
+        act = v.get_activation_root()
+        if act is None:
+            continue
+        scheme = act.get_uri_scheme()
+        if not is_phone_scheme(scheme) or not v.can_mount():
+            continue
+        out.append({"name": v.get_name(), "root": "", "uri": act.get_uri(), "fs": phone_kind(scheme), "total": 0,
+                    "free": None, "mounted": False, "icon": util.gicon_to_qicon(v.get_icon()), "volume": v,
+                    "kind": "phone"})
+    return out
+
+
 # ---------------------------------------------------------------- widgets
 
 class FlowLayout(QLayout):
@@ -331,9 +398,11 @@ class Card(QFrame):
         super().__init__(parent)
         self.setObjectName("card")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setStyleSheet("""
-            QFrame#card { background: palette(base); border: 1px solid palette(midlight); border-radius: 10px; }
-            QFrame#card:hover { border: 1px solid palette(highlight); }
+        # colours from the theme (the page rebuilds its cards when the desktop's colours change)
+        self.setStyleSheet(f"""
+            QFrame#card {{ background: {util.card_color().name()}; border: 1px solid {util.card_border().name()};
+                           border-radius: 10px; }}
+            QFrame#card:hover {{ border: 1px solid palette(highlight); }}
         """)
 
     def mouseReleaseEvent(self, ev):
@@ -384,7 +453,8 @@ class DriveCard(Card):
             top.addWidget(b)
             self.action_btn = b
         col.addLayout(top)
-        sub = [info.get("root") or info.get("device") or "", info.get("fs") or ""]
+        where = "" if info.get("kind") == "phone" else info.get("root") or info.get("device") or ""
+        sub = [where, info.get("fs") or ""]
         col.addWidget(_small(QLabel("  ·  ".join(s for s in sub if s))))
         total, free = info.get("total") or 0, info.get("free")
         if info.get("mounted", True) and total:
@@ -396,7 +466,7 @@ class DriveCard(Card):
             bar.setTextVisible(False)
             bar.setFixedHeight(8)
             color = "#c01c28" if pct >= 90 else ("#e5a50a" if pct >= 75 else "palette(highlight)")
-            bar.setStyleSheet(f"QProgressBar {{ border: none; border-radius: 4px; background: palette(midlight); }}"
+            bar.setStyleSheet(f"QProgressBar {{ border: none; border-radius: 4px; background: {util.card_border().name()}; }}"
                               f"QProgressBar::chunk {{ border-radius: 4px; background: {color}; }}")
             col.addWidget(bar)
             col.addWidget(_small(QLabel(f"{util.human_size(free)} free of {util.human_size(total)}  ({pct:.0f}% used)")))
@@ -472,6 +542,7 @@ class OverviewPage(QScrollArea):
         self.refresh_timer = QTimer(self, singleShot=True, interval=300, timeout=self.refresh)
         self.usage_timer = QTimer(self, interval=15000, timeout=self.refresh)
         self.thumbs.updated.connect(self._thumb_ready)
+        util.on_palette_change(self, self._rebuild)  # a light/dark switch: cards and icons in the new colours
         if util.Gio:
             self.monitor = util.Gio.VolumeMonitor.get()
             for sig in ("volume-added", "volume-removed", "volume-changed", "mount-added", "mount-removed",
@@ -543,12 +614,19 @@ class OverviewPage(QScrollArea):
         scroll = self.verticalScrollBar().value()
         self._clear()
         self.bookmark_cards = {}
-        local, network = self._drive_infos()
+        local, phones, network = self._drive_infos()
         flow = self._section("Drives")
         for info in local:
             flow.addWidget(self._drive_card(info))
         if not local:
             flow.addWidget(_small(QLabel("Scanning…")))
+        pflow = self._section("Phones & Cameras")
+        for info in phones:
+            pflow.addWidget(self._drive_card(info))
+        if not phones:
+            hint = _small(QLabel(NO_PHONES_HINT))
+            hint.setWordWrap(True)
+            self.lay.addWidget(hint)
         nflow = self._section("Network")
         for info in network:
             nflow.addWidget(self._drive_card(info))
@@ -591,13 +669,14 @@ class OverviewPage(QScrollArea):
             for m in self.monitor.get_mounts():
                 root = m.get_root()
                 path = root.get_path()
-                if path and path in roots:
+                scheme = root.get_uri_scheme()
+                group = mount_group(scheme, path, m.is_shadowed(), path in roots)
+                if group == "local":
                     gio_by_root[path] = m
-                elif root.get_uri_scheme() != "file" or (path and "/gvfs/" in path):
-                    # gvfs network mount (smb, sftp, ...)
-                    network.append({"name": m.get_name(), "root": path, "uri": root.get_uri(),
-                                    "fs": root.get_uri_scheme(), "icon": util.gicon_to_qicon(m.get_icon()),
-                                    "mount": m, "status": "Connected", "kind": "network"})
+                elif group == "network":
+                    network.append({"name": m.get_name(), "root": path, "uri": root.get_uri(), "fs": scheme,
+                                    "icon": util.gicon_to_qicon(m.get_icon()), "mount": m, "status": "Connected",
+                                    "kind": "network"})
         for e in fs:
             m = gio_by_root.get(e["root"])
             icon = "drive-harddisk-system" if e["kind"] == "system" else (
@@ -617,6 +696,9 @@ class OverviewPage(QScrollArea):
             for v in self.monitor.get_volumes():
                 if v.get_mount() is not None or not v.can_mount():
                     continue
+                act = v.get_activation_root()
+                if act is not None and is_phone_scheme(act.get_uri_scheme()):
+                    continue  # phone_infos
                 dev = v.get_identifier("unix-device") or ""
                 fstype = _udev_fstype(dev) if dev else ""
                 if fstype in NON_MOUNTABLE_FS:
@@ -625,7 +707,7 @@ class OverviewPage(QScrollArea):
                               "fs": "encrypted" if fstype == "crypto_LUKS" else fstype,
                               "total": _sysfs_size(dev) if dev else 0, "free": None, "mounted": False,
                               "icon": util.gicon_to_qicon(v.get_icon()), "volume": v, "kind": "unmounted"})
-        return local, network
+        return local, phone_infos(self.monitor), network
 
     def _drive_card(self, info):
         if info.get("mount") is not None:
@@ -664,9 +746,13 @@ class OverviewPage(QScrollArea):
 
     # -- actions
     def _mount(self, volume):
+        act = volume.get_activation_root()
+        scheme = act.get_uri_scheme() if act is not None else ""
+        hint = phone_hint(scheme, volume.get_name()) if is_phone_scheme(scheme) else ""
+
         def done(path, err):
             if err:
-                QMessageBox.warning(self, "Mount", err)
+                QMessageBox.warning(self, "Mount", f"{err}\n\n{hint}" if hint else err)
             self.win.sidebar.refresh()
             self.refresh()
             if path:

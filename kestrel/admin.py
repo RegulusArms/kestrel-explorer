@@ -17,7 +17,7 @@ import time
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QMenu, QMessageBox, QToolButton
 
-from . import fileops
+from . import fileops, util
 
 IDLE_MINUTES = 15
 HELPER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "admin_helper.py")
@@ -180,7 +180,10 @@ class Indicator(QToolButton):
         m = QMenu(self)
         m.addAction("End Admin Session", lambda: session().end())
         self.setMenu(m)
-        self.setStyleSheet("QToolButton { color: #c01c28; font-weight: bold; }")
+        def style():
+            self.setStyleSheet(f"QToolButton {{ color: {util.error_color().name()}; font-weight: bold; }}")
+        style()
+        util.on_palette_change(self, style)
         session().changed.connect(self.setVisible)
         self.setVisible(session().active())
 

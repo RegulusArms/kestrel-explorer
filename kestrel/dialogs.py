@@ -850,7 +850,7 @@ def ask_rename(parent, path):
     edit.setMinimumWidth(380)
     lay.addWidget(edit)
     err = QLabel()
-    err.setStyleSheet("color: #c01c28")
+    err.setStyleSheet(f"color: {util.error_color().name()}")
     lay.addWidget(err)
     bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
     bb.button(QDialogButtonBox.StandardButton.Ok).setText("Rename")
@@ -973,7 +973,7 @@ class BatchRenameDialog(QDialog):
                    (new != os.path.basename(p) and os.path.lexists(os.path.join(os.path.dirname(p), new))
                     and os.path.join(os.path.dirname(p), new) not in self.paths))
             if bad:
-                it.setForeground(QColor("#c01c28"))
+                it.setForeground(util.error_color())
                 problems += 1
             self.table.setItem(i, 1, it)
         self.status.setText(f"{problems} conflicting name(s)" if problems else "")
@@ -1039,10 +1039,22 @@ class PreferencesDialog(QDialog):
         self.order = QComboBox()
         self.order.addItems(["First by name", "Newest first"])
         self.order.setCurrentIndex(1 if settings.value("folder_order", "name") == "newest" else 0)
-        self.color = QColor(settings.value("folder_color", "#d9652f"))
+        color_setting = settings.value("folder_color", "accent")
+        self.color_accent = QCheckBox("Use the desktop's accent colour")
+        self.color_accent.setChecked(thumbs.follows_accent(color_setting))
+        self.color = util.accent_color() if self.color_accent.isChecked() else QColor(color_setting)
         self.color_btn = QPushButton()
         self._paint_color()
         self.color_btn.clicked.connect(self._pick_color)
+
+        def accent_toggled(on):
+            if on:
+                self.color = util.accent_color()
+            self._paint_color()
+        self.color_accent.toggled.connect(accent_toggled)
+        color_row = QHBoxLayout()
+        color_row.addWidget(self.color_btn)
+        color_row.addWidget(self.color_accent, 1)
         self.max_mb = QSpinBox()
         self.max_mb.setRange(1, 10000)
         self.max_mb.setSuffix(" MB")
@@ -1073,7 +1085,7 @@ class PreferencesDialog(QDialog):
                                      "the Kestrel window you used last.\nOff: it opens in a new window.")
         form.addRow("Images in folder previews:", self.count)
         form.addRow("Folder preview picks:", self.order)
-        form.addRow("Folder colour:", self.color_btn)
+        form.addRow("Folder colour:", color_row)
         form.addRow("Don't thumbnail files larger than:", self.max_mb)
         form.addRow("Slideshow interval:", self.slide)
         form.addRow("Open images with:", self.img_opener)
@@ -1115,6 +1127,9 @@ class PreferencesDialog(QDialog):
 
     def _paint_color(self):
         self.color_btn.setStyleSheet(f"background:{self.color.name()}; min-width:60px; min-height:20px")
+        self.color_btn.setEnabled(not self.color_accent.isChecked())
+        self.color_btn.setToolTip("Follows the desktop's accent colour" if self.color_accent.isChecked()
+                                  else "Choose the colour")
 
     def _pick_color(self):
         c = QColorDialog.getColor(self.color, self, "Folder colour")
@@ -1140,7 +1155,7 @@ class PreferencesDialog(QDialog):
             s.setValue("homepage", "overview" if mode == 0 else "home")
         s.setValue("folder_count", self.count.value())
         s.setValue("folder_order", "newest" if self.order.currentIndex() == 1 else "name")
-        s.setValue("folder_color", self.color.name())
+        s.setValue("folder_color", "accent" if self.color_accent.isChecked() else self.color.name())
         s.setValue("thumb_max_mb", self.max_mb.value())
         s.setValue("image_opener", self.img_opener.currentData())
         s.setValue("video_opener", self.vid_opener.currentData())

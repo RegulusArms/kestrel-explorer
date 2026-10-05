@@ -16,8 +16,9 @@ import threading
 import time
 from collections import OrderedDict
 
-from PyQt6.QtCore import QObject, QRectF, QRunnable, QSize, Qt, QThread, QThreadPool, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QIcon, QImage, QPainter, QPainterPath, QPixmap
+from PyQt6.QtCore import (QBuffer, QByteArray, QObject, QRectF, QRunnable, QSize, Qt, QThread, QThreadPool, QTimer,
+                          pyqtSignal)
+from PyQt6.QtGui import QColor, QIcon, QImage, QImageReader, QPainter, QPainterPath, QPixmap
 
 from . import atc, util
 
@@ -25,6 +26,7 @@ FLAVORS = {128: "normal", 256: "large", 512: "x-large"}
 COVER_NAMES = ("cover", "folder", ".cover", ".folder", "front", "poster")
 COVERS_FILE = util.CONFIG_DIR / "covers.json"
 STYLES_FILE = util.CONFIG_DIR / "folder_styles.json"   # per-folder {"color": "#rrggbb", "previews": false}
+DEVICE_MAX_BYTES = 30_000_000   # larger files on a phone are only shown by their preview
 
 # colours offered for folder icons (right-click a folder → Folder Colour, or its Properties)
 FOLDER_COLORS = [("Red", "#e01b24"), ("Orange", "#ff7800"), ("Yellow", "#f6d32d"), ("Green", "#33d17a"),
@@ -506,16 +508,65 @@ class _Signals(QObject):
     done = pyqtSignal(object, str, object)  # key, path, QImage|None
 
 
+def follows_accent(setting):
+    """The default folder colour setting (folder_color): "accent", unset, or the old fixed default (#d9652f, which
+    Preferences used to save every time) follow the desktop's accent colour; anything else is a fixed colour."""
+    return not setting or setting == "accent" or str(setting).lower() == "#d9652f"
+
+
+# ---------------------------------------------------------------- phones and cameras
+
+def device_preview(uri, size):
+    """The phone's own small preview of a file (util.is_device_path; uri from util.device_uri; gvfs's preview::icon:
+    gphoto2 and mtp have one, afc doesn't), scaled to fit size; None if it has none. Worker thread."""
+    if not uri or not util.Gio:
+        return None
+    Gio = util.Gio
+    try:
+        info = Gio.File.new_for_uri(uri).query_info(Gio.FILE_ATTRIBUTE_PREVIEW_ICON, Gio.FileQueryInfoFlags.NONE, None)
+        icon = info.get_attribute_object(Gio.FILE_ATTRIBUTE_PREVIEW_ICON)
+        if not isinstance(icon, Gio.LoadableIcon):
+            return None
+        stream, _type = icon.load(size, None)
+        data = bytearray()
+        while len(data) < 20_000_000:
+            chunk = stream.read_bytes(65536, None).get_data()
+            if not chunk:
+                break
+            data += chunk
+        stream.close(None)
+    except Exception:
+        return None
+    ba = QByteArray(bytes(data))
+    buf = QBuffer(ba)
+    reader = QImageReader(buf)
+    reader.setAutoTransform(True)
+    img = reader.read()
+    if img.isNull():
+        return None
+    if img.width() < size and img.height() < size:
+        img = img.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    return img
+
+
 class _Job(QRunnable):
-    def __init__(self, key, path, mtime, is_dir, size, opts, signals):
+    def __init__(self, key, path, mtime, is_dir, size, opts, signals, device=False, uri=None, fsize=0):
         super().__init__()
         self.args = (key, path, mtime, is_dir, size, opts)
+        self.device = (device, uri, fsize)
         self.signals = signals
 
     def run(self):
         key, path, mtime, is_dir, size, opts = self.args
+        device, uri, fsize = self.device
         try:
-            img = folder_thumb(path, mtime, size, opts) if is_dir else file_thumb(path, mtime, size)
+            if device:
+                img = device_preview(uri, size)
+                # no preview: read the file itself if it's an image that isn't too big (a read downloads it all)
+                if img is None and not util.is_video(path) and fsize <= DEVICE_MAX_BYTES:
+                    img = file_thumb(path, mtime, size)
+            else:
+                img = folder_thumb(path, mtime, size, opts) if is_dir else file_thumb(path, mtime, size)
         except Exception:
             img = None
         try:
@@ -540,6 +591,8 @@ class ThumbnailManager(QObject):
         self.pool.setMaxThreadCount(max(2, min(6, (os.cpu_count() or 4) // 2)))
         self.dir_pool = QThreadPool(self)  # folder mosaics (directory scans)
         self.dir_pool.setMaxThreadCount(2)
+        self.device_pool = QThreadPool(self)  # phones and cameras serve one request at a time (util.is_device_path)
+        self.device_pool.setMaxThreadCount(1)
         util.image_exts()  # initialise on the main thread
         thumbnailers()
         self.batch_total = 0
@@ -555,7 +608,8 @@ class ThumbnailManager(QObject):
         self.max_file_mb = 200
         self.folder_count = 4
         self.folder_order = "name"
-        self.folder_color = "#d9652f"
+        self.folder_color = "#d9652f"  # the default colour in use (the accent's, when folder_accent)
+        self.folder_accent = True
         self.covers = self._load_covers()
         self.styles = self._load_json(STYLES_FILE)
         self._plain = {}   # (color, size) -> QPixmap of a plain folder
@@ -669,15 +723,21 @@ class ThumbnailManager(QObject):
         if k in self.failed:
             return None
         if k not in self.pending:
+            device = util.is_device_path(path)
             if not is_dir and fsize > self.max_file_mb * 1_000_000 and not util.is_video(path):
+                self.failed.add(k)
+                return None
+            # a phone: one file at a time, and no folder mosaics (they would download every file)
+            if device and is_dir:
                 self.failed.add(k)
                 return None
             self.pending.add(k)
             self._prio += 1
             opts = {"count": self.folder_count, "order": self.folder_order,
                     "color": self.color_for(path), "cover": self.covers.get(path)}
-            job = _Job(k, path, mtime, is_dir, bucket_for(size), opts, self.signals)
-            (self.dir_pool if is_dir else self.pool).start(job, self._prio)
+            job = _Job(k, path, mtime, is_dir, bucket_for(size), opts, self.signals, device,
+                       util.device_uri(path) if device else None, fsize)
+            (self.device_pool if device else self.dir_pool if is_dir else self.pool).start(job, self._prio)
             self.batch_total += 1
             self._schedule_progress()
         return None
@@ -710,6 +770,7 @@ class ThumbnailManager(QObject):
     def cancel_pending(self):
         self.pool.clear()
         self.dir_pool.clear()
+        self.device_pool.clear()
         self.pending.clear()
         self.batch_total = self.batch_done = 0
         self._schedule_progress()

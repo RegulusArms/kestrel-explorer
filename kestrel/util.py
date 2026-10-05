@@ -80,6 +80,37 @@ def is_video(path):
     return ext_of(path) in VIDEO_EXTS
 
 
+DEVICE_PATH_RE = re.compile(r"^/run/user/\d+/gvfs/(afc|gphoto2|mtp):")
+
+
+def is_device_path(path):
+    """A phone or camera mounted by gvfs (/run/user/<uid>/gvfs/afc:…, gphoto2:…, mtp:…): each read is slow (gphoto2
+    downloads the whole file) and the backend serves one request at a time, so nothing may scan it in bulk."""
+    return bool(DEVICE_PATH_RE.match(path or ""))
+
+
+LOCAL_COPY_RE = re.compile(r"^/run/user/\d+/gvfs/gphoto2:")
+
+
+def needs_local_copy(path):
+    """On a device whose backend downloads the whole file on every open (gvfs gphoto2), so a player that opens and
+    seeks it repeatedly downloads it again each time: open a local copy instead (fileops.fetch_local)."""
+    return bool(LOCAL_COPY_RE.match(path or ""))
+
+
+def device_uri(path):
+    """The gvfs URI (gphoto2://…, mtp://…) of a file on a device, from the mount that holds its FUSE path; None if
+    none. Main thread: uses Gio's volume monitor."""
+    if not Gio:
+        return None
+    for m in Gio.VolumeMonitor.get().get_mounts():
+        root = m.get_root()
+        r = root.get_path()
+        if r and path.startswith(r + "/"):
+            return root.resolve_relative_path(path[len(r) + 1:]).get_uri()
+    return None
+
+
 def file_uri(path):
     """URI escaped the way GLib does it (needed for the freedesktop thumbnail cache)."""
     return "file://" + quote(os.path.abspath(path), safe="/!$&'()*+,;=:@")
@@ -209,6 +240,24 @@ def icon_for_path(path, is_dir=None):
     return theme_icon(m.iconName(), m.genericIconName(), "text-x-generic")
 
 
+def has_schema_key(schema, key=None):
+    """The settings schema is installed, and has that key (None: any)."""
+    source = Gio.SettingsSchemaSource.get_default() if Gio else None
+    s = source.lookup(schema, True) if source else None
+    return s is not None and (key is None or s.has_key(key))
+
+
+def desktop_schema(gnome_schema):
+    """The desktop's settings schema for a GNOME one: Cinnamon (Linux Mint) keeps its own copies,
+    org.cinnamon.desktop.*, and uses those; everything else uses GNOME's."""
+    desktops = os.environ.get("XDG_CURRENT_DESKTOP", "").lower().split(":")
+    if "x-cinnamon" in desktops and gnome_schema.startswith("org.gnome."):
+        cinnamon = "org.cinnamon." + gnome_schema[len("org.gnome."):]
+        if has_schema_key(cinnamon):
+            return cinnamon
+    return gnome_schema
+
+
 def setup_icon_theme():
     paths = list(QIcon.themeSearchPaths())
     data_dirs = os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":")
@@ -220,7 +269,7 @@ def setup_icon_theme():
     if not QIcon.themeName() or QIcon.themeName() == "hicolor":
         theme = "Adwaita"
         try:
-            out = subprocess.run(["gsettings", "get", "org.gnome.desktop.interface", "icon-theme"],
+            out = subprocess.run(["gsettings", "get", desktop_schema("org.gnome.desktop.interface"), "icon-theme"],
                                  capture_output=True, text=True, timeout=2).stdout.strip().strip("'")
             if out:
                 theme = out
@@ -228,6 +277,195 @@ def setup_icon_theme():
             pass
         QIcon.setThemeName(theme)
     QIcon.setFallbackThemeName("Adwaita")
+
+
+# ---------------------------------------------------------------- theme
+# Colours derived from the desktop's palette, so they suit any theme, light or dark.
+
+def dark_theme():
+    """The window background is dark."""
+    from PyQt6.QtGui import QGuiApplication, QPalette
+    return QGuiApplication.palette().color(QPalette.ColorRole.Window).lightness() < 128
+
+
+def blend(a, b, t):
+    """QColor between a (t = 0) and b (t = 1)."""
+    from PyQt6.QtGui import QColor
+    return QColor.fromRgbF(a.redF() + (b.redF() - a.redF()) * t, a.greenF() + (b.greenF() - a.greenF()) * t,
+                           a.blueF() + (b.blueF() - a.blueF()) * t)
+
+
+def card_color():
+    """A card (Overview) that stands out a little from the window background: the theme's base colour when it differs
+    from the window's (most light themes); otherwise a shade towards the text."""
+    from PyQt6.QtGui import QGuiApplication, QPalette
+    pal = QGuiApplication.palette()
+    base, window = pal.color(QPalette.ColorRole.Base), pal.color(QPalette.ColorRole.Window)
+    if abs(base.lightness() - window.lightness()) >= 8:
+        return base
+    return blend(window, pal.color(QPalette.ColorRole.Text), 0.05)
+
+
+def card_border():
+    from PyQt6.QtGui import QGuiApplication, QPalette
+    pal = QGuiApplication.palette()
+    return blend(pal.color(QPalette.ColorRole.Window), pal.color(QPalette.ColorRole.Text), 0.14)
+
+
+def error_color():
+    """Red text that is readable on the window background (GNOME's error colours)."""
+    from PyQt6.QtGui import QColor
+    return QColor("#ff7b63" if dark_theme() else "#c01c28")
+
+
+def accent_color():
+    """The desktop's accent (the theme's selection colour)."""
+    from PyQt6.QtGui import QGuiApplication, QPalette
+    return QGuiApplication.palette().color(QPalette.ColorRole.Highlight)
+
+
+_palette_watcher = None
+
+
+def on_palette_change(owner, fn):
+    """Call fn whenever the desktop's colours change (a light/dark switch, another theme). Qt updates its palette, but
+    a stylesheet resolves palette(...) once and colours read earlier stay as they were: stylesheets that use
+    palette(...) are reapplied first, then fn runs. Stops when owner is deleted."""
+    global _palette_watcher
+    if _palette_watcher is None:
+        from PyQt6 import sip
+        from PyQt6.QtCore import QEvent, QTimer
+        from PyQt6.QtWidgets import QApplication, QWidget
+
+        class PaletteWatcher(QWidget):
+            """Hears the application's palette change: every widget gets ApplicationPaletteChange, this hidden one
+            included."""
+
+            def __init__(self):
+                super().__init__()
+                self.fns = []
+                self.queued = False
+
+            def event(self, ev):
+                if ev.type() == QEvent.Type.ApplicationPaletteChange and not self.queued:
+                    self.queued = True  # a theme switch can change the palette several times in a row
+                    QTimer.singleShot(0, self.apply)
+                return super().event(ev)
+
+            def apply(self):
+                self.queued = False
+                for w in QApplication.allWidgets():
+                    ss = w.styleSheet()
+                    if "palette(" in ss:
+                        w.setStyleSheet("")
+                        w.setStyleSheet(ss)
+                self.fns = [(o, f) for o, f in self.fns if not sip.isdeleted(o)]
+                for o, f in list(self.fns):
+                    if not sip.isdeleted(o):
+                        f()
+        _palette_watcher = PaletteWatcher()
+    _palette_watcher.fns.append((owner, fn))
+
+
+# ---------------------------------------------------------------- the GTK theme's colours (Qt < 6.5)
+# Qt before 6.5 (Ubuntu 24.04, Linux Mint 22) takes no colours from the GTK theme and doesn't follow theme changes; Qt
+# 6.5+ does both. There Kestrel reads the theme's named colours through GTK (GTK_COLORS_SCRIPT, run by the system's
+# python3 with GTK's bindings) and follows the desktop's theme setting. follow_gtk_theme() does nothing on newer Qt.
+
+# prints the theme's named colours as JSON (GTK 3 reads the desktop's current theme when it starts)
+GTK_COLORS_SCRIPT = """import json, gi
+gi.require_version("Gtk", "3.0")
+from gi.repository import Gtk
+ctx = Gtk.Window().get_style_context()
+out = {}
+for name in ("theme_bg_color", "theme_fg_color", "theme_base_color", "theme_text_color", "theme_selected_bg_color",
+             "theme_selected_fg_color", "insensitive_fg_color", "link_color"):
+    found, c = ctx.lookup_color(name)
+    if found:
+        out[name] = "#%02x%02x%02x" % (round(c.red * 255), round(c.green * 255), round(c.blue * 255))
+print(json.dumps(out))
+"""
+
+
+def needs_gtk_palette(qt_version):
+    v = (qt_version.split(".") + ["0", "0"])[:2]
+    return v[0] == "6" and int(v[1]) < 5
+
+
+def gtk_palette_from(colors):
+    """The palette for a GTK theme's named colours, or None without the basic ones."""
+    from PyQt6.QtGui import QColor, QPalette
+
+    def color(name, fallback=None):
+        c = QColor(colors.get(name, ""))
+        return c if c.isValid() else fallback
+    bg, fg, sel = color("theme_bg_color"), color("theme_fg_color"), color("theme_selected_bg_color")
+    if bg is None or fg is None or sel is None:
+        return None
+    base, text = color("theme_base_color", bg), color("theme_text_color", fg)
+    sel_text = color("theme_selected_fg_color", QColor("white" if sel.lightness() < 150 else "black"))
+    disabled, link = color("insensitive_fg_color", blend(fg, bg, 0.5)), color("link_color", sel)
+    R = QPalette.ColorRole
+    p = QPalette(bg, bg)  # derives the frame shades (light, mid, dark, shadow) from the background
+    for role, c in ((R.Window, bg), (R.WindowText, fg), (R.Button, bg), (R.ButtonText, fg), (R.Base, base),
+                    (R.AlternateBase, blend(base, text, 0.04)), (R.Text, text),
+                    (R.PlaceholderText, blend(text, base, 0.45)), (R.Highlight, sel), (R.HighlightedText, sel_text),
+                    (R.Link, link), (R.LinkVisited, link), (R.ToolTipBase, base), (R.ToolTipText, text)):
+        p.setColor(role, c)
+    for role in (R.WindowText, R.Text, R.ButtonText):
+        p.setColor(QPalette.ColorGroup.Disabled, role, disabled)
+    p.setColor(QPalette.ColorGroup.Disabled, R.Highlight, blend(sel, bg, 0.5))
+    return p
+
+
+def _apply_gtk_palette(wait):
+    """Read the theme's colours with GTK in a helper process (Kestrel itself doesn't use GTK)."""
+    import json
+    from PyQt6.QtCore import QProcess
+    from PyQt6.QtGui import QGuiApplication
+    from PyQt6.QtWidgets import QApplication
+    proc = QProcess(QApplication.instance())
+
+    def apply():
+        try:
+            colors = json.loads(bytes(proc.readAllStandardOutput()).decode() or "{}")
+        except ValueError:
+            colors = {}
+        p = gtk_palette_from(colors)
+        if p is not None and p != QGuiApplication.palette():
+            QApplication.setPalette(p)  # on_palette_change() then updates what was drawn in the old colours
+        proc.deleteLater()
+    if wait:  # at startup: the first window opens in the theme's colours
+        proc.start("/usr/bin/python3", ["-c", GTK_COLORS_SCRIPT])
+        proc.waitForFinished(3000)
+        apply()
+        return
+    proc.finished.connect(apply)
+    proc.errorOccurred.connect(lambda _e: proc.deleteLater())
+    proc.start("/usr/bin/python3", ["-c", GTK_COLORS_SCRIPT])
+
+
+_gtk_watch = None
+
+
+def follow_gtk_theme():
+    """After QApplication: apply the theme's colours now, then follow changes."""
+    global _gtk_watch
+    from PyQt6.QtCore import QTimer, qVersion
+    from PyQt6.QtGui import QGuiApplication
+    if not needs_gtk_palette(qVersion()) or QGuiApplication.platformName() not in ("xcb", "wayland"):
+        return
+    _apply_gtk_palette(True)
+    # the desktop changes several settings at once; GTK picks them up shortly after
+    later = QTimer(singleShot=True, interval=600, timeout=lambda: _apply_gtk_palette(False))
+    schema = desktop_schema("org.gnome.desktop.interface")  # GNOME's, or Cinnamon's own
+    if not has_schema_key(schema):
+        return
+    settings = Gio.Settings.new(schema)
+    for key in ("gtk-theme", "color-scheme"):
+        if has_schema_key(schema, key):
+            settings.connect("changed::" + key, lambda *_a: later.start())
+    _gtk_watch = (settings, later)  # kept for the life of the app
 
 
 # ---------------------------------------------------------------- desktop integration
@@ -323,13 +561,15 @@ def open_terminal(directory):
 
 
 def set_wallpaper(path):
-    """Through UWP when it's installed (new UWP profile with the image on every monitor), else GNOME's own."""
+    """Through UWP when it's installed (new UWP profile with the image on every monitor), else the desktop's own."""
     from . import uwp
     if uwp.set_wallpaper(path):
         return
     uri = file_uri(path)
-    for key in ("picture-uri", "picture-uri-dark"):
-        subprocess.run(["gsettings", "set", "org.gnome.desktop.background", key, uri], timeout=5)
+    schema = desktop_schema("org.gnome.desktop.background")
+    for key in ("picture-uri", "picture-uri-dark"):  # Cinnamon has no -dark one
+        if has_schema_key(schema, key):
+            subprocess.run(["gsettings", "set", schema, key, uri], timeout=5)
 
 
 def trash(path):

@@ -1,12 +1,14 @@
 """File operations: copy, move, merge, replace, delete, cancel, trash, links, unique names, and undoing them."""
 import os
 import stat
+import subprocess
 
 from common import A, check, finish, home_path as P, setup_app, wait_for
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
-from kestrel import fileops, places, undo, util
+from kestrel import archive, fileops, places, undo, util
+from kestrel.archive_ui import ExtractDialog
 
 boxes = []   # texts of message boxes that popped up (closed automatically)
 
@@ -113,7 +115,8 @@ for i in range(24):
 state = {"gone": False}
 t = fileops.start_ops(w, [("copy", P("big"), P("big2"))], "Test")
 t.finished.connect(lambda: state.__setitem__("gone", True))
-wait_for(lambda: state["gone"] or t.fraction > 0, 5000)
+# at once: on a fast disk (the test's home is in /tmp, often in memory) the whole copy can finish before the first
+# progress report arrives
 t.cancel()
 check(wait_for(lambda: state["gone"], 10000), "a cancelled copy stops")
 copied = os.listdir(P("big2")) if os.path.isdir(P("big2")) else []
@@ -169,4 +172,27 @@ check(len(boxes) == 1, f"no error boxes besides that one ({' | '.join(boxes)})")
 
 _size, files, dirs = fileops.dir_stats(P("tree"))
 check(files == 5 and dirs == 3, f"folder size counts files and folders ({files} files, {dirs} folders)")
+
+# ---- opening an archive
+check(archive.opens_as_archive(P("photos.tar.gz")) and not archive.opens_as_archive(P("app.deb"))
+      and not archive.opens_as_archive(P("disk.iso")) and not archive.opens_as_archive(P("game.apk")),
+      "a .tar.gz opens as an archive; .deb, .iso and .apk open with their own apps")
+make(P("arc/in.txt"))
+subprocess.run(["tar", "czf", P("arc.tar.gz"), "-C", P("arc"), "in.txt"])
+extract_shown = []
+
+
+def close_extract():
+    """The Extract dialog is modal: note it and close it."""
+    d = QApplication.activeModalWidget()
+    if isinstance(d, ExtractDialog):
+        extract_shown.append(True)
+        d.reject()
+
+
+extract_closer = QTimer(interval=50, timeout=close_extract)
+extract_closer.start()
+w.open_paths(w.pane(), [P("arc.tar.gz")])
+check(wait_for(lambda: bool(extract_shown)), "double-clicking an archive opens Kestrel's Extract dialog")
+extract_closer.stop()
 finish()

@@ -1,11 +1,13 @@
 """File operations: threaded copy/move/delete with progress, links, shortcuts, archives."""
 import itertools
+import math
 import os
 import shutil
 import stat
 import time
 
-from PyQt6.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import QElapsedTimer, QObject, QRectF, QThread, QTimer, Qt, pyqtSignal
+from PyQt6.QtGui import QPainter, QPalette
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QMessageBox,
                              QProgressBar, QToolButton, QVBoxLayout, QWidget)
 
@@ -177,6 +179,48 @@ class TaskBoard(QObject):
             self.changed.emit()
 
 
+class PulseBar(QProgressBar):
+    """The task panel's bar. Busy (no percentage): a block glides back and forth, so a long wait doesn't look stuck
+    (styles draw busy bars differently, some barely moving)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.pulsing = False
+        self._clock = QElapsedTimer()
+        self._frame = QTimer(self, interval=16, timeout=self.update)
+
+    def set_busy(self, on):
+        if on == self.pulsing:
+            return
+        self.pulsing = on
+        if on:
+            self._clock.start()
+            self._frame.start()
+        else:
+            self._frame.stop()
+        self.update()
+
+    def paintEvent(self, ev):
+        if not self.pulsing:
+            super().paintEvent(ev)
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        p.setPen(self.palette().color(QPalette.ColorRole.Mid))
+        p.setBrush(self.palette().color(QPalette.ColorRole.Base))
+        p.drawRoundedRect(r, 3, 3)
+        # there and back every 2.4 s, slowing at the ends
+        t = (self._clock.elapsed() % 2400) / 2400
+        x = 0.5 - 0.5 * math.cos(2 * math.pi * t)
+        w = r.width() * 0.3
+        block = QRectF(r.x() + 1.5 + x * (r.width() - 3 - w), r.y() + 1.5, w, r.height() - 3)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(self.palette().color(QPalette.ColorRole.Highlight))
+        p.drawRoundedRect(block, 2, 2)
+        p.end()
+
+
 class TaskPanel(QWidget):
     """Status-bar widget: the running tasks' title, status and progress, with a cancel button. This window's tasks
     come first; tasks running in other windows (and other Kestrels) are counted after them, or shown when there are
@@ -188,7 +232,7 @@ class TaskPanel(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(4)
         self.label = QLabel()
-        self.bar = QProgressBar()
+        self.bar = PulseBar()
         self.bar.setFixedWidth(200)
         self.bar.setMaximumHeight(16)
         self.bar.setRange(0, 1000)
@@ -257,10 +301,8 @@ class TaskPanel(QWidget):
             tips.append(line(first) + " — in another window")
         tips += [line(x) + " — in another window" for x in others]
         self.setToolTip("\n".join(tips))
-        if first.fraction < 0:
-            self.bar.setRange(0, 0)
-        else:
-            self.bar.setRange(0, 1000)
+        self.bar.set_busy(first.fraction < 0)
+        if first.fraction >= 0:
             self.bar.setValue(int(first.fraction * 1000))
         self.stop.setVisible(first.cancellable)
         self.stop.setEnabled(not first.cancelling)
@@ -669,3 +711,83 @@ def dir_stats(path, cancel=lambda: False):
         except OSError:
             pass
     return size, files, dirs
+
+
+# ---------------------------------------------------------------- local copies of device files
+
+def fetch_local(parent, paths, on_done):
+    """Copy files from a device (util.needs_local_copy) into ~/.cache/kestrel-explorer/device-files, as a busy task
+    ("will launch once ready") with Cancel, then call on_done(local paths) on the UI thread (not after a cancel or an error). A copy is
+    reused while its size matches the file's; copies not opened for a day are deleted."""
+    import threading
+    Gio, GLib = util.Gio, util.GLib
+    root = util.APP_CACHE / "device-files"
+    items = []
+    for p in paths:
+        uri = util.device_uri(p)  # main thread (volume monitor); the copy then talks to gvfs directly
+        items.append((p, uri, str(root / util.md5(uri or p) / os.path.basename(p))))
+
+    def fn(task):
+        keep = {os.path.dirname(dst) for _p, _u, dst in items}
+        # drop the copies nobody has opened for a day
+        try:
+            for n in os.listdir(root):
+                d = str(root / n)
+                if d not in keep and time.time() - os.stat(d).st_mtime > 86400:
+                    shutil.rmtree(d, ignore_errors=True)
+        except OSError:
+            pass
+        srcs, sizes = [], []
+        for p, uri, _dst in items:
+            f = Gio.File.new_for_uri(uri) if uri else Gio.File.new_for_path(p)
+            try:
+                size = f.query_info(Gio.FILE_ATTRIBUTE_STANDARD_SIZE, Gio.FileQueryInfoFlags.NONE, None).get_size()
+            except GLib.Error:
+                size = -1
+            srcs.append(f)
+            sizes.append(size)
+        out = []
+        for (p, _uri, dst), src, size in zip(items, srcs, sizes):
+            name = os.path.basename(p)
+            try:
+                if os.stat(dst).st_size == size:  # copied before
+                    os.utime(os.path.dirname(dst))
+                    out.append(dst)
+                    continue
+            except OSError:
+                pass
+            task.check()
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            part = dst + ".part"
+            # the device sends the whole file before the copy starts, so a cancel has to interrupt the wait
+            cancel = Gio.Cancellable()
+            finished = threading.Event()
+
+            def watch():
+                while not finished.wait(0.1):
+                    if task.cancelled:
+                        cancel.cancel()
+                        return
+            watcher = threading.Thread(target=watch, daemon=True)
+            watcher.start()
+            # busy, not a percentage: the device sends nothing until it has the whole file, then it arrives at once
+            task.report(0, 0, f"{name} — will launch once ready")
+            try:
+                src.copy(Gio.File.new_for_path(part), Gio.FileCopyFlags.OVERWRITE, cancel, None)
+            except GLib.Error as e:
+                cancelled = e.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED)
+                try:
+                    os.unlink(part)
+                except OSError:
+                    pass
+                if cancelled or task.cancelled:
+                    raise Cancelled()
+                raise OSError(f"Could not copy {name} from the device: {e.message}")
+            finally:
+                finished.set()
+                watcher.join()
+            os.rename(part, dst)
+            out.append(dst)
+        return out
+
+    run_job(parent, "Loading from device", fn, lambda res: res is not None and on_done(res))

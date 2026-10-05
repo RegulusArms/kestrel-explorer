@@ -3,16 +3,18 @@ import os
 import shutil
 import sys
 
+from PyQt6 import sip
 from PyQt6.QtCore import QDateTime, QDir, QEvent, QFileSystemWatcher, QItemSelectionModel, QMimeData, QSettings, QSize, QStorageInfo, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QGuiApplication, QKeySequence
+from PyQt6.QtGui import QAction, QGuiApplication, QKeySequence, QWindow
 from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QHBoxLayout, QHeaderView,
                              QInputDialog, QLabel, QLineEdit, QListView, QMainWindow, QMenu, QMessageBox,
                              QProgressBar, QSlider, QSplitter, QStackedWidget, QTabWidget, QToolBar, QToolButton, QTreeView,
                              QVBoxLayout, QWidget)
 
-from . import (__version__, admin, animate, archive, archive_ui, atc, dialogs, env, fileops, fm1, places, sharing, thumbs,
-               undo, util, uwp)
-from .overview import OVERVIEW, OVERVIEW_TITLE, OverviewPage, is_uri, mount_uri
+from . import (__version__, admin, animate, archive, archive_ui, atc, chooser, dialogs, env, fileops, fm1, places,
+               sharing, thumbs, undo, util, uwp)
+from .chooser import ChooserBar
+from .overview import OVERVIEW, OVERVIEW_TITLE, OverviewPage, is_phone_scheme, is_uri, mount_uri, phone_hint
 from .viewer import ImageViewer
 from .widgets import (FSModel, GridDelegate, InfoPanel, PathBar, PathRole, SearchModel, SearchThread, Sidebar,
                       can_search_contents)
@@ -44,6 +46,7 @@ class Pane(QWidget):
         self.path = None
         self.in_search = False
         self.search_thread = None
+        self.type_filters = []  # chooser: the chosen file type's globs
         self._search_recorded = False  # the folder as it was before the active search is on back_stack
         self._pending_select = None
         self._trash_gen = 0          # bumps on every combined-trash reload, so stale loads are dropped
@@ -110,7 +113,16 @@ class Pane(QWidget):
         self.search_model = SearchModel(self.thumbs, self)
         self._attach(self.model)
         self.set_view_mode(self.settings.value("view_mode", "grid"))
+        if win.chooser is not None:
+            self.set_type_filter(win.chooser.type_filter())
         self.set_path(path)
+
+    def set_type_filter(self, globs):
+        """Chooser: show folders and only these files."""
+        self.type_filters = list(globs)
+        self.model.setFilter(self._filters())
+        if not self.in_search and not self.search_bar.isVisible():
+            self.model.setNameFilters(self.type_filters)
 
     # -- setup
     def _setup_common(self, v):
@@ -166,6 +178,8 @@ class Pane(QWidget):
         f = QDir.Filter.AllEntries | QDir.Filter.NoDotAndDotDot | QDir.Filter.System
         if self.win.show_hidden:
             f |= QDir.Filter.Hidden
+        if self.type_filters:
+            f |= QDir.Filter.AllDirs  # a chooser's file types don't hide folders (name filters would)
         return f
 
     def _make_model(self):
@@ -314,7 +328,7 @@ class Pane(QWidget):
         self.stack.setCurrentWidget(self.mode_view)
         self.thumbs.cancel_pending()
         self.animator.clear()
-        self.model.setNameFilters([])
+        self.model.setNameFilters(self.type_filters)
         root = self.model.setRootPath(path)
         self.grid.setRootIndex(root)
         self.tree.setRootIndex(root)
@@ -560,7 +574,7 @@ class Pane(QWidget):
         self.search_edit.blockSignals(False)
         self.search_bar.hide()
         self._stop_search()
-        self.model.setNameFilters([])
+        self.model.setNameFilters(self.type_filters)
         if self.in_search:
             self.in_search = False
             self._attach(self.model)
@@ -607,7 +621,7 @@ class Pane(QWidget):
             self.show_trash()
             return
         if not text:
-            self.model.setNameFilters([])
+            self.model.setNameFilters(self.type_filters)
             if self.in_search:
                 self.in_search = False
                 self._attach(self.model)
@@ -769,6 +783,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.settings = settings
         self.thumbs = thumb_mgr
+        self.chooser = None  # a file chooser window (see chooser.py)
         self.cut_paths = set()
         self.show_hidden = self.settings.value("show_hidden", False, type=bool)
         self.folder_previews = self.settings.value("folder_previews", True, type=bool)
@@ -1029,7 +1044,7 @@ class MainWindow(QMainWindow):
             return None
         i = self.tabs.addTab(pane, pane.title())
         pane.path_changed.connect(lambda p=pane: self._pane_path_changed(p))
-        pane.selection_changed.connect(lambda p=pane: p is self.pane() and self.update_status())
+        pane.selection_changed.connect(lambda p=pane: p is self.pane() and self._selection_changed())
         if activate:
             self.tabs.setCurrentIndex(i)
             pane.view().setFocus()
@@ -1064,7 +1079,8 @@ class MainWindow(QMainWindow):
         self.a_up.setEnabled(not pane.is_overview() and not pane.is_virtual() and pane.path != "/")
         self._sync_view_btn()
         self.sync_zoom_slider()
-        vol = QStorageInfo(pane.dir) if pane.dir else None
+        # statfs on a phone waits behind its file transfers
+        vol = QStorageInfo(pane.dir) if pane.dir and not util.is_device_path(pane.dir) else None
         self.free_label.setText(f"{util.human_size(vol.bytesAvailable())} free" if vol and vol.isValid() else "")
         self.update_status()
 
@@ -1083,6 +1099,29 @@ class MainWindow(QMainWindow):
     def go_home(self):
         self.navigate(self.homepage())
 
+    def _selection_changed(self):
+        self.update_status()
+        if self.chooser is not None:
+            self.chooser.selection_changed()
+
+    def make_chooser(self, req, done):
+        """A file chooser window: a normal window with the chooser's bar at the bottom (see chooser.py)."""
+        self.chooser = ChooserBar(self, req, done)
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        self.takeCentralWidget()
+        lay.addWidget(self.split, 1)
+        lay.addWidget(self.chooser)
+        self.setCentralWidget(box)
+        self.setWindowTitle(req.title or chooser.button_text(req))
+        for p in self.panes():
+            p.set_type_filter(self.chooser.type_filter())
+        self.resize(1100, 700)
+        if self.chooser.name is not None:
+            self.chooser.name.setFocus()
+
     def cur_dir(self):
         """Current folder of the active tab, or None on the overview page."""
         return self.pane().dir if self.pane() else None
@@ -1099,7 +1138,12 @@ class MainWindow(QMainWindow):
             def done(path, err):
                 self.statusBar().clearMessage()
                 if err:
-                    QMessageBox.warning(self, "Connect to Server", f"Could not open {target}:\n\n{err}")
+                    scheme = target.split(":", 1)[0]
+                    msg = f"Could not open {target}:\n\n{err}"
+                    if is_phone_scheme(scheme):
+                        msg += "\n\n" + phone_hint(scheme, target)
+                    title = "Connect to Device" if is_phone_scheme(scheme) else "Connect to Server"
+                    QMessageBox.warning(self, title, msg)
                 elif path:
                     self._remember_server(target)
                     self.sidebar.refresh()
@@ -1274,6 +1318,12 @@ class MainWindow(QMainWindow):
             return
         dirs = [p for p in paths if os.path.isdir(p)]
         files = [p for p in paths if not os.path.isdir(p)]
+        if self.chooser is not None:  # a file chooser: folders open as usual, files are the choice
+            if dirs:
+                pane.set_path(dirs[0])
+            elif files:
+                self.chooser.activated(files)
+            return
         places.add_recent(files)
         if dirs:
             if len(dirs) == 1 and not new_tab and not files:
@@ -1281,9 +1331,18 @@ class MainWindow(QMainWindow):
             else:
                 for d in dirs:
                     self.new_tab(d, activate=False)
+        archives = [f for f in files if archive.opens_as_archive(f)]
+        for f in archives:
+            archive_ui.extract_dialog(self, f)  # Kestrel's own extraction, not the system's archive app
+        files = [f for f in files if f not in archives]
         images = [f for f in files if util.is_image(f)]
         videos = [f for f in files if util.is_video(f)]
         others = [f for f in files if f not in images and f not in videos]
+        # a player would download these again on every open/seek
+        fetch = [f for f in videos if util.needs_local_copy(f)]
+        videos = [f for f in videos if f not in fetch]
+        if fetch:
+            fileops.fetch_local(self, fetch, self._open_videos)
         img_choice = self.settings.value("image_opener", "system")
         if images and img_choice == "builtin":
             if len(images) == 1:
@@ -1295,8 +1354,13 @@ class MainWindow(QMainWindow):
         elif images:
             others += self._open_with_choice(images, img_choice)
         if videos:
-            others += self._open_with_choice(videos, self.settings.value("video_opener", "system"))
+            self._open_videos(videos)
         for f in others:
+            if not self.open_file(f):
+                QMessageBox.warning(self, "Open", f"Could not open {f}")
+
+    def _open_videos(self, videos):
+        for f in self._open_with_choice(videos, self.settings.value("video_opener", "system")):
             if not self.open_file(f):
                 QMessageBox.warning(self, "Open", f"Could not open {f}")
 
@@ -1916,6 +1980,7 @@ class MainWindow(QMainWindow):
 
     def _preferences_saved(self):
         apply_preferences()
+        _settings.sync()  # other Kestrels read the file as soon as they hear the report
         atc.announce("settings")
 
     def clear_cache(self):
@@ -2000,8 +2065,11 @@ class MainWindow(QMainWindow):
                 self.centralWidget().setEnabled(False)  # stay visible (showing "cancelling…") until stopped
                 self._close_when_idle()
             return
-        self.settings.setValue("geometry", self.saveGeometry())
-        self.settings.setValue("splitter", self.split.saveState())
+        if self.chooser is not None:
+            self.chooser.finish(False)  # closed without choosing: cancelled
+        else:
+            self.settings.setValue("geometry", self.saveGeometry())
+            self.settings.setValue("splitter", self.split.saveState())
         for p in self.panes():
             p._stop_search()
         if self.builder:
@@ -2028,11 +2096,25 @@ _thumbs = None
 _settings = None
 
 
+_accent_watched = None
+
+
 def apply_thumb_settings(t, s):
+    global _accent_watched
     t.folder_count = int(s.value("folder_count", 4))
     t.folder_order = s.value("folder_order", "name")
-    t.folder_color = s.value("folder_color", "#d9652f")
+    color = s.value("folder_color", "accent")
+    t.folder_accent = thumbs.follows_accent(color)
+    t.folder_color = util.accent_color().name() if t.folder_accent else color
     t.max_file_mb = int(s.value("thumb_max_mb", 200))
+    if _accent_watched is None:  # runs before the windows' own updates, which then draw folders in the new accent
+        _accent_watched = t
+
+        def accent_changed():
+            if t.folder_accent and t.folder_color != util.accent_color().name():
+                t.folder_color = util.accent_color().name()
+                repaint_all()
+        util.on_palette_change(t, accent_changed)
 
 
 def repaint_all():
@@ -2055,6 +2137,11 @@ def apply_preferences():
 def on_atc(msg):
     """A change reported by another Kestrel through the tower (see atc.py), or by this one ("own")."""
     kind = msg.get("type")
+    if kind == "sidebar":   # its order or collapsed sections; also refreshes this process's other windows
+        if not msg.get("own"):
+            _settings.sync()
+        for w in WINDOWS:
+            w.sidebar.refresh()
     if kind == "bookmarks":   # also refreshes this process's other windows
         for w in WINDOWS:
             w.sidebar.refresh()
@@ -2217,6 +2304,28 @@ def handle_fm1(method, uris, startup_id=""):
         w.pane().view().setFocus()
 
 
+def open_chooser(req, done):
+    """Not in WINDOWS: a chooser isn't a window other Kestrels hand folders to."""
+    start = req.current_folder
+    if not os.path.isdir(start):
+        start = _settings.value("chooser_folder", "")  # where the last chooser picked something
+    if not start or not os.path.isdir(start):
+        start = util.HOME
+    w = MainWindow([start], _thumbs, _settings)
+    w.make_chooser(req, done)
+    wid = chooser.x11_parent(req.parent_window)
+    if wid and QGuiApplication.platformName() == "xcb":  # the app's window (X11): the chooser is its dialog
+        w.winId()  # create the native window, to give it a transient parent before it is shown
+        app_window = QWindow.fromWinId(wid)
+        if app_window is not None:
+            w.windowHandle().setTransientParent(app_window)
+            w._app_window = app_window  # kept with the chooser
+    w.show()
+    w.raise_()
+    w.activateWindow()
+    return w
+
+
 def open_window(paths):
     w = MainWindow(paths, _thumbs, _settings)
     WINDOWS.append(w)
@@ -2244,6 +2353,7 @@ def main(argv=None):
     QApplication.setDesktopFileName(util.APP_ID)
     app = QApplication(argv)
     util.setup_icon_theme()
+    util.follow_gtk_theme()  # Qt < 6.5: the GTK theme's colours, following changes
     app.setWindowIcon(util.theme_icon("folder"))
     util.migrate_legacy()
     util.ensure_desktop_entry()
@@ -2252,6 +2362,15 @@ def main(argv=None):
     _settings = QSettings(util.APP_ID, util.APP_ID)
     _thumbs = thumbs.ThumbnailManager()
     apply_thumb_settings(_thumbs, _settings)
+    if "--file-chooser" in argv[1:]:
+        # started by D-Bus for the system's file chooser (see chooser.py): only chooser windows
+        app.setQuitOnLastWindowClosed(False)  # the service quits after a minute without dialogs
+
+        def opener(req, done):
+            w = open_chooser(req, done)
+            return lambda: not sip.isdeleted(w) and w.close()
+        chooser.serve(opener)
+        return app.exec()
     paths = [location_arg(a) for a in argv[1:] if not a.startswith("-")]
     service = "--dbus-service" in argv[1:]
     paths = [p for p in paths if p]

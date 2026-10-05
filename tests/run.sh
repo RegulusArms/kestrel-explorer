@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Run the test suite (see tests/README.md).
 #   tests/run.sh                    every test
-#   tests/run.sh fileops atc_undo   only these (names: fileops atc_sync atc_tasks atc_undo atc_tabs installer)
+#   tests/run.sh fileops atc_undo   only these (names: fileops atc_sync atc_tasks atc_undo atc_tabs devices sidebar theme chooser installer)
 # Each test runs with a throwaway HOME on a private D-Bus session bus: your files, settings, dock and running
 # Kestrel windows are never touched.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$HERE")"
-ALL=(fileops atc_sync atc_tasks atc_undo atc_tabs installer)
+ALL=(fileops atc_sync atc_tasks atc_undo atc_tabs devices sidebar theme chooser installer)
 TESTS=("$@")
 (( ${#TESTS[@]} )) || TESTS=("${ALL[@]}")
 for t in "${TESTS[@]}"; do
@@ -15,8 +15,10 @@ for t in "${TESTS[@]}"; do
 done
 
 # the C++ version, if it's built next to this project, joins the cross-version checks in atc_tabs
+# (KESTREL_BUILD_DIR: the name of its build folder, when another machine shares these folders)
 KES_CXX=""
-[[ -x "$ROOT/../kes-c/build/kes" ]] && KES_CXX="$(cd "$ROOT/../kes-c/build" && pwd)/kes"
+CXX_BUILD="$ROOT/../kes-c/${KESTREL_BUILD_DIR:-build}"
+[[ -x "$CXX_BUILD/kes" ]] && KES_CXX="$(cd "$CXX_BUILD" && pwd)/kes"
 export KES_CXX
 
 failed=()
@@ -42,7 +44,8 @@ for t in "${TESTS[@]}"; do
         grep -q -E '^FAILED' "$work/log" && grep -E '^FAILED' "$work/log" ||
             { echo "CRASHED or timed out (exit $rc). Last lines:"; tail -15 "$work/log"; }
     fi
-    case "$work" in */kestrel-test.*) rm -rf "$work" ;; esac
+    # (a desktop service started by the test, such as gvfsd-metadata, may still be writing there for a moment)
+    case "$work" in */kestrel-test.*) rm -rf "$work" 2>/dev/null || { sleep 1; rm -rf "$work"; } ;; esac
 done
 
 echo
