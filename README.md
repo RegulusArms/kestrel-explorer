@@ -38,6 +38,8 @@ A file manager for Ubuntu and Linux Mint that's easy to pick up and puts many jo
 
 ## Install / run
 
+Install from a clone of this repo with `install.sh` (below), or with pip from PyPI (see [pip (PyPI)](#pip-pypi)).
+
 ```bash
 ./install.sh             # adds the `kes` command to ~/.local/bin and the app to the app grid
 ./install.sh --default   # ...and makes it the default app for opening folders and the trash, and puts kes on your PATH
@@ -85,9 +87,74 @@ For a completely clean reinstall:
 
 This still keeps your settings, bookmarks and thumbnails. To reset everything, delete `~/.config/kestrel-explorer` and `~/.cache/kestrel-explorer` after uninstalling. Bookmarks are shared with GNOME Files, so leave those alone.
 
-### PyPI (not available yet)
+### pip (PyPI)
 
-The packaging setup for PyPI is in place (`pyproject.toml`), but **Kestrel is not published yet and isn't ready to be**. `pip install kestrel-explorer` won't work for now; use `install.sh` instead. See [PACKAGING.md](PACKAGING.md) for what's set up and what's left before a first release.
+Kestrel is also on [PyPI](https://pypi.org/project/kestrel-explorer/) as `kestrel-explorer`. It's an alpha, and `install.sh` is still the fuller install (see the comparison below).
+
+**Requirements**
+- Linux, with **Python 3.11.4 or newer**. On Ubuntu 24.04 / Linux Mint 22 (Python 3.12) and Ubuntu 26.04 that's the system's `/usr/bin/python3`. Anaconda's `base` Python is often older: pip then says *"from versions: none"*. Make the virtual environment with `/usr/bin/python3`, or use a conda environment with a newer Python (see [With conda](#with-conda)).
+- pip installs the Python packages (`PyQt6`, `Pillow`) itself. The system programs Kestrel calls can't come from pip; install them with apt:
+
+  ```bash
+  sudo apt install 7zip unrar zip unzip pigz zpaq zstd xz-utils bzip2 lzip \
+                   libimage-exiftool-perl ffmpeg pkexec gvfs gvfs-backends udisks2 \
+                   python3-pyqt6 python3-pil python3-gi kimageformat6-plugins
+  ```
+
+  Each one is optional: without it, the feature that needs it is hidden or falls back (see [Dependencies](#dependencies) for what each is for). The last line is only for the recommended install below. On Ubuntu 24.04 / Linux Mint 22, leave out `kimageformat6-plugins` (it doesn't exist there).
+
+**Install** (recommended: a virtual environment that uses the system's PyQt6, Pillow and GIO)
+
+```bash
+/usr/bin/python3 -m venv --system-site-packages ~/.local/share/kestrel-venv
+~/.local/share/kestrel-venv/bin/pip install kestrel-explorer
+~/.local/share/kestrel-venv/bin/kes                 # or link it: ln -s ~/.local/share/kestrel-venv/bin/kes ~/.local/bin/kes
+```
+
+With `--system-site-packages`, pip reuses Ubuntu's `python3-pyqt6`, `python3-pil` and `python3-gi` instead of downloading its own, so Kestrel gets the system's Qt image plugins (RAW, HEIC, AVIF, JPEG XL, PSD with `kimageformat6-plugins`) and GIO (Open With, default apps, drive and network mounting). In a plain virtual environment (without `--system-site-packages`), pip installs PyQt6 with its own Qt, which can't load those plugins, and the GIO features stay off unless you add the `[gio]` extra (`pip install "kestrel-explorer[gio]"`, which builds PyGObject and needs `libgirepository-2.0-dev` and `libcairo2-dev`).
+
+The first launch adds Kestrel to the app grid (`~/.local/share/applications/kestrel-explorer.desktop`, pointing at that `kes`).
+
+**Update / uninstall**
+
+```bash
+~/.local/share/kestrel-venv/bin/pip install --upgrade kestrel-explorer
+rm -rf ~/.local/share/kestrel-venv ~/.local/share/applications/kestrel-explorer.desktop   # uninstall
+```
+
+As with `install.sh`, your settings, bookmarks and thumbnails are kept.
+
+**What's different from `install.sh`**
+- **Default folder app, file chooser, dock:** `kes-setup` isn't in the pip package. Run it from a clone of this repo: `./kes-setup --kes ~/.local/share/kestrel-venv/bin/kes --default` (give the conda environment's `kes` if you use conda), and `--undo` to put things back.
+- **Drop focus extension:** not included, so on GNOME on Wayland, apps you drag files into don't get the focus. Install it with `install.sh` or the .deb if you want it.
+- **Admin session:** the same as with `install.sh`: it needs `pkexec` and runs its small helper with the system `/usr/bin/python3`, so the password prompt names `/usr/bin/python3`.
+- **App-grid entry:** a basic one, without the "New Window" action.
+
+See [PACKAGING.md](https://github.com/RegulusArms/kestrel-explorer/blob/main/PACKAGING.md) for how the package is built and published.
+
+#### With conda
+
+If you use Anaconda or Miniconda, Kestrel can live in its own conda environment instead. conda provides the Python, and pip installs Kestrel and its PyQt6 (with its own Qt) into the environment:
+
+```bash
+conda create -n kestrel python=3.12 pip
+conda activate kestrel
+pip install kestrel-explorer
+conda deactivate
+```
+
+The differences from `install.sh` above apply here too. Start it by its full path, without activating the environment, and link it onto your PATH if you like:
+
+```bash
+~/anaconda3/envs/kestrel/bin/kes                 # `conda env list` shows the folder (~/miniconda3/envs/… for Miniconda)
+ln -s ~/anaconda3/envs/kestrel/bin/kes ~/.local/bin/kes
+```
+
+Started this way, Kestrel puts the system's programs and libraries ahead of Anaconda's (gsettings, gio, ffmpeg, xz…), which match the desktop. If you start it with the environment activated, it leaves the environment exactly as it is, so the environment's copies of those programs win. The app-grid entry made on first launch also points at the environment's `kes`.
+
+The system programs still come from apt (see Requirements). Compared with the recommended install, a conda environment can't use the system's PyQt6 or GIO, so it has the same limits as a plain virtual environment: no RAW, HEIC, AVIF, JPEG XL or PSD previews, and no Open With, default apps or drive and network mounting.
+
+To update: `~/anaconda3/envs/kestrel/bin/pip install --upgrade kestrel-explorer`. To uninstall: `conda env remove -n kestrel`, then delete `~/.local/share/applications/kestrel-explorer.desktop` and the `~/.local/bin/kes` link if you made one.
 
 ## Dependencies
 
@@ -375,7 +442,7 @@ tests/run.sh                  # every test
 tests/run.sh fileops atc_undo # only some
 ```
 
-There are 236 checks in 10 tests: file operations (copy, move, merge, delete, cancel, trash, links, undo), the tower that keeps several Kestrels in sync (shared changes, the shared task list, shared undo, opening folders as tabs), phones and cameras, rearranging the sidebar, following the desktop theme, the file chooser, and `install.sh`. Each test runs with a throwaway home folder on a private D-Bus bus, so your files, settings, dock and open windows are never touched. The [C++ version](../kes-c/tests) has the same tests, and some checks launch the other version to test the two together. Details: [tests/README.md](tests/README.md).
+There are 236 checks in 10 tests: file operations (copy, move, merge, delete, cancel, trash, links, undo), the tower that keeps several Kestrels in sync (shared changes, the shared task list, shared undo, opening folders as tabs), phones and cameras, rearranging the sidebar, following the desktop theme, the file chooser, and `install.sh`. Each test runs with a throwaway home folder on a private D-Bus bus, so your files, settings, dock and open windows are never touched. The [C++ version](https://github.com/RegulusArms/kes-c/tree/main/tests) has the same tests, and some checks launch the other version to test the two together. Details: [tests/README.md](https://github.com/RegulusArms/kestrel-explorer/blob/main/tests/README.md).
 
 ## Layout
 
@@ -406,16 +473,16 @@ There are 236 checks in 10 tests: file operations (copy, move, merge, delete, ca
 | `kestrel/atc.py` | The tower (`kes --atc`) and each window's link to it, which keep several running Kestrels in sync |
 | `tests/` | The test suite (see [Tests](#tests)) |
 | `bench/` | The benchmark against GNOME Files and Nemo (see Performance: [vs GNOME Files](#performance-kestrel-vs-gnome-files), [vs Nemo](#performance-kestrel-vs-nemo)) |
-| `pyproject.toml` | PyPI packaging metadata (not ready for release yet — see [PACKAGING.md](PACKAGING.md)) |
-| `.github/workflows/pypi.yml` | Publishes to PyPI by hand, with trusted publishing (see [PACKAGING.md](PACKAGING.md)) |
+| `pyproject.toml` | PyPI packaging metadata (see [PACKAGING.md](https://github.com/RegulusArms/kestrel-explorer/blob/main/PACKAGING.md)) |
+| `.github/workflows/pypi.yml` | Publishes to PyPI by hand, with trusted publishing (see [PACKAGING.md](https://github.com/RegulusArms/kestrel-explorer/blob/main/PACKAGING.md)) |
 
 ## Performance: Kestrel vs GNOME Files
 
-Kestrel Explorer exists in two versions with the same features: the original [Python/PyQt6 version](.) and the [C++/Qt 6 port](../kes-c). They share settings, bookmarks and caches, so you can switch between them. Both are compared here with GNOME Files 50.2.2, the file manager they replace.
+Kestrel Explorer exists in two versions with the same features: the original [Python/PyQt6 version](https://github.com/RegulusArms/kestrel-explorer) and the [C++/Qt 6 port](https://github.com/RegulusArms/kes-c). They share settings, bookmarks and caches, so you can switch between them. Both are compared here with GNOME Files 50.2.2, the file manager they replace.
 
 **Test machine:** AMD Ryzen Threadripper 2950X 16-Core Processor (32 threads), Ubuntu 26.04.1 LTS. The test data is on a RAM disk: 600 JPEGs at 1600×1200 with camera EXIF, 40 videos, 40 PDFs, 150 folders of 4 images, a tree of 50,000 files, 20,000 small files plus 250 MB, a folder of 10,000 files, and 200 PNGs with AI-generation metadata.
 
-**How it was measured:** each test ran 3 times, and the tables show medians. Every run started with a fresh home folder, so the thumbnail cache was empty. All three apps ran on a headless X server with software rendering (Qt's raster engine, GTK's cairo renderer), on a private session bus where only the desktop's settings and virtual file system (gvfs) services could start, so no file indexer ran. The benchmark is in [bench/](bench) and is run with `bench/run.sh`.
+**How it was measured:** each test ran 3 times, and the tables show medians. Every run started with a fresh home folder, so the thumbnail cache was empty. All three apps ran on a headless X server with software rendering (Qt's raster engine, GTK's cairo renderer), on a private session bus where only the desktop's settings and virtual file system (gvfs) services could start, so no file indexer ran. The benchmark is in [bench/](https://github.com/RegulusArms/kestrel-explorer/tree/main/bench) and is run with `bench/run.sh`.
 
 ### Compared with GNOME Files
 
@@ -476,11 +543,11 @@ Thumbnails and mosaics take about as long in both versions, because both decode 
 
 ## Performance: Kestrel vs Nemo
 
-Kestrel Explorer exists in two versions with the same features: the original [Python/PyQt6 version](.) and the [C++/Qt 6 port](../kes-c). They share settings, bookmarks and caches, so you can switch between them. Both are compared here with Nemo, the file manager they replace.
+Kestrel Explorer exists in two versions with the same features: the original [Python/PyQt6 version](https://github.com/RegulusArms/kestrel-explorer) and the [C++/Qt 6 port](https://github.com/RegulusArms/kes-c). They share settings, bookmarks and caches, so you can switch between them. Both are compared here with Nemo, the file manager they replace.
 
 **Test machine:** a VirtualBox virtual machine running Linux Mint 22 (Cinnamon). The test data is on a RAM disk: 600 JPEGs at 1600×1200 with camera EXIF, 40 videos, 40 PDFs, 150 folders of 4 images, a tree of 50,000 files, 20,000 small files plus 250 MB, a folder of 10,000 files, and 200 PNGs with AI-generation metadata.
 
-**How it was measured:** each test ran 3 times, and the tables show medians. Every run started with a fresh home folder, so the thumbnail cache was empty. All three apps ran on a headless X server with software rendering (Qt's raster engine, GTK's cairo renderer), on a private session bus where only the desktop's settings and virtual file system (gvfs) services could start, so no file indexer ran. The benchmark is in [bench/](bench) and is run with `bench/run.sh`.
+**How it was measured:** each test ran 3 times, and the tables show medians. Every run started with a fresh home folder, so the thumbnail cache was empty. All three apps ran on a headless X server with software rendering (Qt's raster engine, GTK's cairo renderer), on a private session bus where only the desktop's settings and virtual file system (gvfs) services could start, so no file indexer ran. The benchmark is in [bench/](https://github.com/RegulusArms/kestrel-explorer/tree/main/bench) and is run with `bench/run.sh`.
 
 ### Compared with Nemo
 
@@ -540,4 +607,4 @@ Thumbnails and mosaics take about as long in both versions, because both decode 
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](https://github.com/RegulusArms/kestrel-explorer/blob/main/LICENSE).

@@ -1,7 +1,7 @@
 # Packaging for PyPI
 
-> **Status: ready to publish.** The `Private :: Do Not Upload` upload guard has been removed, so the next run of
-> the publish workflow uploads to PyPI. The open items below are still worth doing before or soon after a first release.
+> **Status: published.** [`kestrel-explorer`](https://pypi.org/project/kestrel-explorer/) 0.2.1a0 is on PyPI,
+> uploaded by `.github/workflows/pypi.yml`. The README's [pip (PyPI)](README.md#pip-pypi) section is the user guide.
 
 ## What is set up
 
@@ -22,35 +22,38 @@
 | Publishing | `.github/workflows/pypi.yml` | Run by hand, to PyPI, with [trusted publishing](https://docs.pypi.org/trusted-publishers/) (no API tokens) |
 | Project links | `[project.urls]` | Homepage, source and issues on `github.com/RegulusArms/kestrel-explorer` |
 
-## To do before the first release
+## Checklist
 
 - [x] **License:** MIT (`LICENSE`, with `license = "MIT"` in `pyproject.toml`).
 - [x] **Check the name.** [`kestrel-explorer`](https://pypi.org/project/kestrel-explorer/) was free on PyPI on 2026-10-05.
 - [x] **Fill in `[project.urls]`** (homepage, source, issues).
 - [x] **Author:** `RegulusArms` (no email, so none is shown on PyPI).
 - [x] **Confirm the GitHub URL:** `https://github.com/RegulusArms/kestrel-explorer` (the repo's `origin`).
-- [ ] **Set up trusted publishing** (see below).
-- [ ] **Fix the README's relative links for PyPI.** PyPI shows the README without the repo, so links like `PACKAGING.md` and `../kes-c` are broken there; make them absolute GitHub URLs.
-- [ ] **Decide about the drop focus extension.** `data/gnome-shell/` isn't in the wheel, so pip users on GNOME Wayland don't get drag-drop focus (see `kestrel/focus.py`).
-- [ ] **Test in a clean virtual environment.** The minimum versions (Python 3.11.4, PyQt6 6.5, Pillow 9.0) are best guesses and haven't been tested. So far it has only been run on Python 3.14 with Ubuntu's PyQt6 6.10. Besides browsing, check the features that call other programs from a pip install: Compress / Extract, the admin session (Retry as Administrator), metadata editing, video thumbnails, and UWP.
-  ```bash
-  python3 -m venv /tmp/kes-venv && /tmp/kes-venv/bin/pip install . && /tmp/kes-venv/bin/kes
-  ```
-- [ ] **Decide how to handle image formats.** The PyQt6 wheel from PyPI comes with its own Qt and won't load the system's `kimageformat6-plugins`. A pip install therefore can't show AVIF, HEIC, JPEG XL, PSD or camera RAW, even when those plugins are installed. Either document this or add a Pillow-based fallback for those formats (for example with `pillow-heif` and `rawpy`).
-- [ ] **Document the system programs pip can't install.** The README's "Dependencies" section lists them for `install.sh` users; a pip user needs a short "pip install" section saying they must install these with apt themselves:
-  - archives: `7zip`, `unrar`, `zip`/`unzip`, `pigz`, `zpaq`, `zstd`, `xz-utils`, `bzip2`, `lzip` (and optionally `rar`, `pbzip2`/`lbzip2`, `plzip`, `lz4`);
-  - `libimage-exiftool-perl` (metadata), `ffmpeg` (video thumbnails);
-  - `pkexec` (admin session), `gvfs`/`gvfs-backends` and `udisks2` (network and drives);
-  - `kimageformat6-plugins` only helps `install.sh` users (see the image formats item above).
-- [ ] **Decide what pip users get for the admin session.** The helper always runs with the system's `/usr/bin/python3` (it only needs the standard library), wherever Kestrel itself is installed, and is read from the install location (e.g. inside a virtualenv). That works, but say so, and note that pkexec's prompt names `/usr/bin/python3`. A polkit policy file with a clearer prompt can't be installed by pip.
-- [ ] **Bump the version** in `kestrel/__init__.py` if needed.
+- [x] **Set up trusted publishing** (see below).
+- [x] **Fix the README's relative links for PyPI:** they're absolute GitHub URLs, since PyPI shows the README
+  without the repo. Keep new links absolute.
+- [x] **Document the system programs pip can't install,** the image formats and the admin session: README,
+  "pip (PyPI)". It recommends a `--system-site-packages` virtual environment, where pip reuses Ubuntu's PyQt6, Pillow
+  and `gi`, so the system's Qt image plugins and GIO work.
+- [x] **Install test:** a clean virtual environment with the system Python 3.14 installs 0.2.1a0 from PyPI and runs.
+- [ ] **Test the minimum versions.** Python 3.11.4, PyQt6 6.5 and Pillow 9.0 are best guesses; so far only Python
+  3.14 with Ubuntu's PyQt6 6.10 has been tried. From a pip install, check the features that call other programs:
+  Compress / Extract, the admin session (Retry as Administrator), metadata editing, video thumbnails, and UWP.
+- [ ] **Image formats with the PyQt6 wheel.** In a plain virtual environment, pip's PyQt6 has its own Qt and can't
+  load `kimageformat6-plugins` (no AVIF, HEIC, JPEG XL, PSD or camera RAW). Documented; a Pillow-based fallback
+  (`pillow-heif`, `rawpy`) would fix it.
+- [ ] **Drop focus extension.** `data/gnome-shell/` isn't in the wheel, so pip users on GNOME on Wayland don't get
+  drag-drop focus (documented in the README).
+- [ ] **kes-setup for pip users.** It isn't in the wheel either; the README has them run it from a clone.
+- [ ] **Bump the version** in `kestrel/__init__.py` (and `KES_VERSION` in kes-c) before every upload: PyPI never
+  takes the same version twice.
 - [x] **Remove `Private :: Do Not Upload`** from the classifiers.
 
 ## Trusted publishing (one-time setup)
 
 Uploads go through GitHub Actions with [trusted publishing](https://docs.pypi.org/trusted-publishers/): PyPI trusts
-`.github/workflows/pypi.yml` in this repo, so no API token is stored anywhere. The project doesn't exist on PyPI yet,
-so it's added as a *pending* publisher, which creates the project on the first upload.
+`.github/workflows/pypi.yml` in this repo, so no API token is stored anywhere. It was set up as a *pending*
+publisher, which created the project on the first upload; the publisher is now under the project's Settings → Publishing on PyPI.
 
 1. **GitHub environment.** In the repo: Settings → Environments → New environment, create `pypi`. Add yourself under
    "Required reviewers" (each release then waits for your approval) and, under "Deployment branches and tags", limit
