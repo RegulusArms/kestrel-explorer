@@ -58,6 +58,8 @@ It also makes Kestrel the system's **file chooser**: the Open and Save dialogs t
 
 It also makes Kestrel the app for `trash:///` (the dock's Trash icon, `gio open trash:///`), remembering which app had it so `--uninstall` can put it back. If GNOME Files is pinned in the dock, `--default` asks whether to put Kestrel in its place; `--dock` does that without asking. `--uninstall` puts GNOME Files back if the installer swapped it.
 
+The installer does all of this (everything but the PATH) by running `kes-setup`, which you can also run on its own: `kes-setup --default`, `kes-setup --dock`, and `kes-setup --undo` to put back what they changed. It sets things up for the `kes` next to it, or the one given with `--kes PATH`.
+
 It uses the system Python (`/usr/bin/python3`), not a virtualenv or conda Python. `install.sh` installs the required packages and lists any recommended ones that are missing; add `--install-recommended` to install those too. The options can be combined, for example `./install.sh --install-recommended --default`.
 
 ### Updating and reinstalling
@@ -371,7 +373,7 @@ tests/run.sh                  # every test
 tests/run.sh fileops atc_undo # only some
 ```
 
-There are 220 checks in 10 tests: file operations (copy, move, merge, delete, cancel, trash, links, undo), the tower that keeps several Kestrels in sync (shared changes, the shared task list, shared undo, opening folders as tabs), phones and cameras, rearranging the sidebar, following the desktop theme, the file chooser, and `install.sh`. Each test runs with a throwaway home folder on a private D-Bus bus, so your files, settings, dock and open windows are never touched. The [C++ version](../kes-c/tests) has the same tests, and some checks launch the other version to test the two together. Details: [tests/README.md](tests/README.md).
+There are 227 checks in 10 tests: file operations (copy, move, merge, delete, cancel, trash, links, undo), the tower that keeps several Kestrels in sync (shared changes, the shared task list, shared undo, opening folders as tabs), phones and cameras, rearranging the sidebar, following the desktop theme, the file chooser, and `install.sh`. Each test runs with a throwaway home folder on a private D-Bus bus, so your files, settings, dock and open windows are never touched. The [C++ version](../kes-c/tests) has the same tests, and some checks launch the other version to test the two together. Details: [tests/README.md](tests/README.md).
 
 ## Layout
 

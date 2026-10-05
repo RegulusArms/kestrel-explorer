@@ -113,5 +113,32 @@ dock_check '[[ "$(fav)" == "$DOCK_BEFORE" ]]' "...and n leaves the dock alone"
 "$INSTALL" --uninstall >/dev/null 2>&1
 dock_check '[[ "$(fav)" == "$DOCK_BEFORE" ]]' "--uninstall doesn't touch a dock it didn't change"
 
+# kes-setup on its own, as after installing the .deb: kes in /usr/bin, and the package's menu entry and portal definition
+SETUP="$HERE/../kes-setup"
+mkdir -p "$WORK/share/applications"
+printf '[Desktop Entry]\nType=Application\nName=Kestrel Explorer\nExec=kes %%U\nMimeType=inode/directory;x-directory/normal;x-scheme-handler/trash;\n' \
+    > "$WORK/share/applications/kestrel-explorer.desktop"
+export XDG_DATA_DIRS="$WORK/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+fresh
+printf '[portal]\nDBusName=org.freedesktop.impl.portal.desktop.kestrel\nInterfaces=org.freedesktop.impl.portal.FileChooser;\n' \
+    > "$WORK/portals/kestrel.portal"
+"$SETUP" --kes /usr/bin/kes --default </dev/null >"$WORK/out7" 2>&1
+check '[[ "$(folder_handler)" == kestrel-explorer.desktop && "$(trash_handler)" == kestrel-explorer.desktop ]]' \
+    "kes-setup --default: folders and trash:/// open in Kestrel"
+check 'grep -qx "Exec=/usr/bin/kes --dbus-service" "$HOME/.local/share/dbus-1/services/org.freedesktop.FileManager1.service" &&
+       grep -qx "Exec=/usr/bin/kes --file-chooser" "$(CHOOSER_SERVICE)"' \
+    "kes-setup --kes: the D-Bus services start that kes"
+check 'grep -q "^org.freedesktop.impl.portal.FileChooser=kestrel;" "$(PORTAL_CONF)" && ! grep -q "needs sudo" "$WORK/out7"' \
+    "kes-setup --default: picks Kestrel for the file chooser without sudo when the portal definition is installed"
+check '[[ ! -e "$HOME/.local/share/applications/kestrel-explorer.desktop" && "$(cat "$HOME/.bashrc")" == "alias ll='"'"'ls -l'"'"'" ]]' \
+    "kes-setup --default: leaves the app menu entry and PATH alone"
+"$SETUP" --undo >/dev/null 2>&1
+check '[[ "$(folder_handler)" == nemo.desktop && "$(trash_handler)" == xfce4-file-manager.desktop ]]' \
+    "kes-setup --undo: folders and trash:/// go back to the previous apps"
+check '[[ ! -e "$(STATE_FILE)" && ! -e "$(PORTAL_CONF)" && ! -e "$(CHOOSER_SERVICE)" &&
+       ! -e "$HOME/.local/share/dbus-1/services/org.freedesktop.FileManager1.service" ]]' \
+    "kes-setup --undo: removes its files"
+check '[[ -f "$WORK/portals/kestrel.portal" ]]' "kes-setup --undo: leaves the package's portal definition"
+
 if (( fails )); then echo "FAILED ($fails failed)"; exit 1; fi
 echo "ALL PASSED (0 failed)"

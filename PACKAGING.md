@@ -61,7 +61,7 @@ python3 -m twine upload dist/*        # the real upload
 | Extra image formats (AVIF, HEIC, RAW…) | Yes, with `kimageformat6-plugins` | No (see the to-do list above) |
 | GIO features | Yes (`python3-gi`) | Only with the `[gio]` extra, or a system Python that has `gi` |
 | App-grid entry | Full entry with a "New Window" action | Basic entry, created on first launch |
-| Default folder app | `./install.sh --default` | Run `xdg-mime default kestrel-explorer.desktop inode/directory` |
+| Default folder app | `./install.sh --default` | From a clone of the repo: `./kes-setup --kes "$(command -v kes)" --default` |
 | Archive tools, exiftool, ffmpeg | `./install.sh --install-recommended` installs them | Install them yourself with apt |
 | Admin session | Uses `pkexec` and the system Python | Same: needs `pkexec` and `/usr/bin/python3`, whatever Python runs Kestrel |
 | UWP integration | Works if UWP is installed | Same |
