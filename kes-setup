@@ -1,0 +1,253 @@
+#!/usr/bin/env bash
+# Make Kestrel Explorer your file manager, for the current user (install.sh --default runs this; so can the .deb's users).
+#   kes-setup --default          the default app for opening folders and the trash, "Show in folder" from other apps,
+#                                and the system's file chooser for Save/Open dialogs (may ask for sudo once);
+#                                on GNOME, an extension that focuses the app a file from Kestrel is dropped into
+#                                (and offer to put it in the dock in place of GNOME Files)
+#   kes-setup --dock             put it in the dock in place of GNOME Files (without asking)
+#   kes-setup --undo             put back everything --default and --dock changed
+#   --kes PATH                   the kes to start (default: the kes next to this script, else the one on PATH)
+# --default and --dock can be combined.
+set -euo pipefail
+HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# D-Bus activation file for org.freedesktop.FileManager1 ("Show in folder" in browsers and other apps).
+# A per-user file overrides GNOME Files' system one, so the bus starts Kestrel for those requests.
+FM1_SERVICE="$HOME/.local/share/dbus-1/services/org.freedesktop.FileManager1.service"
+# The system's file chooser (the Open/Save dialogs apps get through xdg-desktop-portal): a D-Bus activation file for
+# Kestrel's portal backend, its portal definition (xdg-desktop-portal reads those only from /usr/share, so installing it
+# needs sudo; the .deb installs it already), and the user's portals.conf for this desktop, choosing it for FileChooser.
+CHOOSER_SERVICE="$HOME/.local/share/dbus-1/services/org.freedesktop.impl.portal.desktop.kestrel.service"
+PORTAL_DIR="${KESTREL_PORTAL_DIR:-/usr/share/xdg-desktop-portal/portals}"
+PORTAL_FILE="$PORTAL_DIR/kestrel.portal"
+PORTAL_DESKTOP="$(printf '%s' "${XDG_CURRENT_DESKTOP:-GNOME}" | cut -d: -f1 | tr '[:upper:]' '[:lower:]')"
+PORTAL_CONF="$HOME/.config/xdg-desktop-portal/$PORTAL_DESKTOP-portals.conf"
+PORTAL_BACKUP="$HOME/.config/kestrel-explorer/portals.conf.backup"
+PORTAL_MARK="# kestrel-explorer: Kestrel is the file chooser (install.sh --default; --uninstall puts this back)"
+# Drop focus on GNOME: a GNOME Shell extension that gives the focus to the app a file from Kestrel is dropped into
+# (on Wayland an app can't focus another app's window). The .deb installs it for everyone; from a clone it's copied in.
+FOCUS_UUID="kestrel-focus@regulusarms.com"
+FOCUS_SYSTEM="${KESTREL_EXTENSIONS_DIR:-/usr/share/gnome-shell/extensions}/$FOCUS_UUID"
+FOCUS_USER="$HOME/.local/share/gnome-shell/extensions/$FOCUS_UUID"
+# MIME types for folders: inode/directory, plus the older alias some apps still ask for
+FOLDER_TYPES=(inode/directory x-directory/normal)
+# trash:/// (the dock's Trash icon, `gio open trash:///`)
+TRASH_TYPE=x-scheme-handler/trash
+# What --default and --dock replaced, so --undo can put it back
+STATE="$HOME/.config/kestrel-explorer/install-state"
+# The system's gsettings (an Anaconda copy earlier on PATH can't see the desktop's settings)
+GSETTINGS=/usr/bin/gsettings
+
+DEFAULT=0 DOCK=0 UNDO=0 KES=""
+while (( $# )); do
+    case "$1" in
+        --default) DEFAULT=1 ;;
+        --dock) DOCK=1 ;;
+        --undo) UNDO=1 ;;
+        --kes) KES="${2:?--kes needs a path}"; shift ;;
+        -h|--help) sed -n '2,10s/^# \{0,1\}//p' "$0"; exit 0 ;;
+        *) echo "Unknown option: $1 (see kes-setup --help)" >&2; exit 2 ;;
+    esac
+    shift
+done
+if (( ! DEFAULT && ! DOCK && ! UNDO )); then
+    sed -n '2,10s/^# \{0,1\}//p' "$0"
+    exit 2
+fi
+if [[ -z "$KES" ]]; then
+    if [[ -x "$HERE/kes" ]]; then KES="$HERE/kes"; else KES="$(command -v kes || true)"; fi
+fi
+
+default_for() {   # the default app for a MIME type or URL scheme, as GNOME sees it (GIO; xdg-mime gets schemes wrong)
+    if [[ -x /usr/bin/gio ]]; then
+        /usr/bin/gio mime "$1" 2>/dev/null | sed -n '1s/^Default application for .*: //p'
+    else
+        xdg-mime query default "$1" 2>/dev/null
+    fi
+}
+state_get() { sed -n "s/^$1=//p" "$STATE" 2>/dev/null | tail -1; }
+state_set() {
+    mkdir -p "$(dirname "$STATE")"
+    { grep -v "^$1=" "$STATE" 2>/dev/null || true; echo "$1=$2"; } > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+}
+dock_favorites() { [[ -x "$GSETTINGS" ]] && "$GSETTINGS" get org.gnome.shell favorite-apps 2>/dev/null; }
+dock_replace() {   # dock_replace OLD.desktop NEW.desktop: swap one pinned app for another, in place
+    local fav
+    fav="$(dock_favorites)" || return 1
+    [[ "$fav" == *"'$1'"* && "$fav" != *"'$2'"* ]] || return 1
+    "$GSETTINGS" set org.gnome.shell favorite-apps "${fav//"'$1'"/"'$2'"}"
+}
+shell_extensions() { [[ -x "$GSETTINGS" ]] && "$GSETTINGS" get org.gnome.shell enabled-extensions 2>/dev/null; }
+reload_dbus() {   # make the session bus re-read its service files
+    gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+        --method org.freedesktop.DBus.ReloadConfig >/dev/null 2>&1 || true
+}
+portal_root() {   # run a command on the portal folder: with sudo unless it is writable
+    if [[ -w "$PORTAL_DIR" ]]; then "$@"; else sudo "$@"; fi
+}
+restart_portal() {   # xdg-desktop-portal reads portals.conf when it starts
+    systemctl --user try-restart xdg-desktop-portal.service >/dev/null 2>&1 || true
+}
+portal_base() {   # the portals.conf this desktop uses now (before ours): the first DESKTOP-portals.conf, then portals.conf
+    local IFS=: d dir name
+    local dirs="${XDG_CONFIG_DIRS:-/etc/xdg}:/etc:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+    for name in $(printf '%s' "${XDG_CURRENT_DESKTOP:-GNOME}" | tr '[:upper:]' '[:lower:]'); do
+        for dir in $dirs; do
+            [[ -f "$dir/xdg-desktop-portal/$name-portals.conf" ]] && { cat "$dir/xdg-desktop-portal/$name-portals.conf"; return; }
+        done
+    done
+    for dir in $dirs; do
+        [[ -f "$dir/xdg-desktop-portal/portals.conf" ]] && { cat "$dir/xdg-desktop-portal/portals.conf"; return; }
+    done
+    printf '[preferred]\ndefault=gnome;gtk;\n'
+}
+
+if (( UNDO )); then
+    prev="$(state_get folder_handler)"   # GNOME Files, Nemo on Linux Mint, …
+    for mt in "${FOLDER_TYPES[@]}"; do
+        if [[ "$(xdg-mime query default "$mt")" =~ ^(kestrel-explorer|folder-explorer)\.desktop$ ]]; then
+            xdg-mime default "${prev:-org.gnome.Nautilus.desktop}" "$mt"
+        fi
+    done
+    if [[ "$(default_for "$TRASH_TYPE")" =~ ^(kestrel-explorer|folder-explorer)\.desktop$ ]]; then
+        prev="$(state_get trash_handler)"
+        xdg-mime default "${prev:-org.gnome.Nautilus.desktop}" "$TRASH_TYPE"
+    fi
+    if [[ "$(state_get dock)" == swapped ]] && dock_replace kestrel-explorer.desktop org.gnome.Nautilus.desktop; then
+        echo "Put GNOME Files back in the dock."
+    fi
+    # the file chooser: GNOME's again (the portal definition stays: install.sh --uninstall or apt removes it)
+    if grep -qsF "$PORTAL_MARK" "$PORTAL_CONF"; then
+        if [[ "$(state_get chooser_conf)" == backup && -f "$PORTAL_BACKUP" ]]; then
+            mv "$PORTAL_BACKUP" "$PORTAL_CONF"
+        else
+            rm -f "$PORTAL_CONF"
+        fi
+        echo "The file chooser is GNOME's again."
+    fi
+    if grep -qs -- "--file-chooser" "$CHOOSER_SERVICE"; then
+        rm -f "$CHOOSER_SERVICE"
+        reload_dbus
+    fi
+    restart_portal
+    # drop focus: the extension, if --default enabled it
+    if [[ "$(state_get focus_enabled)" == yes ]] && exts="$(shell_extensions)" && [[ "$exts" == *"'$FOCUS_UUID'"* ]]; then
+        "$GSETTINGS" set org.gnome.shell enabled-extensions \
+            "$(printf '%s' "$exts" | sed "s/'$FOCUS_UUID', //; s/, '$FOCUS_UUID'//; s/'$FOCUS_UUID'//")"
+    fi
+    [[ "$(state_get focus_extension)" == copied ]] && rm -rf "$FOCUS_USER"
+    rm -f "$STATE"
+    if grep -qs -- "--dbus-service" "$FM1_SERVICE"; then
+        rm -f "$FM1_SERVICE"
+        reload_dbus
+    fi
+    echo "Kestrel Explorer is no longer the default file manager."
+    exit 0
+fi
+
+if (( DEFAULT )); then
+    if [[ -z "$KES" ]]; then
+        echo "Can't find the kes command; pass it with --kes PATH." >&2
+        exit 1
+    fi
+    # remembering which app opened folders (to put back on --undo)
+    prev="$(default_for inode/directory)"
+    if [[ -n "$prev" && ! "$prev" =~ ^(kestrel-explorer|folder-explorer)\.desktop$ ]]; then
+        state_set folder_handler "$prev"
+    fi
+    for mt in "${FOLDER_TYPES[@]}"; do
+        xdg-mime default kestrel-explorer.desktop "$mt"
+    done
+    # "Show in folder" from browsers and other apps goes to org.freedesktop.FileManager1, not to xdg-mime
+    mkdir -p "$(dirname "$FM1_SERVICE")"
+    printf '[D-BUS Service]\nName=org.freedesktop.FileManager1\nExec=%s --dbus-service\n' "$KES" > "$FM1_SERVICE"
+    reload_dbus
+    # the system's file chooser: browsers' "Save as" and "Open", Flatpak and Snap apps, GTK 4 and Qt apps using the portal
+    portal_tmp="$(mktemp)"
+    printf '[portal]\nDBusName=org.freedesktop.impl.portal.desktop.kestrel\nInterfaces=org.freedesktop.impl.portal.FileChooser;\n' \
+        > "$portal_tmp"
+    if cmp -s "$portal_tmp" "$PORTAL_FILE" || { echo "Installing $PORTAL_FILE (needs sudo)…";
+                                                portal_root install -m 644 "$portal_tmp" "$PORTAL_FILE"; }; then
+        mkdir -p "$(dirname "$CHOOSER_SERVICE")" "$(dirname "$PORTAL_CONF")"
+        printf '[D-BUS Service]\nName=org.freedesktop.impl.portal.desktop.kestrel\nExec=%s --file-chooser\n' "$KES" \
+            > "$CHOOSER_SERVICE"
+        reload_dbus
+        if ! grep -qsF "$PORTAL_MARK" "$PORTAL_CONF"; then
+            if [[ -f "$PORTAL_CONF" ]]; then   # the user's own: keep a copy to put back
+                mkdir -p "$(dirname "$PORTAL_BACKUP")"
+                cp "$PORTAL_CONF" "$PORTAL_BACKUP"
+                state_set chooser_conf backup
+                base="$(cat "$PORTAL_CONF")"
+            else
+                state_set chooser_conf created
+                base="$(portal_base)"
+            fi
+            { echo "$PORTAL_MARK"
+              printf '%s\n' "$base" | awk -v line="org.freedesktop.impl.portal.FileChooser=kestrel;gnome;gtk;" '
+                  /^org\.freedesktop\.impl\.portal\.FileChooser=/ { next }
+                  { print }
+                  /^\[preferred\]/ && !done { print line; done = 1 }
+                  END { if (!done) { print "[preferred]"; print line } }'
+            } > "$PORTAL_CONF"
+        fi
+        restart_portal
+        echo "Kestrel is now the file chooser (Open/Save dialogs) for apps that use the desktop portal: browsers," \
+             "Flatpak and Snap apps…"
+    else
+        echo "Couldn't install $PORTAL_FILE, so the file chooser stays GNOME's." >&2
+    fi
+    rm -f "$portal_tmp"
+    # drop focus on GNOME: the shell extension (the .deb's, or a copy of this clone's); the shell loads a newly
+    # installed extension at the next log-in
+    if exts="$(shell_extensions)"; then
+        if [[ ! -d "$FOCUS_SYSTEM" && -d "$HERE/data/gnome-shell/$FOCUS_UUID" ]]; then
+            mkdir -p "$FOCUS_USER"
+            cp "$HERE/data/gnome-shell/$FOCUS_UUID"/* "$FOCUS_USER/"
+            state_set focus_extension copied
+        fi
+        if [[ (-d "$FOCUS_SYSTEM" || -d "$FOCUS_USER") && "$exts" != *"'$FOCUS_UUID'"* ]]; then
+            if [[ "$exts" == *"[]" ]]; then exts="['$FOCUS_UUID']"; else exts="${exts%]}, '$FOCUS_UUID']"; fi
+            "$GSETTINGS" set org.gnome.shell enabled-extensions "$exts"
+            state_set focus_enabled yes
+            echo "Apps you drop files into from Kestrel now get the focus (log out and back in once for GNOME to load" \
+                 "its extension)."
+        fi
+    fi
+    if pgrep -x nautilus >/dev/null; then
+        echo "Closing GNOME Files so it releases the file-manager D-Bus service (it starts again when you open it)."
+        nautilus -q 2>/dev/null || true
+    fi
+    if pgrep -x nemo >/dev/null; then   # Linux Mint's file manager (its desktop icons are nemo-desktop: left alone)
+        echo "Closing Nemo so it releases the file-manager D-Bus service (it starts again when you open it)."
+        nemo --quit 2>/dev/null || true
+    fi
+    if [[ "$(xdg-mime query default inode/directory)" == kestrel-explorer.desktop ]]; then
+        echo "Set as default folder handler (${FOLDER_TYPES[*]})."
+    else
+        echo "Warning: couldn't make Kestrel the default folder handler; xdg-mime reports:" \
+             "$(xdg-mime query default inode/directory)" >&2
+    fi
+    # trash:/// too, remembering what had it (to put back on --undo)
+    prev="$(default_for "$TRASH_TYPE")"
+    if [[ -n "$prev" && "$prev" != kestrel-explorer.desktop ]]; then
+        state_set trash_handler "$prev"
+    fi
+    xdg-mime default kestrel-explorer.desktop "$TRASH_TYPE"
+    if [[ "$(default_for "$TRASH_TYPE")" == kestrel-explorer.desktop ]]; then
+        echo "Set as the trash handler (trash:///)${prev:+, replacing $prev}."
+    fi
+    # offer the dock swap when asked interactively (--dock does it without asking)
+    if (( ! DOCK )) && [[ -t 0 ]] && [[ "$(dock_favorites)" == *"'org.gnome.Nautilus.desktop'"* ]]; then
+        read -r -p "Replace GNOME Files in the dock with Kestrel Explorer? [y/N] " answer
+        [[ "$answer" =~ ^[Yy] ]] && DOCK=1
+    fi
+fi
+if (( DOCK )); then
+    if dock_replace org.gnome.Nautilus.desktop kestrel-explorer.desktop; then
+        state_set dock swapped
+        echo "Kestrel Explorer is now in the dock in place of GNOME Files."
+    elif [[ "$(dock_favorites)" == *"'kestrel-explorer.desktop'"* ]]; then
+        echo "Kestrel Explorer is already in the dock."
+    else
+        echo "GNOME Files isn't pinned in the dock, so nothing to replace (pin Kestrel from the app grid instead)."
+    fi
+fi

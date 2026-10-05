@@ -4,7 +4,7 @@ import os
 from common import A, check, finish, home_path, setup_app, spin, wait_for
 from gi.repository import Gio, GLib
 from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import QApplication, QMessageBox, QPushButton
+from PyQt6.QtWidgets import QApplication, QMessageBox, QPushButton, QWidget
 
 from kestrel import chooser, util
 
@@ -179,6 +179,31 @@ if w:
     w.chooser.accept()
 check(wait_for(lambda: r["got"]) and r["uris"] == [util.file_uri(J(d, "one.txt")), util.file_uri(J(d, "two.txt"))],
       "saving several files: each goes into the chosen folder")
+
+# -- its own settings
+big = QWidget()  # a main window's saved size
+big.resize(1500, 1000)
+A._settings.setValue("geometry", big.saveGeometry())
+A._settings.setValue("grid_size", 200)
+r = call("OpenFile", {"current_folder": folder(d)})
+w = wait_window()
+check(w is not None and w.width() < 1500 and w.pane() is not None and w.pane().grid_size == 96,
+      "a chooser opens smaller than a main window, with smaller icons")
+if w:
+    w.pane().zoom(absolute=120)
+    w.toggle_hidden(True)
+    w.close()
+wait_for(lambda: r["got"])
+check(int(A._settings.value("grid_size")) == 200 and not A._settings.value("show_hidden", False, type=bool)
+      and int(A._settings.value("chooser/grid_size")) == 120,
+      "zooming and showing hidden files in a chooser leave the main windows' settings alone")
+r = call("OpenFile", {"current_folder": folder(d)})
+w = wait_window()
+check(w is not None and w.pane() is not None and w.pane().grid_size == 120 and w.show_hidden,
+      "...and the next chooser starts from its own settings")
+if w:
+    w.close()
+wait_for(lambda: r["got"])
 
 # -- cancelling
 r = call("OpenFile", {"current_folder": folder(d)})

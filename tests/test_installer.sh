@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installer test: --default (folders, trash:///, the file chooser, PATH), --dock, asking about the dock, and --uninstall
+# Installer test: --default (folders, trash:///, the file chooser, the drop focus extension, PATH), --dock, asking about the dock, and --uninstall
 # putting it all back. Runs ../install.sh with a throwaway HOME and a keyfile GSettings backend (never your real settings
 # or dock), with the portal definition going to a throwaway folder, and with stub `pgrep`, `sudo` and `systemctl` so it
 # can't close a running GNOME Files, install packages or restart your desktop portal. run.sh starts it on a private
@@ -19,7 +19,7 @@ mkdir -p "$WORK/xdg/xdg-desktop-portal" "$WORK/portals"
 printf '[preferred]\ndefault=gnome;gtk;\norg.freedesktop.impl.portal.Secret=gnome-keyring;\n' \
     > "$WORK/xdg/xdg-desktop-portal/ubuntu-portals.conf"
 export GSETTINGS_BACKEND=keyfile PATH="$WORK/stubs:$PATH" XDG_CONFIG_DIRS="$WORK/xdg" XDG_CURRENT_DESKTOP=ubuntu:GNOME
-export KESTREL_PORTAL_DIR="$WORK/portals"
+export KESTREL_PORTAL_DIR="$WORK/portals" KESTREL_EXTENSIONS_DIR="$WORK/extensions"
 unset XDG_CONFIG_HOME XDG_DATA_HOME
 
 fails=0
@@ -33,6 +33,11 @@ trash_handler() { /usr/bin/gio mime x-scheme-handler/trash 2>/dev/null | sed -n 
 fav() { /usr/bin/gsettings get org.gnome.shell favorite-apps; }
 DOCK_BEFORE="['firefox.desktop', 'org.gnome.Nautilus.desktop', 'code.desktop']"
 DOCK_AFTER="['firefox.desktop', 'kestrel-explorer.desktop', 'code.desktop']"
+exts() { /usr/bin/gsettings get org.gnome.shell enabled-extensions; }
+FOCUS_UUID="kestrel-focus@regulusarms.com"
+EXTS_BEFORE="['other@example.com']"   # an extension of the user's own, which must stay
+EXTS_AFTER="['other@example.com', '$FOCUS_UUID']"
+USER_EXT="$WORK/home/.local/share/gnome-shell/extensions/$FOCUS_UUID"
 fresh() {   # a new HOME where other file managers handle folders (a stand-in for Nemo) and trash:/// (for Thunar)
     export HOME="$WORK/home"
     case "$HOME" in "$WORK"/home) rm -rf "$HOME" ;; esac
@@ -45,6 +50,7 @@ fresh() {   # a new HOME where other file managers handle folders (a stand-in fo
     xdg-mime default nemo.desktop inode/directory
     printf "alias ll='ls -l'\n" > "$HOME/.bashrc"   # the user's own line, which must stay
     (( HAS_DOCK )) && /usr/bin/gsettings set org.gnome.shell favorite-apps "$DOCK_BEFORE"
+    (( HAS_DOCK )) && /usr/bin/gsettings set org.gnome.shell enabled-extensions "$EXTS_BEFORE"
     return 0
 }
 # what a new terminal finds as `kes` (bash reading ~/.bashrc)
@@ -73,12 +79,15 @@ check 'grep -q "^org.freedesktop.impl.portal.FileChooser=kestrel;" "$(PORTAL_CON
     "--default: the desktop's portals.conf picks Kestrel for the file chooser and keeps the rest"
 check 'grep -q "try-restart xdg-desktop-portal.service" "$WORK/systemctl.log"' "--default: restarts the portal"
 check '[[ "$(new_terminal_kes)" == "$HOME/.local/bin/kes" ]]' "--default: a new terminal finds kes (~/.local/bin on PATH)"
+dock_check '[[ "$(exts)" == "$EXTS_AFTER" && -f "$USER_EXT/extension.js" && -f "$USER_EXT/metadata.json" ]]' \
+    "--default: installs and enables the drop focus extension, keeping the user's others"
 "$INSTALL" --default --dock </dev/null >"$WORK/out2" 2>&1
 dock_check 'grep -q "already in the dock" "$WORK/out2" && [[ "$(fav)" == "$DOCK_AFTER" ]]' "running it again doesn't pin twice"
 check '[[ "$(grep -c "^trash_handler=" "$(STATE_FILE)")" == 1 && "$(grep "^trash_handler=" "$(STATE_FILE)")" == trash_handler=xfce4-file-manager.desktop ]]' \
     "running it again keeps the original trash handler"
 check '[[ "$(grep -c "FileChooser=" "$(PORTAL_CONF)")" == 1 ]]' "running it again keeps one file chooser line"
 check '[[ "$(grep -c "kestrel-explorer: ~/.local/bin on PATH" "$HOME/.bashrc")" == 1 ]]' "running it again adds PATH once"
+dock_check '[[ "$(exts)" == "$EXTS_AFTER" ]]' "running it again enables the drop focus extension once"
 "$INSTALL" --uninstall >"$WORK/out3" 2>&1
 check '[[ "$(trash_handler)" == xfce4-file-manager.desktop ]]' "--uninstall: the trash handler is put back"
 check '[[ "$(folder_handler)" == nemo.desktop ]]' "--uninstall: folders open in the previous file manager again"
@@ -89,6 +98,8 @@ check '[[ ! -e "$(PORTAL_CONF)" && ! -e "$(CHOOSER_SERVICE)" && ! -e "$WORK/port
     "--uninstall: the file chooser is GNOME's again"
 check '! grep -q kestrel-explorer "$HOME/.bashrc" && [[ "$(cat "$HOME/.bashrc")" == "alias ll='"'"'ls -l'"'"'" ]]' \
     "--uninstall: takes its PATH lines out of ~/.bashrc and keeps the user's own"
+dock_check '[[ "$(exts)" == "$EXTS_BEFORE" && ! -e "$USER_EXT" ]]' \
+    "--uninstall: disables and removes the drop focus extension, keeping the user's others"
 
 fresh   # the user already has a portals.conf of their own
 mkdir -p "$(dirname "$(PORTAL_CONF)")"
@@ -112,6 +123,38 @@ printf 'n\n' | script -qec "$INSTALL --default" /dev/null >"$WORK/out6" 2>&1
 dock_check '[[ "$(fav)" == "$DOCK_BEFORE" ]]' "...and n leaves the dock alone"
 "$INSTALL" --uninstall >/dev/null 2>&1
 dock_check '[[ "$(fav)" == "$DOCK_BEFORE" ]]' "--uninstall doesn't touch a dock it didn't change"
+
+# kes-setup on its own, as after installing the .deb: kes in /usr/bin, and the package's menu entry and portal definition
+SETUP="$HERE/../kes-setup"
+mkdir -p "$WORK/share/applications"
+printf '[Desktop Entry]\nType=Application\nName=Kestrel Explorer\nExec=kes %%U\nMimeType=inode/directory;x-directory/normal;x-scheme-handler/trash;\n' \
+    > "$WORK/share/applications/kestrel-explorer.desktop"
+export XDG_DATA_DIRS="$WORK/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+fresh
+printf '[portal]\nDBusName=org.freedesktop.impl.portal.desktop.kestrel\nInterfaces=org.freedesktop.impl.portal.FileChooser;\n' \
+    > "$WORK/portals/kestrel.portal"
+mkdir -p "$WORK/extensions/$FOCUS_UUID"   # the package's drop focus extension
+"$SETUP" --kes /usr/bin/kes --default </dev/null >"$WORK/out7" 2>&1
+check '[[ "$(folder_handler)" == kestrel-explorer.desktop && "$(trash_handler)" == kestrel-explorer.desktop ]]' \
+    "kes-setup --default: folders and trash:/// open in Kestrel"
+check 'grep -qx "Exec=/usr/bin/kes --dbus-service" "$HOME/.local/share/dbus-1/services/org.freedesktop.FileManager1.service" &&
+       grep -qx "Exec=/usr/bin/kes --file-chooser" "$(CHOOSER_SERVICE)"' \
+    "kes-setup --kes: the D-Bus services start that kes"
+check 'grep -q "^org.freedesktop.impl.portal.FileChooser=kestrel;" "$(PORTAL_CONF)" && ! grep -q "needs sudo" "$WORK/out7"' \
+    "kes-setup --default: picks Kestrel for the file chooser without sudo when the portal definition is installed"
+check '[[ ! -e "$HOME/.local/share/applications/kestrel-explorer.desktop" && "$(cat "$HOME/.bashrc")" == "alias ll='"'"'ls -l'"'"'" ]]' \
+    "kes-setup --default: leaves the app menu entry and PATH alone"
+dock_check '[[ "$(exts)" == "$EXTS_AFTER" && ! -e "$USER_EXT" ]]' \
+    "kes-setup --default: enables the package's drop focus extension without copying it"
+"$SETUP" --undo >/dev/null 2>&1
+check '[[ "$(folder_handler)" == nemo.desktop && "$(trash_handler)" == xfce4-file-manager.desktop ]]' \
+    "kes-setup --undo: folders and trash:/// go back to the previous apps"
+check '[[ ! -e "$(STATE_FILE)" && ! -e "$(PORTAL_CONF)" && ! -e "$(CHOOSER_SERVICE)" &&
+       ! -e "$HOME/.local/share/dbus-1/services/org.freedesktop.FileManager1.service" ]]' \
+    "kes-setup --undo: removes its files"
+check '[[ -f "$WORK/portals/kestrel.portal" ]]' "kes-setup --undo: leaves the package's portal definition"
+dock_check '[[ "$(exts)" == "$EXTS_BEFORE" && -d "$WORK/extensions/$FOCUS_UUID" ]]' \
+    "kes-setup --undo: disables the drop focus extension and leaves the package's copy"
 
 if (( fails )); then echo "FAILED ($fails failed)"; exit 1; fi
 echo "ALL PASSED (0 failed)"

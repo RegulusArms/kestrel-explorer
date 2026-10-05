@@ -1,8 +1,7 @@
 # Packaging for PyPI
 
-> **Status: not ready for release.** The packaging setup is in place, but nothing has been built or uploaded.
-> `pyproject.toml` includes the classifier `Private :: Do Not Upload`, so PyPI will reject any upload until it is
-> removed on purpose.
+> **Status: ready to publish.** The `Private :: Do Not Upload` upload guard has been removed, so the next run of
+> the publish workflow uploads to PyPI. The open items below are still worth doing before or soon after a first release.
 
 ## What is set up
 
@@ -19,15 +18,20 @@
 | Command | `kes` (gui-script → `kestrel.app:main`) | Same command as `install.sh` sets up |
 | App-grid entry | Created on first launch by `util.ensure_desktop_entry()` | Points at the pip-installed `kes` |
 | Ignored build output | `.gitignore` | `build/`, `dist/`, `*.egg-info/` |
-| Upload guard | `Private :: Do Not Upload` classifier | Remove it for the first real release |
+| Upload guard | `Private :: Do Not Upload` classifier | Removed. Add it back to block uploads; the publish workflow also stops early while it's there |
+| Publishing | `.github/workflows/pypi.yml` | Run by hand, to PyPI, with [trusted publishing](https://docs.pypi.org/trusted-publishers/) (no API tokens) |
+| Project links | `[project.urls]` | Homepage, source and issues on `github.com/RegulusArms/kestrel-explorer` |
 
 ## To do before the first release
 
 - [x] **License:** MIT (`LICENSE`, with `license = "MIT"` in `pyproject.toml`).
-- [ ] **Check the name.** Make sure `kestrel-explorer` is free on [PyPI](https://pypi.org/project/kestrel-explorer/) and [TestPyPI](https://test.pypi.org/project/kestrel-explorer/).
-- [ ] **Fill in `[project.urls]`** (homepage, issues) once the GitHub repo exists.
+- [x] **Check the name.** [`kestrel-explorer`](https://pypi.org/project/kestrel-explorer/) was free on PyPI on 2026-10-05.
+- [x] **Fill in `[project.urls]`** (homepage, source, issues).
 - [x] **Author:** `RegulusArms` (no email, so none is shown on PyPI).
-- [ ] **Confirm the GitHub URL.** UWP's README already links to `https://github.com/RegulusArms/kestrel-explorer`; check that's the real repo name before using it in `[project.urls]`.
+- [x] **Confirm the GitHub URL:** `https://github.com/RegulusArms/kestrel-explorer` (the repo's `origin`).
+- [ ] **Set up trusted publishing** (see below).
+- [ ] **Fix the README's relative links for PyPI.** PyPI shows the README without the repo, so links like `PACKAGING.md` and `../kes-c` are broken there; make them absolute GitHub URLs.
+- [ ] **Decide about the drop focus extension.** `data/gnome-shell/` isn't in the wheel, so pip users on GNOME Wayland don't get drag-drop focus (see `kestrel/focus.py`).
 - [ ] **Test in a clean virtual environment.** The minimum versions (Python 3.11.4, PyQt6 6.5, Pillow 9.0) are best guesses and haven't been tested. So far it has only been run on Python 3.14 with Ubuntu's PyQt6 6.10. Besides browsing, check the features that call other programs from a pip install: Compress / Extract, the admin session (Retry as Administrator), metadata editing, video thumbnails, and UWP.
   ```bash
   python3 -m venv /tmp/kes-venv && /tmp/kes-venv/bin/pip install . && /tmp/kes-venv/bin/kes
@@ -40,18 +44,49 @@
   - `kimageformat6-plugins` only helps `install.sh` users (see the image formats item above).
 - [ ] **Decide what pip users get for the admin session.** The helper always runs with the system's `/usr/bin/python3` (it only needs the standard library), wherever Kestrel itself is installed, and is read from the install location (e.g. inside a virtualenv). That works, but say so, and note that pkexec's prompt names `/usr/bin/python3`. A polkit policy file with a clearer prompt can't be installed by pip.
 - [ ] **Bump the version** in `kestrel/__init__.py` if needed.
-- [ ] **Remove `Private :: Do Not Upload`** from the classifiers.
+- [x] **Remove `Private :: Do Not Upload`** from the classifiers.
 
-## Building and uploading (when ready)
+## Trusted publishing (one-time setup)
+
+Uploads go through GitHub Actions with [trusted publishing](https://docs.pypi.org/trusted-publishers/): PyPI trusts
+`.github/workflows/pypi.yml` in this repo, so no API token is stored anywhere. The project doesn't exist on PyPI yet,
+so it's added as a *pending* publisher, which creates the project on the first upload.
+
+1. **GitHub environment.** In the repo: Settings → Environments → New environment, create `pypi`. Add yourself under
+   "Required reviewers" (each release then waits for your approval) and, under "Deployment branches and tags", limit
+   it to `main`.
+2. **PyPI.** Log in at [pypi.org](https://pypi.org) (2FA on), go to
+   [Account → Publishing](https://pypi.org/manage/account/publishing/) → "Add a new pending publisher" → GitHub, and
+   enter:
+
+   | Field | Value |
+   |---|---|
+   | PyPI project name | `kestrel-explorer` |
+   | Owner | `RegulusArms` |
+   | Repository name | `kestrel-explorer` |
+   | Workflow name | `pypi.yml` |
+   | Environment name | `pypi` |
+
+A pending publisher reserves nothing: until the first upload, anyone can register the name. After the first upload the
+project's publishers are under the project's Settings → Publishing.
+
+## Building and publishing
+
+Check a build locally first:
 
 ```bash
 python3 -m pip install --upgrade build twine
 python3 -m build                      # creates dist/*.tar.gz and dist/*.whl
-python3 -m twine check dist/*         # checks that the README renders on PyPI
-python3 -m twine upload --repository testpypi dist/*   # try TestPyPI first
-pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ kestrel-explorer
-python3 -m twine upload dist/*        # the real upload
+python3 -m twine check --strict dist/*   # checks that the README renders on PyPI
 ```
+
+Then, with the changes pushed to `main`:
+
+1. Actions → "Publish to PyPI" → Run workflow → branch `main`, and approve the deployment when asked.
+2. Try it in a clean environment: `python3 -m venv /tmp/kes-venv && /tmp/kes-venv/bin/pip install kestrel-explorer`
+
+PyPI never accepts the same version twice, even after deleting it, so bump `__version__` in `kestrel/__init__.py`
+(and `KES_VERSION` in kes-c) before each new upload.
 
 ## pip install vs install.sh
 
@@ -61,7 +96,7 @@ python3 -m twine upload dist/*        # the real upload
 | Extra image formats (AVIF, HEIC, RAW…) | Yes, with `kimageformat6-plugins` | No (see the to-do list above) |
 | GIO features | Yes (`python3-gi`) | Only with the `[gio]` extra, or a system Python that has `gi` |
 | App-grid entry | Full entry with a "New Window" action | Basic entry, created on first launch |
-| Default folder app | `./install.sh --default` | Run `xdg-mime default kestrel-explorer.desktop inode/directory` |
+| Default folder app | `./install.sh --default` | From a clone of the repo: `./kes-setup --kes "$(command -v kes)" --default` |
 | Archive tools, exiftool, ffmpeg | `./install.sh --install-recommended` installs them | Install them yourself with apt |
 | Admin session | Uses `pkexec` and the system Python | Same: needs `pkexec` and `/usr/bin/python3`, whatever Python runs Kestrel |
 | UWP integration | Works if UWP is installed | Same |

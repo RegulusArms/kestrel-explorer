@@ -733,6 +733,10 @@ def ensure_desktop_entry():
     """
     if DESKTOP_ENTRY.exists():
         return
+    # the .deb's entry in /usr/share/applications: a user one would hide it
+    for d in (os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share").split(":"):
+        if d and (Path(d) / "applications" / DESKTOP_ENTRY.name).exists():
+            return
     launcher = Path(__file__).resolve().parent.parent / APP_COMMAND  # running from the repo
     if not launcher.exists():  # installed with pip: use the `kes` entry point, or the module as a last resort
         launcher = shutil.which(APP_COMMAND) or f"{sys.executable} -m kestrel"
