@@ -130,6 +130,11 @@ mkdir -p "$WORK/share/applications"
 printf '[Desktop Entry]\nType=Application\nName=Kestrel Explorer\nExec=kes %%U\nMimeType=inode/directory;x-directory/normal;x-scheme-handler/trash;\n' \
     > "$WORK/share/applications/kestrel-explorer.desktop"
 export XDG_DATA_DIRS="$WORK/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+# and the package's kes on PATH: GIO ignores a menu entry whose program it can't find
+mkdir -p "$WORK/bin"
+printf '#!/bin/sh\nexit 0\n' > "$WORK/bin/kes"
+chmod +x "$WORK/bin/kes"
+export PATH="$WORK/bin:$PATH"
 fresh
 printf '[portal]\nDBusName=org.freedesktop.impl.portal.desktop.kestrel\nInterfaces=org.freedesktop.impl.portal.FileChooser;\n' \
     > "$WORK/portals/kestrel.portal"
