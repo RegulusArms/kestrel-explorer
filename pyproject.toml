@@ -1,5 +1,4 @@
-# Packaging metadata for PyPI, published by .github/workflows/pypi.yml. NOT READY FOR RELEASE yet — see PACKAGING.md.
-# The "Private :: Do Not Upload" classifier below makes PyPI reject any upload until it is removed.
+# Packaging metadata for PyPI, published by .github/workflows/pypi.yml. See PACKAGING.md.
 
 [build-system]
 requires = ["setuptools>=77"]
@@ -16,7 +15,6 @@ license-files = ["LICENSE"]
 authors = [{ name = "RegulusArms" }]
 keywords = ["file manager", "nautilus", "gnome", "archive", "7z", "rar", "zpaq", "permissions", "exif", "metadata", "batch rename", "thumbnails", "pyqt6"]
 classifiers = [
-    "Private :: Do Not Upload",
     "Development Status :: 3 - Alpha",
     "Environment :: X11 Applications :: Qt",
     "Intended Audience :: End Users/Desktop",

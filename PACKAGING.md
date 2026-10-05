@@ -1,8 +1,7 @@
 # Packaging for PyPI
 
-> **Status: not ready for release.** The packaging setup is in place, but nothing has been built or uploaded.
-> `pyproject.toml` includes the classifier `Private :: Do Not Upload`, so PyPI will reject any upload until it is
-> removed on purpose.
+> **Status: ready to publish.** The `Private :: Do Not Upload` upload guard has been removed, so the next run of
+> the publish workflow uploads to PyPI. The open items below are still worth doing before or soon after a first release.
 
 ## What is set up
 
@@ -19,7 +18,7 @@
 | Command | `kes` (gui-script → `kestrel.app:main`) | Same command as `install.sh` sets up |
 | App-grid entry | Created on first launch by `util.ensure_desktop_entry()` | Points at the pip-installed `kes` |
 | Ignored build output | `.gitignore` | `build/`, `dist/`, `*.egg-info/` |
-| Upload guard | `Private :: Do Not Upload` classifier | Remove it for the first real release; the publish workflow also stops early while it's there |
+| Upload guard | `Private :: Do Not Upload` classifier | Removed. Add it back to block uploads; the publish workflow also stops early while it's there |
 | Publishing | `.github/workflows/pypi.yml` | Run by hand, to PyPI, with [trusted publishing](https://docs.pypi.org/trusted-publishers/) (no API tokens) |
 | Project links | `[project.urls]` | Homepage, source and issues on `github.com/RegulusArms/kestrel-explorer` |
 
@@ -45,7 +44,7 @@
   - `kimageformat6-plugins` only helps `install.sh` users (see the image formats item above).
 - [ ] **Decide what pip users get for the admin session.** The helper always runs with the system's `/usr/bin/python3` (it only needs the standard library), wherever Kestrel itself is installed, and is read from the install location (e.g. inside a virtualenv). That works, but say so, and note that pkexec's prompt names `/usr/bin/python3`. A polkit policy file with a clearer prompt can't be installed by pip.
 - [ ] **Bump the version** in `kestrel/__init__.py` if needed.
-- [ ] **Remove `Private :: Do Not Upload`** from the classifiers.
+- [x] **Remove `Private :: Do Not Upload`** from the classifiers.
 
 ## Trusted publishing (one-time setup)
 
@@ -81,7 +80,7 @@ python3 -m build                      # creates dist/*.tar.gz and dist/*.whl
 python3 -m twine check --strict dist/*   # checks that the README renders on PyPI
 ```
 
-Then, with the `Private :: Do Not Upload` classifier removed and pushed:
+Then, with the changes pushed to `main`:
 
 1. Actions → "Publish to PyPI" → Run workflow → branch `main`, and approve the deployment when asked.
 2. Try it in a clean environment: `python3 -m venv /tmp/kes-venv && /tmp/kes-venv/bin/pip install kestrel-explorer`
