@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Make Kestrel Explorer your file manager, for the current user (install.sh --default runs this; so can the .deb's users).
 #   kes-setup --default          the default app for opening folders and the trash, "Show in folder" from other apps,
-#                                and the system's file chooser for Save/Open dialogs (may ask for sudo once)
+#                                and the system's file chooser for Save/Open dialogs (may ask for sudo once);
+#                                on GNOME, an extension that focuses the app a file from Kestrel is dropped into
 #                                (and offer to put it in the dock in place of GNOME Files)
 #   kes-setup --dock             put it in the dock in place of GNOME Files (without asking)
 #   kes-setup --undo             put back everything --default and --dock changed
@@ -22,6 +23,11 @@ PORTAL_DESKTOP="$(printf '%s' "${XDG_CURRENT_DESKTOP:-GNOME}" | cut -d: -f1 | tr
 PORTAL_CONF="$HOME/.config/xdg-desktop-portal/$PORTAL_DESKTOP-portals.conf"
 PORTAL_BACKUP="$HOME/.config/kestrel-explorer/portals.conf.backup"
 PORTAL_MARK="# kestrel-explorer: Kestrel is the file chooser (install.sh --default; --uninstall puts this back)"
+# Drop focus on GNOME: a GNOME Shell extension that gives the focus to the app a file from Kestrel is dropped into
+# (on Wayland an app can't focus another app's window). The .deb installs it for everyone; from a clone it's copied in.
+FOCUS_UUID="kestrel-focus@regulusarms.com"
+FOCUS_SYSTEM="${KESTREL_EXTENSIONS_DIR:-/usr/share/gnome-shell/extensions}/$FOCUS_UUID"
+FOCUS_USER="$HOME/.local/share/gnome-shell/extensions/$FOCUS_UUID"
 # MIME types for folders: inode/directory, plus the older alias some apps still ask for
 FOLDER_TYPES=(inode/directory x-directory/normal)
 # trash:/// (the dock's Trash icon, `gio open trash:///`)
@@ -38,13 +44,13 @@ while (( $# )); do
         --dock) DOCK=1 ;;
         --undo) UNDO=1 ;;
         --kes) KES="${2:?--kes needs a path}"; shift ;;
-        -h|--help) sed -n '2,9s/^# \{0,1\}//p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,10s/^# \{0,1\}//p' "$0"; exit 0 ;;
         *) echo "Unknown option: $1 (see kes-setup --help)" >&2; exit 2 ;;
     esac
     shift
 done
 if (( ! DEFAULT && ! DOCK && ! UNDO )); then
-    sed -n '2,9s/^# \{0,1\}//p' "$0"
+    sed -n '2,10s/^# \{0,1\}//p' "$0"
     exit 2
 fi
 if [[ -z "$KES" ]]; then
@@ -70,6 +76,7 @@ dock_replace() {   # dock_replace OLD.desktop NEW.desktop: swap one pinned app f
     [[ "$fav" == *"'$1'"* && "$fav" != *"'$2'"* ]] || return 1
     "$GSETTINGS" set org.gnome.shell favorite-apps "${fav//"'$1'"/"'$2'"}"
 }
+shell_extensions() { [[ -x "$GSETTINGS" ]] && "$GSETTINGS" get org.gnome.shell enabled-extensions 2>/dev/null; }
 reload_dbus() {   # make the session bus re-read its service files
     gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
         --method org.freedesktop.DBus.ReloadConfig >/dev/null 2>&1 || true
@@ -122,6 +129,12 @@ if (( UNDO )); then
         reload_dbus
     fi
     restart_portal
+    # drop focus: the extension, if --default enabled it
+    if [[ "$(state_get focus_enabled)" == yes ]] && exts="$(shell_extensions)" && [[ "$exts" == *"'$FOCUS_UUID'"* ]]; then
+        "$GSETTINGS" set org.gnome.shell enabled-extensions \
+            "$(printf '%s' "$exts" | sed "s/'$FOCUS_UUID', //; s/, '$FOCUS_UUID'//; s/'$FOCUS_UUID'//")"
+    fi
+    [[ "$(state_get focus_extension)" == copied ]] && rm -rf "$FOCUS_USER"
     rm -f "$STATE"
     if grep -qs -- "--dbus-service" "$FM1_SERVICE"; then
         rm -f "$FM1_SERVICE"
@@ -183,6 +196,22 @@ if (( DEFAULT )); then
         echo "Couldn't install $PORTAL_FILE, so the file chooser stays GNOME's." >&2
     fi
     rm -f "$portal_tmp"
+    # drop focus on GNOME: the shell extension (the .deb's, or a copy of this clone's); the shell loads a newly
+    # installed extension at the next log-in
+    if exts="$(shell_extensions)"; then
+        if [[ ! -d "$FOCUS_SYSTEM" && -d "$HERE/data/gnome-shell/$FOCUS_UUID" ]]; then
+            mkdir -p "$FOCUS_USER"
+            cp "$HERE/data/gnome-shell/$FOCUS_UUID"/* "$FOCUS_USER/"
+            state_set focus_extension copied
+        fi
+        if [[ (-d "$FOCUS_SYSTEM" || -d "$FOCUS_USER") && "$exts" != *"'$FOCUS_UUID'"* ]]; then
+            if [[ "$exts" == *"[]" ]]; then exts="['$FOCUS_UUID']"; else exts="${exts%]}, '$FOCUS_UUID']"; fi
+            "$GSETTINGS" set org.gnome.shell enabled-extensions "$exts"
+            state_set focus_enabled yes
+            echo "Apps you drop files into from Kestrel now get the focus (log out and back in once for GNOME to load" \
+                 "its extension)."
+        fi
+    fi
     if pgrep -x nautilus >/dev/null; then
         echo "Closing GNOME Files so it releases the file-manager D-Bus service (it starts again when you open it)."
         nautilus -q 2>/dev/null || true

@@ -5,13 +5,14 @@ import sys
 
 from PyQt6 import sip
 from PyQt6.QtCore import QDateTime, QDir, QEvent, QFileSystemWatcher, QItemSelectionModel, QMimeData, QSettings, QSize, QStorageInfo, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QGuiApplication, QKeySequence, QWindow
+from PyQt6.QtGui import QAction, QCursor, QDrag, QGuiApplication, QKeySequence, QPainter, QPixmap, QWindow
 from PyQt6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QHBoxLayout, QHeaderView,
                              QInputDialog, QLabel, QLineEdit, QListView, QMainWindow, QMenu, QMessageBox,
-                             QProgressBar, QSlider, QSplitter, QStackedWidget, QTabWidget, QToolBar, QToolButton, QTreeView,
-                             QVBoxLayout, QWidget)
+                             QProgressBar, QSlider, QSplitter, QStackedWidget, QStyle, QStyleOptionViewItem, QTabWidget,
+                             QToolBar, QToolButton, QTreeView, QVBoxLayout, QWidget)
 
-from . import (__version__, admin, animate, archive, archive_ui, atc, chooser, dialogs, env, fileops, fm1, places,
+from . import (__version__, admin, animate, archive, archive_ui, atc, chooser, dialogs, env, fileops, fm1, focus,
+               places,
                sharing, thumbs, undo, util, uwp)
 from .chooser import ChooserBar
 from .overview import OVERVIEW, OVERVIEW_TITLE, OverviewPage, is_phone_scheme, is_uri, mount_uri, phone_hint
@@ -34,6 +35,59 @@ def icon(*names):
 
 
 # ---------------------------------------------------------------- pane
+
+class FileViewDrag:
+    """The file views. Their drags are Qt's, apart from giving the focus to the app the files are dropped into
+    (focus.py)."""
+
+    def startDrag(self, supported):
+        indexes = [i for i in self.selectedIndexes() if self.model().flags(i) & Qt.ItemFlag.ItemIsDragEnabled]
+        data = self.model().mimeData(indexes) if indexes else None
+        if data is None:
+            return
+        drag = QDrag(self)
+        drag.setMimeData(data)
+        pixmap, hot = self._drag_pixmap(indexes)
+        drag.setPixmap(pixmap)
+        drag.setHotSpot(hot)
+        default = self.defaultDropAction()
+        if default == Qt.DropAction.IgnoreAction or not (supported & default):
+            default = Qt.DropAction.CopyAction if supported & Qt.DropAction.CopyAction else Qt.DropAction.IgnoreAction
+        if drag.exec(supported, default) != Qt.DropAction.IgnoreAction and drag.target() is None:  # into another app
+            focus.activate_at_pointer()
+
+    def _drag_pixmap(self, indexes):
+        """The dragged items as they look in the view (what Qt draws)."""
+        vp = self.viewport().rect()
+        rects = [(self.visualRect(i), i) for i in indexes if self.visualRect(i).intersects(vp)]
+        full = rects[0][0].intersected(vp) if rects else None
+        for r, _ in rects[1:]:
+            full = full.united(r.intersected(vp))
+        if full is None:
+            return QPixmap(), self.viewport().mapFromGlobal(QCursor.pos())
+        hot = self.viewport().mapFromGlobal(QCursor.pos()) - full.topLeft()
+        dpr = self.devicePixelRatioF()
+        pm = QPixmap(full.size() * dpr)
+        pm.setDevicePixelRatio(dpr)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        for r, i in rects:
+            opt = QStyleOptionViewItem()
+            self.initViewItemOption(opt)
+            opt.rect = r.translated(-full.topLeft())
+            opt.state |= QStyle.StateFlag.State_Selected
+            self.itemDelegateForIndex(i).paint(p, opt, i)
+        p.end()
+        return pm, hot
+
+
+class FileListView(FileViewDrag, QListView):
+    pass
+
+
+class FileTreeView(FileViewDrag, QTreeView):
+    pass
+
 
 class Pane(QWidget):
     path_changed = pyqtSignal()
@@ -94,9 +148,9 @@ class Pane(QWidget):
         lay.addWidget(self.search_bar)
 
         self.stack = QStackedWidget()
-        self.grid = QListView()
+        self.grid = FileListView()
         self.animator = animate.Animator(self.grid, self.settings, self)   # GIF / WebM playing in the grid
-        self.tree = QTreeView()
+        self.tree = FileTreeView()
         self._setup_grid()
         self._setup_tree()
         self.stack.addWidget(self.grid)
