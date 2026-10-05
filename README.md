@@ -5,7 +5,7 @@
 A file manager for Ubuntu and Linux Mint that's easy to pick up and puts many jobs you'd normally do in a terminal into the window. It also adds quality-of-life improvements over GNOME Files. It's written in Python with PyQt6.
 
 **Terminal jobs, in the window:**
-- **Archives:** create and extract 7z, zip, rar, zpaq and every tar format, with the options the command-line tools offer (level, method, threads, passwords, split volumes), and a preview of the exact command that will run.
+- **Archives:** create and extract 7z, zip, rar, zpaq and every tar format, with the options the command-line tools offer (level, method, threads, passwords, split volumes), and a preview of the exact command that will run. Double-click an archive to extract it.
 - **Admin rights only when needed:** when something fails with "permission denied", choose **Retry as Administrator** and enter your password once per session, instead of running `sudo` or a file manager as root.
 - **Permissions and links:** permissions, including setuid, setgid and the sticky bit; symbolic, relative and hard links; and MD5/SHA checksums with verification.
 - **Metadata:** view and edit EXIF, XMP and other metadata with `exiftool`, from a searchable list of tags.
@@ -18,8 +18,21 @@ A file manager for Ubuntu and Linux Mint that's easy to pick up and puts many jo
 - Folder icons that preview the images inside, plus per-folder colours.
 - A built-in image viewer, and GIF/WebM playback in the file view.
 - Background copies with progress and Cancel in the status bar.
+- Phones and cameras (iPhone, Android, PTP cameras) on the Overview page and in the sidebar, with thumbnails from the phone's own previews.
+- A sidebar you can rearrange and collapse.
+- Follows the desktop's theme and accent colour, also when you change them while it's open.
+- Other apps' Open and Save dialogs, such as a browser's "Save image as", can open in Kestrel.
 - Several windows that stay in sync.
-- Faster in most measurements (see Performance: [vs GNOME Files](#performance-kestrel-vs-gnome-files), [vs Nemo](#performance-kestrel-vs-nemo)).
+- Faster in most measurements (see [Performance: Kestrel vs GNOME Files](#performance-kestrel-vs-gnome-files)).
+
+**Improvements over Nemo** (Linux Mint's file manager):
+- Archives created and extracted with every option in the window, instead of handing off to a separate archive app.
+- Admin rights for just the operation that needs them, instead of opening a whole Nemo window as root.
+- Folder icons that preview the images inside.
+- A built-in image viewer, and GIF/WebM playback in the file view.
+- Metadata viewing and editing (EXIF, XMP, AI-generation prompts) and checksums in Properties.
+- Phones: thumbnails from the phone's own previews, and iPhone videos copied once so they play smoothly.
+- Faster file operations in the benchmark: copying about 14× faster and moving to another drive about 4.9× faster (see [Performance: Kestrel vs Nemo](#performance-kestrel-vs-nemo)).
 
 **Installs alongside GNOME Files:** Kestrel installs next to GNOME Files (or Nemo on Linux Mint) instead of replacing it. The two share bookmarks, thumbnails, the clipboard, the trash and Recent files, so you can use either. `./install.sh --default` makes Kestrel open folders and "Show in folder" requests and show other apps' Open/Save dialogs, and `./install.sh --uninstall` hands them back.
 
@@ -74,9 +87,18 @@ The packaging setup for PyPI is in place (`pyproject.toml`), but **Kestrel is no
 
 ## Dependencies
 
-Package names are for Ubuntu (tested on 26.04). Everything else Kestrel uses is in the Python standard library.
+**Supported systems**
+- **Ubuntu 26.04 (GNOME):** the main platform; everything is tested here.
+- **Linux Mint 22 (Cinnamon):** supported since 0.2.0. Kestrel builds and runs there, and the [benchmark against Nemo](#performance-kestrel-vs-nemo) was run there.
+- **Ubuntu 24.04:** has the same base as Linux Mint 22, so it should work the same, but it isn't tested yet.
 
-**Linux Mint 22 / Ubuntu 24.04** (initial support: both versions build and run on Linux Mint 22 with Cinnamon, and the [benchmark](#performance-kestrel-vs-nemo) was run there; Ubuntu 24.04 isn't tested yet): these have Qt 6.4, the oldest Qt Kestrel builds with. `kimageformat6-plugins` doesn't exist there, so the installer skips it and RAW/HEIC files get no preview. On Cinnamon, Kestrel uses Cinnamon's own settings for the wallpaper, file history and icon theme, `--default` remembers Nemo and puts it back on `--uninstall`, and the file chooser opens as the app's dialog (X11). Qt 6.4 takes no colours from the GTK theme and doesn't follow theme changes, so there Kestrel reads the theme's colours through GTK (the system's `python3` with `python3-gi` and `gir1.2-gtk-3.0`, which Mint has) and follows theme changes while it runs. The dock swap is GNOME-only for now.
+Package names below are Ubuntu's; Linux Mint uses the same ones. Everything else Kestrel uses is in the Python standard library.
+
+**What's different on Linux Mint 22 and Ubuntu 24.04.** They're based on an older Ubuntu, with Qt 6.4, the oldest Qt Kestrel works with:
+- `kimageformat6-plugins` doesn't exist there, so the installer skips it and RAW and HEIC files get no preview.
+- SVG support comes in `libqt6svg6` instead of `qt6-svg-plugins`. The installer picks whichever the system has.
+- Qt 6.4 takes no colours from the GTK theme, so Kestrel reads them through GTK itself (with the system's `python3`, `python3-gi` and `gir1.2-gtk-3.0`, which Mint has) and follows theme changes while it runs.
+- On Cinnamon, Kestrel uses Cinnamon's own settings for the wallpaper, file history and icon theme. `--default` remembers Nemo and puts it back on `--uninstall`, and the file chooser opens as the app's dialog (X11). `--dock` only works with GNOME's dock for now.
 
 **Anaconda / conda:** if `conda init` put Anaconda first on your PATH, Kestrel still uses the system's programs and libraries (gsettings, gio, ffmpeg, xz…), because Anaconda's copies don't match the desktop (its `gsettings` can't see your real settings, for example). Anaconda's folders are moved to the end of the search paths at startup. If you start Kestrel from an environment you activated yourself (`conda activate myenv`; anything but the auto-activated `base`), the environment is left exactly as it is.
 
@@ -95,7 +117,7 @@ Package names are for Ubuntu (tested on 26.04). Everything else Kestrel uses is 
 |---|---|
 | `libglib2.0-bin` | `gio` (launching `.desktop` shortcuts, unmounting), `gsettings` (icon theme, set as wallpaper) and `gdbus` (talking to UWP when GIO isn't available) |
 | `xdg-utils` | `xdg-open` (opening files when GIO isn't available) and `xdg-mime` (making Kestrel the default folder app) |
-| `gvfs`, `gvfs-backends` | Network locations (`smb://`, `sftp://`, `nfs://`, `ftp://`…) and the drive list on the Overview page |
+| `gvfs`, `gvfs-backends` | Network locations (`smb://`, `sftp://`, `nfs://`, `ftp://`…), the drive list on the Overview page, and phones and cameras (iPhone, Android, PTP cameras; iPhones also use `usbmuxd`, which comes with them) |
 | `udisks2` | Mounting, unlocking and ejecting drives from the Overview page |
 | `qt6-image-formats-plugins` | WebP, TIFF, TGA, ICNS and MNG images |
 | `qt6-svg-plugins` (in `libqt6svg6` on Ubuntu 24.04 / Linux Mint 22) | SVG images |
@@ -135,6 +157,7 @@ sudo apt install python3-pyqt6 python3-pil python3-gi gir1.2-glib-2.0 libglib2.0
 **File management**
 - Tabs, back/forward history, a clickable path bar (Ctrl+L to type a path), and a sidebar.
 - Follows the desktop's theme: light or dark, accent colour, fonts and icons, including switching while Kestrel is open. On GTK desktops this needs `qt6-gtk-platformtheme` (see [Dependencies](#dependencies)).
+- **Other apps' Open and Save dialogs** (a browser's "Save image as", Flatpak and Snap apps, and GTK 4 and Qt apps that use the desktop portal) open as a Kestrel window, with the file name, the file type and Save/Open at the bottom, once you've run `./install.sh --default` (see [Install / run](#install--run)).
 - The sidebar shows standard places, your GTK bookmarks (shared with GNOME Files), mounted drives and connected phones, with an unmount option. Drag entries to reorder them within a section, drag a section header to move the whole section, and click a header to collapse it.
 - Right-click a bookmark → **Edit Bookmark…** to change its name and location (with a folder picker), or remove it or move it up and down.
 - Grid and list views, sorting, hidden files (Ctrl+H).
@@ -192,9 +215,16 @@ sudo apt install python3-pyqt6 python3-pil python3-gi gir1.2-glib-2.0 libglib2.0
 **Overview (default homepage)**
 - Like the old GNOME Files "Other Locations" page:
   - **Drives:** every drive with a usage bar (amber at 75%, red at 90%) and eject/unmount buttons. Unmounted drives can be mounted with a click, and encrypted drives ask for their passphrase. A ZFS pool appears as one card with pool-level numbers.
+  - **Phones & Cameras:** connected phones and cameras (see below), or what to do on a phone to connect it.
   - **Network:** connected shares, plus a "Connect to Server" box for `smb://`, `sftp://`, `nfs://`, `ftp://` and similar addresses. Recent servers are remembered.
   - **Bookmarks:** your bookmarks as cards with folder previews. Right-click a card to edit or remove it.
 - Preferences → Homepage can be the Overview, your home folder, or any folder or network address. The homepage opens at launch and with the Home button (Alt+Home).
+
+**Phones and cameras**
+- iPhones, Android phones and cameras (PTP) appear under **Phones & Cameras** on the Overview page and under Devices in the sidebar, through the desktop's own phone support (gvfs). Click one to connect it; Eject disconnects it. An iPhone has two entries: its photos and videos, and the files its apps share.
+- If a phone doesn't show up or won't connect, Kestrel says what to do on it: unlock it and tap "Trust" (iPhone), choose "File transfer" in its USB notification (Android), or switch the camera to photo transfer (PTP).
+- Thumbnails come from the phone's own small previews where it has them (an iPhone's photos, Android phones). Otherwise files are read one at a time, images up to 30 MB. Folders on a phone get no preview mosaic, since that would download every file.
+- Videos from an iPhone's photos are copied to your computer before they play, because the phone sends the whole file every time it's opened. The status bar shows "Loading from device: … — will launch once ready" with a pulsing bar, and the video opens when it's there. Copies are kept in `~/.cache/kestrel-explorer/device-files`, reused when you open the video again, and deleted after a day.
 
 **Images and galleries**
 - Folder icons show a 1–4 image mosaic. If a folder has no images of its own, the mosaic is taken from its subfolders.
@@ -213,7 +243,7 @@ sudo apt install python3-pyqt6 python3-pil python3-gi gir1.2-glib-2.0 libglib2.0
 - The info panel (F3) shows EXIF details: camera, lens, exposure and GPS.
 - It also shows Stable Diffusion / ComfyUI prompts and settings embedded in PNG, WebP and JPEG files.
 
-Press F1 in the app for all keyboard shortcuts. Settings are in the ☰ menu under Preferences: homepage, how many images a mosaic uses, whether it picks images by name or newest first, folder colour, the thumbnail size limit, which apps open images and videos, single-click, folder previews in list view, slideshow speed, playing GIFs and WebM videos, sharing undo between windows, and opening folders from other apps as tabs.
+Press F1 in the app for all keyboard shortcuts. Settings are in the ☰ menu under Preferences: homepage, how many images a mosaic uses, whether it picks images by name or newest first, folder colour (the desktop's accent colour unless you pick one), the thumbnail size limit, which apps open images and videos, single-click, folder previews in list view, slideshow speed, playing GIFs and WebM videos, sharing undo between windows, and opening folders from other apps as tabs.
 
 ## Archives
 
@@ -352,19 +382,25 @@ There are 220 checks in 10 tests: file operations (copy, move, merge, delete, ca
 | `kestrel/thumbs.py` | Background thumbnail and folder-mosaic generation and caching |
 | `kestrel/viewer.py` | Image viewer |
 | `kestrel/fileops.py` | Background tasks and the status-bar task panel; copy, move and delete (retrying denied ones as administrator); conflict handling; links |
+| `kestrel/places.py` | Starred and Recent: places that list files from anywhere |
+| `kestrel/undo.py` | Undo for file operations, shared by a Kestrel's windows (or every Kestrel's) |
+| `kestrel/sharing.py` | What GNOME Files offers through extensions: code editors, Nautilus scripts, Send To, Samba sharing |
+| `kestrel/animate.py` | Animated GIFs and WebM clips playing in the file view |
+| `kestrel/fm1.py` | The `org.freedesktop.FileManager1` service ("Show in folder" from browsers and other apps) |
+| `kestrel/env.py` | Using the system's programs and libraries instead of Anaconda's (see [Dependencies](#dependencies)) |
 | `kestrel/chooser.py` | The system's file chooser: the portal backend (`kes --file-chooser`) and the Save/Open bar of chooser windows |
 | `kestrel/admin.py` | The admin session: starts the root helper once, sends it operations, the 🛡 status-bar indicator, and "Retry as Administrator" |
 | `kestrel/admin_helper.py` | The small root helper (standard library only) that performs admin-session operations |
 | `kestrel/dialogs.py` | Properties (including the metadata editor and Add Tag picker), Open With, rename, batch rename, Edit Bookmark, preferences |
 | `kestrel/metadata.py` | EXIF, AI-generation metadata, exiftool reading/editing, and the tag catalog for the Add Tag picker (the tag descriptions and "Accepts" types are AI-generated and may not be completely accurate) |
-| `kestrel/overview.py` | Overview page: drives, network locations, bookmarks |
+| `kestrel/overview.py` | Overview page: drives, phones and cameras, network locations, bookmarks |
 | `kestrel/util.py` | Shared helpers: paths, file types, icons, desktop integration (default apps, wallpaper, terminal), trash on every drive, GTK bookmarks |
 | `kestrel/archive.py` | Archive engine: tool detection, the commands for every format, progress, cancel, password handling |
 | `kestrel/archive_ui.py` | Compress and Extract dialogs, password prompts, and the archive job flows |
 | `kestrel/uwp.py` | Integration with the UWP wallpaper manager (over D-Bus and the `uwp` command) |
 | `kestrel/atc.py` | The tower (`kes --atc`) and each window's link to it, which keep several running Kestrels in sync |
 | `tests/` | The test suite (see [Tests](#tests)) |
-| `bench/` | The benchmark against GNOME Files (see [Performance](#performance-kestrel-vs-gnome-files)) |
+| `bench/` | The benchmark against GNOME Files and Nemo (see Performance: [vs GNOME Files](#performance-kestrel-vs-gnome-files), [vs Nemo](#performance-kestrel-vs-nemo)) |
 | `pyproject.toml` | PyPI packaging metadata (not ready for release yet — see [PACKAGING.md](PACKAGING.md)) |
 
 ## Performance: Kestrel vs GNOME Files
@@ -477,6 +513,7 @@ Kestrel (C++) compared with Nemo:
 - **File operations:** Nemo's D-Bus service returns straight away, so its times were measured by watching the files until the operation had finished, to within about 50 ms.
 - **Opening a folder not timed:** Nemo makes no thumbnails in this setup (a fresh home folder with its default settings), so the folder tests are skipped for it and those rows show —, as does its peak memory with the 600-image folder open.
 - **Not timed:** Nemo's D-Bus file-operations service has no way to move files to the trash, so those rows show —. For "Empty the trash", the files were put in the trash with `gio trash` first.
+- **CPU while idle:** Nemo kept about 21% of a core busy with nothing happening. That's unusual for a file manager at rest, so it probably comes from this headless setup (where it also made no thumbnails) rather than from everyday use.
 - **Didn't finish:** asked through its D-Bus service to empty the trash, Nemo didn't finish within 2 minutes (it may have been waiting for a confirmation), so those rows show —.
 - **Memory:** Nemo makes thumbnails in separate helper processes, whose memory isn't counted in its figures. Kestrel makes them inside the app.
 - **Search:** Nemo's search can't be timed from outside, so it isn't compared.

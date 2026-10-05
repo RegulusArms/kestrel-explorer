@@ -652,6 +652,9 @@ def tables(res, other):
                "kestrel_all": secs(med("cxx", "bulk_thumbs")),
                "procs": round(med("cxx", "windows", "procs") or 0),
                "untimed": untimed, "stuck": stuck}
+    # idle CPU far above Kestrel's: worth a word of caution (Nemo kept a fifth of a core busy in the Mint VM)
+    busy, calm = med(other, "idle", "cpu_ms"), med("cxx", "idle", "cpu_ms")
+    summary["busy_idle"] = busy / (IDLE_SECONDS * 10) if busy and busy > 1000 and busy > 10 * (calm or 0) else None
     return t1, t2, summary
 
 
@@ -702,6 +705,11 @@ def section(t1, t2, summary, runs, py_link, cxx_link, other):
                    f"{' or '.join(summary['untimed'])}, so those rows show —.")
         if "move files to the trash" in summary["untimed"]:
             untimed += " For \"Empty the trash\", the files were put in the trash with `gio trash` first."
+    if summary["busy_idle"]:
+        headless = " (where it also made no thumbnails)" if not OTHERS[other]["thumbnails"] or summary["no_thumbs"] else ""
+        untimed += (f"\n- **CPU while idle:** {label} kept about {summary['busy_idle']:.0f}% of a core busy with nothing "
+                    f"happening. That's unusual for a file manager at rest, so it probably comes from this headless "
+                    f"setup{headless} rather than from everyday use.")
     if summary["stuck"]:
         untimed += (f"\n- **Didn't finish:** asked through its D-Bus service to {' or '.join(summary['stuck'])}, "
                     f"{label} didn't finish within 2 minutes (it may have been waiting for a confirmation), so those "
