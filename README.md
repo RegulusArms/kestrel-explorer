@@ -165,7 +165,7 @@ To update: `~/anaconda3/envs/kestrel/bin/pip install --upgrade kestrel-explorer`
 **Supported systems**
 - **Ubuntu 26.04 (GNOME):** the main platform; everything is tested here.
 - **Linux Mint 22 (Cinnamon):** supported since 0.2.0. Kestrel builds and runs there, and the [benchmark against Nemo](#performance-kestrel-vs-nemo) was run there.
-- **Ubuntu 24.04:** has the same base as Linux Mint 22, so it should work the same, but it isn't tested yet.
+- **Ubuntu 24.04 (GNOME):** tested; Kestrel installs and runs there. It has the same base as Linux Mint 22.
 
 Package names below are Ubuntu's; Linux Mint uses the same ones. Everything else Kestrel uses is in the Python standard library.
 
