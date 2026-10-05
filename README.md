@@ -407,6 +407,7 @@ There are 236 checks in 10 tests: file operations (copy, move, merge, delete, ca
 | `tests/` | The test suite (see [Tests](#tests)) |
 | `bench/` | The benchmark against GNOME Files and Nemo (see Performance: [vs GNOME Files](#performance-kestrel-vs-gnome-files), [vs Nemo](#performance-kestrel-vs-nemo)) |
 | `pyproject.toml` | PyPI packaging metadata (not ready for release yet — see [PACKAGING.md](PACKAGING.md)) |
+| `.github/workflows/pypi.yml` | Publishes to PyPI by hand, with trusted publishing (see [PACKAGING.md](PACKAGING.md)) |
 
 ## Performance: Kestrel vs GNOME Files
 
