@@ -188,6 +188,9 @@ check(ok(h.call({"op": "symlink", "target": "w.txt", "link": J(W, "sl")})) and o
       and ok(h.call({"op": "hardlink", "target": J(W, "w.txt"), "link": J(W, "hl")}))
       and read_file(J(W, "hl")) == b"hello",
       "symlink and hardlink make links")
+other = h.call({"op": "hardlink", "target": "/etc/hostname", "link": J(W, "not-mine")})
+check(not ok(other) and "isn't yours" in other.get("error", "") and not os.path.exists(J(W, "not-mine")),
+      "hardlink refuses a file that isn't the user's (the helper's own rule, before the kernel's)")
 check(ok(h.call({"op": "chmod", "path": J(W, "c.txt"), "mode": 0o640})) and mode_of(J(W, "c.txt")) == 0o640,
       "chmod changes permissions")
 check(ok(h.call({"op": "delete", "path": J(W, "tree3")})) and not os.path.exists(J(W, "tree3")),

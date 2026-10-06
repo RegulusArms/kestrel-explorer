@@ -22,6 +22,11 @@ folder for a symlink). So the helper never trusts a path string:
 - Recursive copy and delete go folder by folder through open descriptors, and stop if anything changed under them.
 - One policy, POLICY below, says which paths an operation may delete, replace or change: never the protected folders,
   top-level folders (/data) or home folders themselves (/home/name). It's checked on the real path walked.
+- hardlink links only the user's own files: a second name for, say, /etc/shadow in their folder would let a later
+  chmod or write there change the real file.
+- A copy root makes is root's, so it drops set-user-ID and set-group-ID from a file that wasn't root's (else a user's
+  program would become a set-user-ID root program). A move between drives keeps the owner instead.
+- A mount point is never deleted (that would empty the drive mounted there), nor is another drive inside a tree.
 """
 import ctypes
 import errno
@@ -168,6 +173,12 @@ def walk(path, make_parents=False):
     raise OSError(errno.ELOOP, os.strerror(errno.ELOOP))
 
 
+def _session_uid():
+    """The user the session is for: pkexec says who started it (as root, getuid() is 0); run directly, the caller."""
+    v = os.environ.get("PKEXEC_UID", "")
+    return int(v) if v.isdigit() else os.getuid()
+
+
 def _path_arg(req, key):
     p = req.get(key)
     if not isinstance(p, str) or not p.startswith("/"):
@@ -197,11 +208,20 @@ def _copy_data(src, dst):
             view = view[n:]
 
 
-def _copy_stat_fd(fd, st):
-    """The permissions and times of an open file or folder (on a descriptor: never through a symlink)."""
+def _copy_stat_fd(fd, st, keep_owner):
+    """The permissions and times of an open file or folder (on a descriptor: never through a symlink); keep_owner
+    (a move): its owner too."""
+    mode = stat.S_IMODE(st.st_mode)
     try:
         os.utime(fd, ns=(st.st_atime_ns, st.st_mtime_ns))
-        os.chmod(fd, stat.S_IMODE(st.st_mode))
+        if keep_owner:
+            os.chown(fd, st.st_uid, st.st_gid)  # first: chown clears set-user-ID, which chmod then puts back
+        elif stat.S_ISREG(st.st_mode) and st.st_uid != os.geteuid():
+            mode &= ~(stat.S_ISUID | stat.S_ISGID)  # a copy of someone else's set-user-ID program mustn't run as us
+    except OSError:
+        pass
+    try:
+        os.chmod(fd, mode)
     except OSError:
         pass
 
@@ -244,6 +264,8 @@ class Job:
     def remove(self, dirfd, name):
         """Delete `name` in dirfd, and everything in it, without leaving the filesystem it's on."""
         st = os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+        if stat.S_ISDIR(st.st_mode) and os.fstat(dirfd).st_dev != st.st_dev:
+            raise Failure(f"{name} is a mount point (another drive); not deleting it")
         self._remove_tree(dirfd, name, st, st.st_dev)
         self.done += 1
 
@@ -264,7 +286,7 @@ class Job:
         else:  # a file or a symlink: the name itself
             os.unlink(name, dir_fd=dirfd)
 
-    def copy(self, src_dir, src, dst_dir, dst, merge):
+    def copy(self, src_dir, src, dst_dir, dst, merge, keep_owner=False):
         st = os.stat(src, dir_fd=src_dir, follow_symlinks=False)
         dst_st = _stat_at(dst_dir, dst)
         if dst_st is not None and stat.S_ISDIR(dst_st.st_mode) and not stat.S_ISDIR(st.st_mode):
@@ -276,6 +298,8 @@ class Job:
             os.symlink(target, dst, dir_fd=dst_dir)
             try:
                 os.utime(dst, ns=(st.st_atime_ns, st.st_mtime_ns), dir_fd=dst_dir, follow_symlinks=False)
+                if keep_owner:
+                    os.chown(dst, st.st_uid, st.st_gid, dir_fd=dst_dir, follow_symlinks=False)
             except OSError:
                 pass
         elif stat.S_ISDIR(st.st_mode):
@@ -291,8 +315,8 @@ class Job:
                 dst_fd = _open_dir_at(dst_dir, dst, os.stat(dst, dir_fd=dst_dir, follow_symlinks=False))
                 try:
                     for e in os.listdir(src_fd):
-                        self.copy(src_fd, e, dst_fd, e, merge)
-                    _copy_stat_fd(dst_fd, st)
+                        self.copy(src_fd, e, dst_fd, e, merge, keep_owner)
+                    _copy_stat_fd(dst_fd, st, keep_owner)
                 finally:
                     os.close(dst_fd)
             finally:
@@ -309,7 +333,7 @@ class Job:
                                  dir_fd=dst_dir)
                 try:
                     _copy_data(in_fd, out_fd)
-                    _copy_stat_fd(out_fd, st)
+                    _copy_stat_fd(out_fd, st, keep_owner)
                 finally:
                     os.close(out_fd)
             finally:
@@ -324,13 +348,21 @@ class Job:
         if not merge and st is not None and st.st_dev == os.fstat(dst.dir).st_dev:
             if _stat_at(dst.dir, dst.name) is not None:
                 self.remove(dst.dir, dst.name)
-            try:
-                os.rename(src.name, dst.name, src_dir_fd=src.dir, dst_dir_fd=dst.dir)
+            # no-replace: something that appeared there since isn't silently replaced
+            r = _libc.renameat2(src.dir, os.fsencode(src.name), dst.dir, os.fsencode(dst.name), RENAME_NOREPLACE)
+            e = ctypes.get_errno() if r != 0 else 0
+            if r != 0 and e == errno.EINVAL:  # a filesystem without RENAME_NOREPLACE
+                try:
+                    os.rename(src.name, dst.name, src_dir_fd=src.dir, dst_dir_fd=dst.dir)
+                    r = 0
+                except OSError:
+                    pass
+            if r == 0:
                 self.done = self.total
                 return
-            except OSError:
-                pass
-        self.copy(src.dir, src.name, dst.dir, dst.name, merge)
+            if e == errno.EEXIST:
+                raise Failure(f"{dst.name} appeared while it was being replaced")
+        self.copy(src.dir, src.name, dst.dir, dst.name, merge, keep_owner=True)  # a move keeps the owner
         self.remove(src.dir, src.name)
 
 
@@ -394,8 +426,16 @@ def _run(op, req, w):
     elif op == "symlink":
         os.symlink(req["target"], w["link"].name, dir_fd=w["link"].dir)
     elif op == "hardlink":
+        # the file itself, opened without following a symlink: its owner is checked, and that same file is linked
+        # (through /proc/self/fd), so it can't be swapped for another between the check and the link
         t, link = w["target"], w["link"]
-        os.link(t.name, link.name, src_dir_fd=t.dir, dst_dir_fd=link.dir, follow_symlinks=False)
+        fd = os.open(t.name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=t.dir)
+        try:
+            if os.fstat(fd).st_uid != _session_uid():
+                raise PermissionError(f"refusing to hard-link a file that isn't yours: {t.path}")
+            os.link(f"/proc/self/fd/{fd}", link.name, dst_dir_fd=link.dir, follow_symlinks=True)
+        finally:
+            os.close(fd)
     elif op == "write":
         fd = _open_new_file(w["path"])
         try:
