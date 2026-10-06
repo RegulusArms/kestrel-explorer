@@ -679,7 +679,7 @@ def machine(other):
     return cpu, os.cpu_count(), version or OTHERS[other]["label"], distro
 
 
-def section(t1, t2, summary, runs, py_link, cxx_link, other):
+def section(t1, t2, summary, runs, py_link, cxx_link, bench_link, other):
     cpu, threads, version, distro = machine(other)
     label = OTHERS[other]["label"]
     owns = label + ("'" if label.endswith("s") else "'s")   # GNOME Files', Nemo's
@@ -720,7 +720,7 @@ Kestrel Explorer exists in two versions with the same features: the original [Py
 
 **Test machine:** {cpu} ({threads} threads), {distro}. The test data is on a RAM disk: 600 JPEGs at 1600×1200 with camera EXIF, 40 videos, 40 PDFs, 150 folders of 4 images, a tree of 50,000 files, 20,000 small files plus 250 MB, a folder of 10,000 files, and 200 PNGs with AI-generation metadata.
 
-**How it was measured:** each test ran {runs} times, and the tables show medians. Every run started with a fresh home folder, so the thumbnail cache was empty. All three apps ran on a headless X server with software rendering (Qt's raster engine, GTK's cairo renderer), on a private session bus where only the desktop's settings and virtual file system (gvfs) services could start, so no file indexer ran. The benchmark is in [bench/](bench) and is run with `bench/run.sh`.
+**How it was measured:** each test ran {runs} times, and the tables show medians. Every run started with a fresh home folder, so the thumbnail cache was empty. All three apps ran on a headless X server with software rendering (Qt's raster engine, GTK's cairo renderer), on a private session bus where only the desktop's settings and virtual file system (gvfs) services could start, so no file indexer ran. The benchmark is in [bench/]({bench_link}) and is run with `bench/run.sh`.
 
 ### Compared with {label}
 
@@ -760,11 +760,15 @@ def update_readmes(t1, t2, summary, runs, other):
     """Write the section for `other` into both READMEs: in place of its old one, or after the other Performance
     sections (a run on Linux Mint adds "vs Nemo" and leaves "vs GNOME Files" as it was)."""
     heading = OTHERS[other]["heading"]
-    for root, py_link, cxx_link in ((CXX_ROOT, "../kestrel-explorer", "."), (PY_ROOT, ".", "../kes-c")):
+    # the Python README is also PyPI's project page, where only absolute links work
+    gh = "https://github.com/RegulusArms"
+    for root, py_link, cxx_link, bench_link in (
+            (CXX_ROOT, "../kestrel-explorer", ".", "bench"),
+            (PY_ROOT, f"{gh}/kestrel-explorer", f"{gh}/kes-c", f"{gh}/kestrel-explorer/tree/main/bench")):
         path = os.path.join(root, "README.md")
         with open(path) as f:
             s = f.read()
-        text = section(t1, t2, summary, runs, py_link, cxx_link, other) + "\n"
+        text = section(t1, t2, summary, runs, py_link, cxx_link, bench_link, other) + "\n"
         if heading + "\n" in s:
             start = s.index(heading + "\n")
             end = s.index("\n## ", start + 1) + 1
