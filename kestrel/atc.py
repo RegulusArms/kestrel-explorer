@@ -17,7 +17,7 @@ import time
 
 from PyQt6.QtCore import QCoreApplication, QObject, QTimer, pyqtSignal
 
-from . import __version__, util
+from . import __version__, stats, util
 
 NAME = "kestrel_explorer.ATC"
 PATH = "/kestrel_explorer/ATC"
@@ -38,6 +38,83 @@ XML = """
 """
 LAND_MS = 10_000   # the tower lands this long after the last flight has left (or if none checks in)
 UNDO_MAX = 50
+
+# The protocol (the same in the C++ version). A flight checks in with {"pid", "impl", "version", "protocol"}; one
+# speaking another protocol is ignored (one that names none predates the version and speaks 1). Messages from other
+# programs on the session bus are checked by the tower and again by each radio: a JSON object of at most MAX_MESSAGE
+# bytes, a known "type", each known field of the right type, absolute paths. Unknown fields are allowed (and ignored),
+# so a newer Kestrel can add some.
+PROTOCOL = 1
+MAX_MESSAGE = 1 << 20
+
+# Each message type and its fields. A field that's missing is fine (the receiver uses a default); one that's there must
+# have this type. "paths": a list of absolute paths; "strs": a list of strings; "tasks": a list of tasks (TASK_FIELDS).
+TYPES = {
+    "settings": {},        # Preferences were saved
+    "sidebar": {},         # the sidebar's order or collapsed sections changed
+    "bookmarks": {},       # the GTK bookmarks changed
+    "starred": {},         # starred.json changed
+    "thumbs_cleared": {},  # the preview cache was cleared
+    "left": {},            # (the tower's) a flight has gone
+    "folders": {"paths": "paths"},   # folder colours, covers or previews changed
+    "tasks": {"tasks": "tasks"},     # keep: the flight's running jobs
+    "cancel": {"flight": "str", "task": "str"},   # cancel a job of that flight
+    "windows": {"count": "num", "active": "num"},   # keep: how many windows, when one was last used
+    "undo_changed": {"label": "str"},   # keep (the tower's): what Ctrl+Z would undo now
+    "open": {"flight": "str", "folders": "paths", "select": "strs", "token": "str"},   # (the tower's) a hand-off
+}
+TASK_FIELDS = {"id": "str", "title": "str", "text": "str", "fraction": "num", "cancellable": "bool",
+               "cancelling": "bool", "admin": "bool"}
+UNDO_KINDS = ("move", "rename", "trash", "create")
+TOWER_ONLY = ("left", "open", "undo_changed")   # a flight's report of these isn't passed on
+
+
+def _valid_field(v, kind):
+    if kind == "str":
+        return isinstance(v, str)
+    if kind == "num":
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+    if kind == "bool":
+        return isinstance(v, bool)
+    if not isinstance(v, list):
+        return False
+    if kind == "tasks":
+        return all(isinstance(e, dict) and _valid_fields(e, TASK_FIELDS) for e in v)
+    return all(isinstance(e, str) and (kind == "strs" or e.startswith("/")) for e in v)
+
+
+def _valid_fields(obj, fields):
+    return all(name not in obj or _valid_field(obj[name], kind) for name, kind in fields.items())
+
+
+def valid_message(msg):
+    """A Report / Broadcast message."""
+    return (isinstance(msg, dict) and isinstance(msg.get("type"), str) and msg["type"] in TYPES
+            and _valid_fields(msg, TYPES[msg["type"]]) and isinstance(msg.get("keep", False), bool))
+
+
+def valid_undo(op):
+    """A shared undo entry: {"kind", "label", "items": [[a, b], …]} (absolute paths; b is "" for trash and create)."""
+    if not (isinstance(op, dict) and op.get("kind") in UNDO_KINDS and isinstance(op.get("label"), str)
+            and isinstance(op.get("items"), list)):
+        return False
+    return all(isinstance(p, list) and len(p) == 2 and all(isinstance(x, str) for x in p) and p[0].startswith("/")
+               and (p[1] == "" or p[1].startswith("/")) for p in op["items"])
+
+
+def parse(raw):
+    """A JSON object from a message argument, or {} if it's too big or isn't one."""
+    if not isinstance(raw, str) or len(raw.encode()) > MAX_MESSAGE:
+        return {}
+    try:
+        obj = json.loads(raw)
+    except ValueError:
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def _speaks_our_protocol(info):
+    return "protocol" not in info or info.get("protocol") == PROTOCOL
 
 
 def _compact(obj):
@@ -82,14 +159,13 @@ def run_tower(argv):
             best, best_active = "", -1.0
             for name, msgs in kept.items():
                 w = msgs.get("windows") or {}
-                if name in flights and int(w.get("count", 0)) > 0 and float(w.get("active", 0)) > best_active:
+                if name in flights and _speaks_our_protocol(flights[name]) and int(w.get("count", 0)) > 0 \
+                        and float(w.get("active", 0)) > best_active:
                     best, best_active = name, float(w.get("active", 0))
+            msg = dict(parse(params.unpack()[0]), type="open", flight=best)
+            if not valid_message(msg):
+                best = ""  # not a hand-off: nobody takes it
             if best:
-                try:
-                    msg = json.loads(params.unpack()[0])
-                except ValueError:
-                    msg = {}
-                msg = dict(msg if isinstance(msg, dict) else {}, type="open", flight=best)
                 conn.emit_signal(None, PATH, IFACE, "Broadcast", GLib.Variant("(ss)", (conn.get_unique_name(),
                                                                                        _compact(msg))))
             invocation.return_value(GLib.Variant("(s)", (best,)))
@@ -100,29 +176,21 @@ def run_tower(argv):
             return
         arg = params.unpack()[0]
         if method == "CheckIn":
-            try:
-                info = json.loads(arg)
-            except ValueError:
-                info = {}
-            flights[sender] = info if isinstance(info, dict) else {}
+            flights[sender] = parse(arg)
         elif method == "UndoPush":
-            try:
-                op = json.loads(arg)
-            except ValueError:
-                op = None
-            if isinstance(op, dict) and op:
+            op = parse(arg)
+            if valid_undo(op) and _speaks_our_protocol(flights.get(sender, {})):
                 undo.append(op)
                 del undo[:-UNDO_MAX]
                 undo_changed(conn)
         else:   # Report: pass it on to every flight (the sender ignores its own)
             flights.setdefault(sender, {})
-            try:
-                msg = json.loads(arg)
-            except ValueError:
-                msg = None
-            if isinstance(msg, dict) and msg.get("keep"):   # state, not an event: remembered for later flights
-                kept.setdefault(sender, {})[str(msg.get("type", ""))] = msg
-            conn.emit_signal(None, PATH, IFACE, "Broadcast", GLib.Variant("(ss)", (sender, arg)))
+            msg = parse(arg)
+            # only a flight's own news: "left", "open" and "undo_changed" are the tower's
+            if valid_message(msg) and msg["type"] not in TOWER_ONLY and _speaks_our_protocol(flights[sender]):
+                if msg.get("keep"):   # state, not an event: remembered for flights that check in later
+                    kept.setdefault(sender, {})[msg["type"]] = msg
+                conn.emit_signal(None, PATH, IFACE, "Broadcast", GLib.Variant("(ss)", (sender, arg)))
         land.stop()
         invocation.return_value(None)
 
@@ -222,7 +290,8 @@ class Radio(QObject):
             msg["keep"] = True
             self._kept[type_] = msg
         if self._conn is not None and self._tower:
-            self._conn.call(NAME, PATH, IFACE, "Report", util.GLib.Variant("(s)", (_compact(msg),)), None,
+            sent = dict(msg, sent=float(time.time() * 1000)) if stats.enabled() else msg  # others ignore it unless counting
+            self._conn.call(NAME, PATH, IFACE, "Report", util.GLib.Variant("(s)", (_compact(sent),)), None,
                             util.Gio.DBusCallFlags.NONE, -1, None, None, None)
         own = dict(msg, own=True)
         QTimer.singleShot(0, lambda: self.heard.emit(own))
@@ -234,7 +303,7 @@ class Radio(QObject):
         if self._sub is None:
             self._sub = conn.signal_subscribe(None, IFACE, "Broadcast", PATH, None, Gio.DBusSignalFlags.NONE,
                                               self._broadcast)
-        info = {"pid": os.getpid(), "impl": "python", "version": __version__}
+        info = {"pid": os.getpid(), "impl": "python", "version": __version__, "protocol": PROTOCOL}
         conn.call(NAME, PATH, IFACE, "CheckIn", GLib.Variant("(s)", (_compact(info),)), None,
                   Gio.DBusCallFlags.NONE, -1, None, None, None)
         for msg in self._kept.values():   # a new tower: tell it our state again
@@ -253,7 +322,7 @@ class Radio(QObject):
         self.reset.emit()
         for e in entries if isinstance(entries, list) else []:
             msg = e.get("message") if isinstance(e, dict) else None
-            if not isinstance(msg, dict) or not msg.get("type") or e.get("flight") == me:
+            if not valid_message(msg) or e.get("flight") == me:
                 continue
             msg["from"] = e.get("flight")
             self.heard.emit(msg)
@@ -285,12 +354,11 @@ class Radio(QObject):
         flight, raw = params.unpack()
         if flight == conn.get_unique_name():
             return   # our own report: already delivered here by announce()
-        try:
-            msg = json.loads(raw)
-        except ValueError:
+        msg = parse(raw)
+        if not valid_message(msg):
             return
-        if not isinstance(msg, dict) or not msg.get("type"):
-            return
+        if isinstance(msg.get("sent"), (int, float)) and not isinstance(msg.get("sent"), bool):
+            stats.sample("tower delay (ms)", time.time() * 1000 - msg["sent"])  # KESTREL_STATS (both ends)
         msg["from"] = flight
         self.heard.emit(msg)
 

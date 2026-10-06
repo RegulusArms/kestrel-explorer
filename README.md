@@ -1,6 +1,6 @@
 # Kestrel Explorer
 
-**Version 0.2.1-alpha2.** This is an early alpha release, so expect rough edges.
+**Version 0.2.1-alpha3.** This is an early alpha release, so expect rough edges.
 
 > **Why do Linux users still need five separate utilities and a terminal to do normal filesystem work?**
 
@@ -395,10 +395,11 @@ Not every tool can report real progress, so the bar shows what each one can:
 
 ### Passwords and security
 
-- **7-Zip** (7z and zip) receives the password privately, on its standard input.
-- **`unrar`, `rar`, `zpaq` and `zip`** only accept a password on their command line. While the job runs, another user logged in to the same computer could see it in the process list. The dialogs say so when this applies.
+- **7-Zip, `rar` and `unrar`** receive the password privately, on their standard input.
+- **`zip` and `unzip`** (used only when 7-Zip isn't installed, or when you pick `zip` as the tool) receive it in an environment variable (`ZIPOPT`, `UNZIP`), which only you and the administrator can read. `unzip` can't take a password that starts with `-`.
+- **`zpaq`** only accepts a password on its command line. While the job runs, another user logged in to the same computer could see it in the process list. The Compress dialog says so when you pick zpaq.
 - **ZipCrypto** is weak encryption; use AES-256 (the default) unless the archive must open in very old tools.
-- **Links that point outside the extraction folder** (for example to `/etc/...`) aren't recreated as-is: 7-Zip re-roots them inside the folder and `unrar` skips them. This protects you from malicious archives.
+- **Links that point outside the extraction folder** (for example to `/etc/...`) aren't recreated as-is: 7-Zip re-roots them inside the folder and `unrar` skips them. This protects you from malicious archives. Kestrel relies on the tools here (it doesn't extract archives itself), so the tests extract crafted archives (`../` names, absolute paths, a symlink and then a file written through it) with tar, 7-Zip and unrar, and check that nothing lands outside the destination (tested with tar 1.35, 7-Zip 23.01 and 26.00, unrar 7.00 and 7.20).
 
 ### Known limitations
 
@@ -436,7 +437,9 @@ Move to Trash itself doesn't run as administrator: if an item can't be trashed, 
 ### Safety
 
 - **Only the Kestrel window that started the helper can talk to it.** It reads requests from a private pipe and exits as soon as that pipe closes, including if Kestrel crashes.
-- **It only accepts a fixed set of file operations,** on absolute paths. It refuses to delete or replace `/`, top-level folders (`/usr`, `/etc`, `/home`, `/var`, and any other folder directly under `/`) and home folders themselves (`/home/name`).
+- **It only accepts a fixed set of file operations,** on absolute paths. It refuses to delete, replace or change the permissions of `/`, top-level folders (`/usr`, `/etc`, `/home`, `/var`, and any other folder directly under `/`) and home folders themselves (`/home/name`). One table in the helper lists what each operation may do to each of its paths.
+- **It can't be redirected by a symlink.** Files can change while root works on them: another user, or a program, could swap a folder for a symlink to `/etc`. So the helper never trusts a path as text. It opens each folder on the way one at a time without following symlinks, then works on the name inside the folder it opened. It follows a symlink on the way only if root controls it (owned by root, in a folder only root can write to), such as `/lib` → `usr/lib`. Kestrel resolves your own symlinked folders first, so those keep working. Recursive copies and deletes go folder by folder the same way, and stop if a folder is swapped while they run.
+- **It won't hand out root by accident.** A copy it makes is root's, so it drops the set-user-ID bit from someone else's program (a move between drives keeps the owner instead). It only hard-links your own files, and never deletes a mount point (the drive mounted there would be emptied).
 - **The trade-off:** the helper runs from the Kestrel folder, which your account can edit. Anything running as you could change that file before your next admin session. That's the same level of trust as typing `sudo` in your own terminal, which is fine on a personal computer.
 
 ## Tests
@@ -446,7 +449,7 @@ tests/run.sh                  # every test
 tests/run.sh fileops atc_undo # only some
 ```
 
-There are 236 checks in 10 tests: file operations (copy, move, merge, delete, cancel, trash, links, undo), the tower that keeps several Kestrels in sync (shared changes, the shared task list, shared undo, opening folders as tabs), phones and cameras, rearranging the sidebar, following the desktop theme, the file chooser, and `install.sh`. Each test runs with a throwaway home folder on a private D-Bus bus, so your files, settings, dock and open windows are never touched. The [C++ version](https://github.com/RegulusArms/kes-c/tree/main/tests) has the same tests, and some checks launch the other version to test the two together. Details: [tests/README.md](https://github.com/RegulusArms/kestrel-explorer/blob/main/tests/README.md).
+There are 298 checks in 13 tests: file operations (copy, move, merge, delete, cancel, trash, links, undo), the tower that keeps several Kestrels in sync (shared changes, the shared task list, shared undo, opening folders as tabs), phones and cameras, rearranging the sidebar, following the desktop theme, the file chooser, the admin helper that runs as root, every menu entry and shortcut and screen-reader names, parsing that must match between the versions, and `install.sh`. Each test runs with a throwaway home folder on a private D-Bus bus, so your files, settings, dock and open windows are never touched. The [C++ version](https://github.com/RegulusArms/kes-c/tree/main/tests) has the same tests, and some checks launch the other version to test the two together. Details: [tests/README.md](https://github.com/RegulusArms/kestrel-explorer/blob/main/tests/README.md).
 
 ## Architecture
 
@@ -504,6 +507,9 @@ Kestrel isn't single-instance: a folder opened from another app may start a Kest
        │   covers, bookmarks, cleared caches                           │
        │ • hands folders to an open window ("open folders as tabs")    │
        │                                                               │
+       │ Checks every message (protocol version, known types and       │
+       │ fields, absolute paths, size); so does each Kestrel.          │
+       │                                                               │
        │ Never touches files, and runs no jobs. Started by the first   │
        │ Kestrel, gone shortly after the last one leaves.              │
        └───────────────────────────────────────────────────────────────┘
@@ -526,7 +532,11 @@ The C++ and Python versions speak the same protocol (JSON messages), so A and B 
 
 | File | Purpose |
 |---|---|
-| `kestrel/app.py` | Main window, tabs, browser pane (including the combined trash view), actions, context menus |
+| `kestrel/app.py` | Main window: tabs, toolbar, menus and shortcuts, context menus, preferences, starting up |
+| `kestrel/actions.py` | The main window's file actions (a class `MainWindow` inherits): clipboard, drops, new files and folders, rename, trash and delete, restore, links |
+| `kestrel/opening.py` | Opening files and folders (a class `MainWindow` inherits): what double-click and Enter do (folders, archives, images, videos, other files, as Preferences says), Quick View, the image viewer |
+| `kestrel/incoming.py` | Requests from outside this Kestrel: changes other Kestrels report through the tower, folders handed over to open as tabs, and other apps' "Show in folder" (FileManager1) |
+| `kestrel/pane.py` | The browser pane in each tab: grid and list views, the overview page, the combined trash, Starred and Recent, search, history, selection |
 | `kestrel/widgets.py` | File-system model, grid delegate, path bar, sidebar, info panel, search |
 | `kestrel/thumbs.py` | Background thumbnail and folder-mosaic generation and caching |
 | `kestrel/viewer.py` | Image viewer |
@@ -553,6 +563,10 @@ The C++ and Python versions speak the same protocol (JSON messages), so A and B 
 | `bench/` | The benchmark against GNOME Files and Nemo (see Performance: [vs GNOME Files](#performance-kestrel-vs-gnome-files), [vs Nemo](#performance-kestrel-vs-nemo)) |
 | `pyproject.toml` | PyPI packaging metadata (see [PACKAGING.md](https://github.com/RegulusArms/kestrel-explorer/blob/main/PACKAGING.md)) |
 | `.github/workflows/pypi.yml` | Publishes to PyPI by hand, with trusted publishing (see [PACKAGING.md](https://github.com/RegulusArms/kestrel-explorer/blob/main/PACKAGING.md)) |
+
+## Performance counters
+
+Run Kestrel with `KESTREL_STATS=1` (for example `KESTREL_STATS=1 kes ~/Pictures`) and it prints a summary to the terminal when you quit it normally: how long folders took to list, thumbnails and folder previews taken from the disk cache versus made, the longest thumbnail queue, copy speed, how long archive jobs took, how long messages from other Kestrels took through the tower, and the most tasks at once. Off (the default), it costs nothing measurable. Both versions count the same things and print them the same way.
 
 ## Performance: Kestrel vs GNOME Files
 

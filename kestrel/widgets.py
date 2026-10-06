@@ -426,6 +426,7 @@ class PathBar(QWidget):
         self.edit_btn = QToolButton()
         self.edit_btn.setIcon(util.theme_icon("document-edit-symbolic", "edit-symbolic", "document-edit"))
         self.edit_btn.setToolTip("Type a location (Ctrl+L)")
+        self.edit_btn.setAccessibleName("Type a location")
         self.edit_btn.setAutoRaise(True)
         self.edit_btn.clicked.connect(lambda: self.cancel_edit() if self.edit.isVisible() else self.start_edit())
         lay.addWidget(self.crumb_box, 1)
@@ -597,6 +598,7 @@ class Sidebar(QListWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setAccessibleName("Sidebar")
         self.setIconSize(QSize(18, 18))
         self.setFrameShape(QListWidget.Shape.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)

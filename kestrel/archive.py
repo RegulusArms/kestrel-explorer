@@ -10,6 +10,7 @@ bytes Kestrel pipes through them, Cancel kills the whole process group, and part
 Passwords go to 7z on stdin. unrar, rar and zpaq only accept them as a command-line switch, which other
 local users could read from the process list while the job runs.
 """
+import functools
 import os
 import re
 import select
@@ -19,8 +20,7 @@ import signal
 import subprocess
 import time
 
-from . import util
-from .fileops import Cancelled
+from . import stats, util
 
 _SYSTEM_PATH = "/usr/local/bin:/usr/bin:/bin"
 # English messages (Kestrel parses them) but UTF-8 file names: under plain LC_ALL=C, rar stores non-ASCII names as
@@ -228,9 +228,24 @@ def archive_stem(path):
 
 # ---------------------------------------------------------------- running tools
 
-def _start(argv, cwd=None, stdin=None, stdout=subprocess.PIPE):
-    return subprocess.Popen(argv, cwd=cwd, stdin=stdin if stdin is not None else subprocess.DEVNULL,
-                            stdout=stdout, stderr=subprocess.STDOUT, start_new_session=True, env=_ENV)
+class _Tool(subprocess.Popen):
+    """A running tool. When nothing refers to it any more while it still runs, it's stopped, with its process group
+    (as a C++ proc::Process is when destroyed)."""
+
+    def __del__(self):
+        if self.returncode is None and self.poll() is None:
+            try:
+                os.killpg(self.pid, signal.SIGKILL)
+                self.wait()
+            except (ProcessLookupError, PermissionError):
+                pass
+        super().__del__()
+
+
+def _start(argv, cwd=None, stdin=None, stdout=subprocess.PIPE, env=None):
+    """env: extra variables (replacing the environment's own)."""
+    return _Tool(argv, cwd=cwd, stdin=stdin if stdin is not None else subprocess.DEVNULL,
+                 stdout=stdout, stderr=subprocess.STDOUT, start_new_session=True, env={**_ENV, **(env or {})})
 
 
 def _kill(*procs):
@@ -251,7 +266,7 @@ def _elapsed(seconds):
 _ZIP_COUNT = re.compile(rb"(\d+)/\s*(\d+) ")
 
 
-def _run_reporting(task, argv, label, cwd=None, stdin_text=None, read_phase=None, progress="percent"):
+def _run_reporting(task, argv, label, cwd=None, stdin_text=None, read_phase=None, progress="percent", env=None):
     """Run a tool, turning its output into progress. Returns (exit code, output text).
 
     progress: "percent" for tools printing an overall "NN%" (7z, rar, unrar, zpaq); "zipcount" for zip -dc's
@@ -266,16 +281,16 @@ def _run_reporting(task, argv, label, cwd=None, stdin_text=None, read_phase=None
     reaches 100% while the real work carries on silently; the bar then shows busy instead of a stuck number."""
     if tool("stdbuf"):
         argv = [tool("stdbuf"), "-o0", "-e0"] + list(argv)
-    p = _start(argv, cwd=cwd, stdin=subprocess.PIPE if stdin_text is not None else None)
-    if stdin_text is not None:
-        try:
-            p.stdin.write(stdin_text.encode())
-            p.stdin.close()
-        except BrokenPipeError:
-            pass
+    p = _start(argv, cwd=cwd, stdin=subprocess.PIPE if stdin_text is not None else None, env=env)
     out = bytearray()
     start, pct, carry = time.monotonic(), None, b""
     try:
+        if stdin_text is not None:
+            try:
+                p.stdin.write(stdin_text.encode())
+                p.stdin.close()
+            except BrokenPipeError:
+                pass
         fd = p.stdout.fileno()
         while True:
             task.check()
@@ -307,7 +322,7 @@ def _run_reporting(task, argv, label, cwd=None, stdin_text=None, read_phase=None
             else:
                 task.report(0, 0, f"{label}{clock}")
         p.wait()
-    except Cancelled:
+    except BaseException:  # cancelled, or any other error: the tool mustn't carry on unseen
         _kill(p)
         raise
     return p.returncode, out.decode(errors="replace")
@@ -339,14 +354,23 @@ def _safe_rels(rels):
     return ["./" + r if r.startswith("-") else r for r in rels]
 
 
+def _env_password(option, pw):
+    """ZIPOPT / UNZIP: -P "pw", quoted."""
+    q = pw.replace("\\", "\\\\").replace('"', '\\"')
+    return {option: f'-P "{q}"'}
+
+
 def compress_command(spec):
-    """(argv, stdin text, display argv with the password masked, cwd) for 7z/zip/rar/zpaq/tar jobs.
-    Stream formats are built by _stream_commands()."""
+    """(argv, stdin text, environment, display argv with the password masked, cwd) for 7z/zip/rar/zpaq/tar jobs.
+    Stream formats are built by _stream_commands().
+
+    A password goes to the tool on its stdin (7z, rar) or in an environment variable (zip), which only the same user
+    can read; on the command line, every user could see it in the process list. zpaq has no other way."""
     fmt, t = spec["format"], spec["tool"]
     base, rels, out = spec["base"], _safe_rels(spec["rels"]), spec["out"]
     pw, lvl, thr = spec.get("password") or "", spec.get("level"), spec.get("threads") or 0
     extra = spec.get("extra") or []
-    stdin, secret = None, None
+    stdin, secret, env = None, None, {}
     if t == "7z":
         argv = [_exe("7z"), "a", "-y", "-bso0", "-bsp1", "-bse1", "-snl",  # -snl: keep symlinks as links
                 f"-t{'7z' if fmt['id'] == '7z' else 'zip'}", f"-mx={lvl}"]
@@ -370,8 +394,7 @@ def compress_command(spec):
     elif t == "zip":
         argv = [_exe("zip"), "-r", "-y", "-dc", f"-{lvl}"]  # -dc: "done/remaining" count per file
         if pw:
-            argv += ["-P", pw]
-            secret = pw
+            env = _env_password("ZIPOPT", pw)
         argv += extra + [out, "--"] + rels
     elif t == "rar":
         argv = [_exe("rar"), "a", "-y", "-idc", "-idd", "-ol", f"-m{lvl}", "-r"]  # -ol: keep symlinks as links
@@ -383,9 +406,9 @@ def compress_command(spec):
             argv.append(f"-rr{spec['recovery']}%")
         if spec.get("volume_mb"):
             argv.append(f"-v{spec['volume_mb']}m")
-        if pw:
-            argv.append(f"-{'hp' if spec.get('encrypt_names') else 'p'}{pw}")
-            secret = pw
+        if pw:  # -p / -hp without a value: rar reads the password from stdin
+            argv.append("-hp" if spec.get("encrypt_names") else "-p")
+            stdin = f"{pw}\n{pw}\n"
         argv += extra + ["--", out] + rels
     elif t == "zpaq":
         argv = [_exe("zpaq"), "add", out] + rels + [f"-m{lvl}"]
@@ -400,7 +423,7 @@ def compress_command(spec):
     else:
         raise ValueError(t)
     display = [a.replace(secret, "•" * 8) for a in argv] if secret else list(argv)
-    return argv, stdin, display, base
+    return argv, stdin, env, display, base
 
 
 def _stream_compressor(spec):
@@ -422,13 +445,15 @@ def command_preview(spec):
         if fmt.get("single"):
             return f"{comp} < {src} > {shlex.quote(os.path.basename(spec['out']))}"
         return f"tar -cf - -- {src} | {comp} > {shlex.quote(os.path.basename(spec['out']))}"
-    _, _, display, _ = compress_command(spec)
+    _, _, _, display, _ = compress_command(spec)
     out_rel = os.path.relpath(spec["out"], spec["base"])  # the tool runs in the source folder
     text = shlex.join([os.path.basename(display[0])] + [out_rel if a == spec["out"] else a for a in display[1:]])
     if fmt["id"] == "tar":
         text += f" > {shlex.quote(os.path.basename(spec['out']))}"
-    if spec.get("password") and spec["tool"] == "7z":
+    if spec.get("password") and spec["tool"] in ("7z", "rar"):
         text += "    (password passed on stdin)"
+    elif spec.get("password") and spec["tool"] == "zip":
+        text += "    (password passed in the ZIPOPT environment variable)"
     return text
 
 
@@ -442,6 +467,19 @@ def _volume_files(out):
         return []
 
 
+def _job_clock(fn):
+    """KESTREL_STATS: how long a compress or extract job took (however it ends)."""
+    @functools.wraps(fn)
+    def run(*args, **kw):
+        started = stats.now_ms()
+        try:
+            return fn(*args, **kw)
+        finally:
+            stats.sample("archive job (s)", (stats.now_ms() - started) / 1000)
+    return run
+
+
+@_job_clock
 def compress(task, spec):
     """Create the archive described by spec (see archive_ui.CompressDialog.spec()). Returns the output path."""
     fmt, out = spec["format"], spec["out"]
@@ -450,13 +488,13 @@ def compress(task, spec):
         if fmt.get("stream"):
             _compress_stream(task, spec, label)
         else:
-            argv, stdin, _, cwd = compress_command(spec)
+            argv, stdin, env, _, cwd = compress_command(spec)
             if fmt["id"] == "tar":
                 _compress_tar_plain(task, argv, cwd, out, spec["total"], label)
             else:
                 rc, text = _run_reporting(task, argv, label, cwd=cwd, stdin_text=stdin, read_phase=(
                     "compressing (zpaq reports no progress for this step)" if spec["tool"] == "zpaq" else None),
-                    progress="zipcount" if spec["tool"] == "zip" else "percent")
+                    progress="zipcount" if spec["tool"] == "zip" else "percent", env=env)
                 ok = rc == 0 or (spec["tool"] in ("7z", "rar") and rc == 1)  # 1 = warnings (e.g. a locked file)
                 if not ok:
                     raise RuntimeError(_tail(text) or f"{os.path.basename(argv[0])} failed (exit code {rc})")
@@ -562,7 +600,7 @@ def probe(path):
 # overwrite policies: "overwrite", "skip", "rename"
 def _extract_command(path, dest, password, overwrite, threads):
     t = extract_tool(path)
-    stdin = None
+    stdin, env = None, {}
     if t == "7z":
         argv = [tool("7z"), "x", "-y", "-bso0", "-bsp1", "-bse1", f"-o{dest}",
                 {"overwrite": "-aoa", "skip": "-aos", "rename": "-aou"}[overwrite]]
@@ -572,11 +610,15 @@ def _extract_command(path, dest, password, overwrite, threads):
         stdin = (password or "") + "\n"  # no -p switch: on extract a bare -p means "empty password"
     elif t == "unzip":
         argv = [tool("unzip"), {"overwrite": "-o", "skip": "-n", "rename": "-n"}[overwrite]]
-        argv += (["-P", password] if password else []) + ["--", path, "-d", dest]
+        if password:
+            env = _env_password("UNZIP", password)
+        argv += ["--", path, "-d", dest]
     elif t == "unrar":
         argv = [tool("unrar"), "x", "-y", "-idc", "-idd",
                 {"overwrite": "-o+", "skip": "-o-", "rename": "-or"}[overwrite],
-                f"-p{password}" if password else "-p-"]
+                "-p" if password else "-p-"]  # -p without a value: unrar reads the password from stdin; -p-: none
+        if password:
+            stdin = f"{password}\n"
         if threads:
             argv.append(f"-mt{threads}")
         argv += ["--", path, dest.rstrip("/") + "/"]
@@ -588,9 +630,10 @@ def _extract_command(path, dest, password, overwrite, threads):
             argv += ["-key", password]
     else:
         raise ValueError(t)
-    return t, argv, stdin
+    return t, argv, stdin, env
 
 
+@_job_clock
 def extract(task, path, dest, password=None, overwrite="rename", threads=0):
     """Extract `path` into the existing folder `dest`. Raises WrongPassword, RuntimeError or Cancelled."""
     path = first_volume(path)
@@ -598,9 +641,9 @@ def extract(task, path, dest, password=None, overwrite="rename", threads=0):
     label = f"Extracting {os.path.basename(path)}"
     if k in ("tar", "single"):
         return _extract_stream(task, path, dest, k, suf, overwrite, label)
-    t, argv, stdin = _extract_command(path, dest, password, overwrite, threads)
+    t, argv, stdin, env = _extract_command(path, dest, password, overwrite, threads)
     rc, text = _run_reporting(task, argv, label, stdin_text=stdin,
-                              progress=None if t == "unzip" else "percent")  # unzip's % are ratios
+                              progress=None if t == "unzip" else "percent", env=env)  # unzip's % are ratios
     wrong = (t == "unrar" and rc == 11) or "Wrong password" in text or "password incorrect" in text or \
         "incorrect password" in text.lower() or (t == "unzip" and "incorrect password" in text)
     if wrong:

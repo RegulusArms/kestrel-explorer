@@ -13,6 +13,8 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN="$HOME/.local/bin/kes"
 DESKTOP="$HOME/.local/share/applications/kestrel-explorer.desktop"
+# the app icon ("kestrel-explorer", data/icons), in the user's icon theme
+ICONS="$HOME/.local/share/icons/hicolor"
 # --default and --dock (and putting back what they changed) are done by kes-setup, which the .deb installs as well
 SETUP="$HERE/kes-setup"
 # the file chooser's portal definition (xdg-desktop-portal reads those only from /usr/share): --default installs it
@@ -65,7 +67,7 @@ portal_root() {   # run a command on the portal folder: with sudo unless it is w
 }
 
 if (( UNINSTALL )); then
-    rm -f "$BIN" "$DESKTOP" "$LEGACY_BIN" "$LEGACY_DESKTOP"
+    rm -f "$BIN" "$DESKTOP" "$LEGACY_BIN" "$LEGACY_DESKTOP" "$ICONS"/*/apps/kestrel-explorer.png
     # the portal definition, unless the .deb installed it (apt removes that one)
     if [[ -f "$PORTAL_FILE" ]] && ! dpkg -S "$PORTAL_FILE" >/dev/null 2>&1; then
         portal_root rm -f "$PORTAL_FILE" || echo "Couldn't remove $PORTAL_FILE; delete it with sudo." >&2
@@ -120,6 +122,14 @@ command -v ffmpeg >/dev/null || echo "Tip: 'sudo apt install ffmpeg' for video t
 mkdir -p "$(dirname "$BIN")" "$(dirname "$DESKTOP")"
 rm -f "$LEGACY_BIN" "$LEGACY_DESKTOP"
 ln -sf "$HERE/kes" "$BIN"
+# the app icon, every size, into the user's icon theme (the menu entry, the dock and the windows use it)
+for dir in "$HERE"/data/icons/hicolor/*/apps; do
+    size="$(basename "$(dirname "$dir")")"
+    mkdir -p "$ICONS/$size/apps"
+    cp "$dir/kestrel-explorer.png" "$ICONS/$size/apps/"
+done
+touch "$ICONS"   # GTK re-reads a theme folder that changed; an existing icon cache is brought up to date
+[[ -f "$ICONS/icon-theme.cache" ]] && { gtk-update-icon-cache -q -f -t "$ICONS" 2>/dev/null || true; }
 cat > "$DESKTOP" <<DESK
 [Desktop Entry]
 Type=Application
@@ -127,7 +137,7 @@ Name=Kestrel Explorer
 GenericName=File Manager
 Comment=Manage files, with archive, admin, permission and metadata tools built in
 Exec=$BIN %U
-Icon=folder
+Icon=kestrel-explorer
 Terminal=false
 Categories=System;FileTools;FileManager;Viewer;
 MimeType=inode/directory;x-directory/normal;x-scheme-handler/trash;

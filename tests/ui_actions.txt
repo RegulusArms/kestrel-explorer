@@ -1,0 +1,241 @@
+button "Menu" > File
+button "Menu" > File > New Window [Ctrl+N]
+button "Menu" > File > New Tab [Ctrl+T]
+button "Menu" > File > Close Tab [Ctrl+W]
+button "Menu" > File > ---
+button "Menu" > File > New Folder… [Ctrl+Shift+N]
+button "Menu" > File > New Empty File… [Ctrl+Alt+N]
+button "Menu" > File > Open Terminal Here [Ctrl+Alt+T]
+button "Menu" > File > ---
+button "Menu" > File > Bookmark This Location [Ctrl+D]
+button "Menu" > File > Properties of This Folder
+button "Menu" > File > ---
+button "Menu" > File > Quit [Ctrl+Q]
+button "Menu" > Edit
+button "Menu" > Edit > Undo [Ctrl+Z]
+button "Menu" > Edit > ---
+button "Menu" > Edit > Cut [Ctrl+X]
+button "Menu" > Edit > Copy [Ctrl+C]
+button "Menu" > Edit > Paste [Ctrl+V]
+button "Menu" > Edit > Paste as Link [Ctrl+Shift+V]
+button "Menu" > Edit > ---
+button "Menu" > Edit > Select All [Ctrl+A]
+button "Menu" > Edit > Invert Selection [Ctrl+Shift+I]
+button "Menu" > Edit > ---
+button "Menu" > Edit > Rename… [F2]
+button "Menu" > Edit > Duplicate [Ctrl+Shift+D]
+button "Menu" > Edit > Move to Trash [Del]
+button "Menu" > Edit > Delete Permanently [Shift+Del]
+button "Menu" > Edit > Copy Path [Ctrl+Shift+C]
+button "Menu" > Edit > ---
+button "Menu" > Edit > Properties [Alt+Return, Ctrl+I]
+button "Menu" > View
+button "Menu" > View > Grid View [Ctrl+1]
+button "Menu" > View > List View [Ctrl+2]
+button "Menu" > View > ---
+button "Menu" > View > Zoom In [Ctrl++, Ctrl+=]
+button "Menu" > View > Zoom Out [Ctrl+-]
+button "Menu" > View > Reset Zoom [Ctrl+0]
+button "Menu" > View > ---
+button "Menu" > View > Toggle Folder Previews [Ctrl+Shift+P]
+button "Menu" > View > Show Hidden Files [Ctrl+H] (toggle)
+button "Menu" > View > Sidebar [F9] (toggle)
+button "Menu" > View > Info Panel [F3] (toggle)
+button "Menu" > View > Fullscreen [F11]
+button "Menu" > View > Reload [F5, Ctrl+R]
+button "Menu" > Go
+button "Menu" > Go > Back [Alt+Left, Backspace]
+button "Menu" > Go > Forward [Alt+Right]
+button "Menu" > Go > Parent Folder [Alt+Up]
+button "Menu" > Go > Open Selected [Alt+Down]
+button "Menu" > Go > Homepage [Alt+Home]
+button "Menu" > Go > Home Folder
+button "Menu" > Go > Overview (Drives & Bookmarks)
+button "Menu" > Go > Enter Location… [Ctrl+L, F6]
+button "Menu" > Go > Search [Ctrl+F]
+button "Menu" > Go > Next Tab [Ctrl+PgDown, Ctrl+Tab]
+button "Menu" > Go > Previous Tab [Ctrl+PgUp, Ctrl+Shift+Tab]
+button "Menu" > ---
+button "Menu" > Preferences… [Ctrl+,]
+button "Menu" > Start Admin Session…
+button "Menu" > Clear Folder Preview Cache
+button "Menu" > Delete All Thumbnails…
+button "Menu" > Keyboard Shortcuts [F1]
+button "Menu" > About
+button "Admin session open: administrator actions don't ask for your password again." > End Admin Session
+shortcut > Back [Alt+Left, Backspace]
+shortcut > Bookmark This Location [Ctrl+D]
+shortcut > Close Tab [Ctrl+W]
+shortcut > Copy Path [Ctrl+Shift+C]
+shortcut > Copy [Ctrl+C]
+shortcut > Cut [Ctrl+X]
+shortcut > Delete Permanently [Shift+Del]
+shortcut > Duplicate [Ctrl+Shift+D]
+shortcut > Enter Location… [Ctrl+L, F6]
+shortcut > Forward [Alt+Right]
+shortcut > Fullscreen [F11]
+shortcut > Grid View [Ctrl+1]
+shortcut > Homepage [Alt+Home]
+shortcut > Info Panel [F3]
+shortcut > Invert Selection [Ctrl+Shift+I]
+shortcut > Keyboard Shortcuts [F1]
+shortcut > List View [Ctrl+2]
+shortcut > Move to Trash [Del]
+shortcut > New Empty File… [Ctrl+Alt+N]
+shortcut > New Folder… [Ctrl+Shift+N]
+shortcut > New Tab [Ctrl+T]
+shortcut > New Window [Ctrl+N]
+shortcut > Next Tab [Ctrl+PgDown, Ctrl+Tab]
+shortcut > Open Selected [Alt+Down]
+shortcut > Open Terminal Here [Ctrl+Alt+T]
+shortcut > Parent Folder [Alt+Up]
+shortcut > Paste [Ctrl+V]
+shortcut > Paste as Link [Ctrl+Shift+V]
+shortcut > Preferences… [Ctrl+,]
+shortcut > Previous Tab [Ctrl+PgUp, Ctrl+Shift+Tab]
+shortcut > Properties [Alt+Return, Ctrl+I]
+shortcut > Quit [Ctrl+Q]
+shortcut > Reload [F5, Ctrl+R]
+shortcut > Rename… [F2]
+shortcut > Reset Zoom [Ctrl+0]
+shortcut > Search [Ctrl+F]
+shortcut > Select All [Ctrl+A]
+shortcut > Show Hidden Files [Ctrl+H]
+shortcut > Sidebar [F9]
+shortcut > Toggle Folder Previews [Ctrl+Shift+P]
+shortcut > Undo [Ctrl+Z]
+shortcut > Zoom In [Ctrl++, Ctrl+=]
+shortcut > Zoom Out [Ctrl+-]
+context menu, empty space > New Folder…
+context menu, empty space > New Document
+context menu, empty space > New Document > Empty File…
+context menu, empty space > ---
+context menu, empty space > Paste
+context menu, empty space > Paste as Link
+context menu, empty space > Select All
+context menu, empty space > ---
+context menu, empty space > Sort By
+context menu, empty space > Sort By > Name
+context menu, empty space > Sort By > Size
+context menu, empty space > Sort By > Type
+context menu, empty space > Sort By > Modified
+context menu, empty space > Sort By > ---
+context menu, empty space > Sort By > Ascending
+context menu, empty space > Sort By > Descending
+context menu, empty space > Show Hidden Files (toggle)
+context menu, empty space > ---
+context menu, empty space > Open in Terminal
+context menu, empty space > Bookmark This Folder
+context menu, empty space > Generate Previews Recursively
+context menu, empty space > ---
+context menu, empty space > Properties
+context menu, a file > Open
+context menu, a file > Open With
+context menu, a file > ---
+context menu, a file > Cut
+context menu, a file > Copy
+context menu, a file > Move To…
+context menu, a file > Copy To…
+context menu, a file > Duplicate
+context menu, a file > Rename…
+context menu, a file > Copy Path / Name
+context menu, a file > Copy Path / Name > Copy Full Path
+context menu, a file > Copy Path / Name > Copy Name
+context menu, a file > Copy Path / Name > Copy URI
+context menu, a file > Star
+context menu, a file > Links & Shortcuts
+context menu, a file > Links & Shortcuts > Create Symbolic Link Here
+context menu, a file > Links & Shortcuts > Create Relative Symbolic Link Here
+context menu, a file > Links & Shortcuts > Create Hard Link Here
+context menu, a file > Links & Shortcuts > Create Symbolic Link In…
+context menu, a file > Links & Shortcuts > ---
+context menu, a file > Links & Shortcuts > Send Link to Desktop
+context menu, a file > Links & Shortcuts > Create Desktop Shortcut (.desktop) Here
+context menu, a file > Links & Shortcuts > Send Shortcut (.desktop) to Desktop
+context menu, a file > ---
+context menu, a file > Compress…
+context menu, a file > ---
+context menu, a file > Move to Trash
+context menu, a file > Delete Permanently…
+context menu, a file > ---
+context menu, a file > Properties
+context menu, a folder > Open
+context menu, a folder > Open in New Tab
+context menu, a folder > Open in New Window
+context menu, a folder > Open With
+context menu, a folder > ---
+context menu, a folder > Cut
+context menu, a folder > Copy
+context menu, a folder > Paste Into Folder
+context menu, a folder > Move To…
+context menu, a folder > Copy To…
+context menu, a folder > Duplicate
+context menu, a folder > Rename…
+context menu, a folder > Copy Path / Name
+context menu, a folder > Copy Path / Name > Copy Full Path
+context menu, a folder > Copy Path / Name > Copy Name
+context menu, a folder > Copy Path / Name > Copy URI
+context menu, a folder > Star
+context menu, a folder > Links & Shortcuts
+context menu, a folder > Links & Shortcuts > Create Symbolic Link Here
+context menu, a folder > Links & Shortcuts > Create Relative Symbolic Link Here
+context menu, a folder > Links & Shortcuts > Create Symbolic Link In…
+context menu, a folder > Links & Shortcuts > ---
+context menu, a folder > Links & Shortcuts > Send Link to Desktop
+context menu, a folder > Links & Shortcuts > Create Desktop Shortcut (.desktop) Here
+context menu, a folder > Links & Shortcuts > Send Shortcut (.desktop) to Desktop
+context menu, a folder > Links & Shortcuts > ---
+context menu, a folder > Links & Shortcuts > Add to Bookmarks
+context menu, a folder > ---
+context menu, a folder > Compress…
+context menu, a folder > Folder Colour
+context menu, a folder > Folder Colour > Red (toggle)
+context menu, a folder > Folder Colour > Orange (toggle)
+context menu, a folder > Folder Colour > Yellow (toggle)
+context menu, a folder > Folder Colour > Green (toggle)
+context menu, a folder > Folder Colour > Teal (toggle)
+context menu, a folder > Folder Colour > Blue (toggle)
+context menu, a folder > Folder Colour > Purple (toggle)
+context menu, a folder > Folder Colour > Pink (toggle)
+context menu, a folder > Folder Colour > Brown (toggle)
+context menu, a folder > Folder Colour > Grey (toggle)
+context menu, a folder > Folder Colour > ---
+context menu, a folder > Folder Colour > Default (toggle)
+context menu, a folder > Show Image Previews (toggle)
+context menu, a folder > Regenerate Preview
+context menu, a folder > Generate Previews Recursively
+context menu, a folder > Open in Terminal
+context menu, a folder > ---
+context menu, a folder > Move to Trash
+context menu, a folder > Delete Permanently…
+context menu, a folder > ---
+context menu, a folder > Properties
+context menu, two files > Open
+context menu, two files > ---
+context menu, two files > Cut
+context menu, two files > Copy
+context menu, two files > Move To…
+context menu, two files > Copy To…
+context menu, two files > Duplicate
+context menu, two files > Rename 2 Items…
+context menu, two files > Copy Path / Name
+context menu, two files > Copy Path / Name > Copy Full Path
+context menu, two files > Copy Path / Name > Copy Name
+context menu, two files > Copy Path / Name > Copy URI
+context menu, two files > Star
+context menu, two files > Links & Shortcuts
+context menu, two files > Links & Shortcuts > Create Symbolic Link Here
+context menu, two files > Links & Shortcuts > Create Relative Symbolic Link Here
+context menu, two files > Links & Shortcuts > Create Hard Link Here
+context menu, two files > Links & Shortcuts > Create Symbolic Link In…
+context menu, two files > Links & Shortcuts > ---
+context menu, two files > Links & Shortcuts > Send Link to Desktop
+context menu, two files > Links & Shortcuts > Create Desktop Shortcut (.desktop) Here
+context menu, two files > Links & Shortcuts > Send Shortcut (.desktop) to Desktop
+context menu, two files > ---
+context menu, two files > Compress…
+context menu, two files > ---
+context menu, two files > Move to Trash
+context menu, two files > Delete Permanently…
+context menu, two files > ---
+context menu, two files > Properties

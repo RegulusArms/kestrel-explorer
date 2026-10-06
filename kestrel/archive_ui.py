@@ -295,9 +295,9 @@ class CompressDialog(QDialog):
         self.zip_enc.setVisible(zip7)
         self.zip_enc_row.setVisible(zip7)
         self.split.setVisible(bool(f.get("volumes")) and not (f["id"] == "zip" and t == "zip"))
-        argv_tool = t if t in ("rar", "zpaq", "zip") else None
-        self.enc_note.setText(_ARGV_NOTE.format(tool=argv_tool) if argv_tool else
-                              "The password is passed to 7-Zip privately (not on its command line).")
+        names = {"7z": "7-Zip", "rar": "rar", "zip": "zip"}
+        self.enc_note.setText(_ARGV_NOTE.format(tool=t) if t == "zpaq" else
+                              f"The password is passed to {names.get(t, t)} privately (not on its command line).")
         self._level_changed()
 
     def _level_changed(self, *_):
