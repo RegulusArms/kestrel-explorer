@@ -62,7 +62,7 @@ If `~/.local/bin` isn't on your PATH yet (on Ubuntu and Mint it's only added at 
 
 It also makes Kestrel the system's **file chooser**: the Open and Save dialogs that apps get through the desktop portal (xdg-desktop-portal), such as a browser's "Save image as", Flatpak and Snap apps, and GTK 4 and Qt apps that use the portal. Those dialogs open as a Kestrel window with a bar at the bottom for the file name, the file type, Cancel and Save/Open, so you browse with the sidebar, previews and search as usual. Saving over a file asks first, and the next dialog starts where the last one picked something. The portal chooses its file chooser per desktop, not per app, so this applies to every app that uses it. The installer adds a D-Bus activation file for `kes --file-chooser`, installs the portal definition `/usr/share/xdg-desktop-portal/portals/kestrel.portal` (the portal reads these only from there, so this one file asks for your password), writes `~/.config/xdg-desktop-portal/<desktop>-portals.conf` with your desktop's current choices plus Kestrel for the file chooser (GNOME's stays as the fallback; a portals.conf you already had is kept and changed), and restarts the portal. `--uninstall` puts it all back.
 
-It also installs a small GNOME Shell extension, **Kestrel drop focus**, so that when you drag files from Kestrel into another app (a browser, an editor, a chat window) that app gets the focus, as it would on Windows. On GNOME on Wayland an app can't focus another app's window, so the extension does it when Kestrel asks; GNOME loads a newly installed extension at your next log-in, so log out and back in once. On X11 (Linux Mint, GNOME on Xorg) Kestrel needs no extension. The extension is copied to `~/.local/share/gnome-shell/extensions/` (the .deb installs it for everyone) and added to your enabled extensions; `--uninstall` takes it out again and leaves your other extensions alone.
+It also installs a small GNOME Shell extension, **Kestrel drop focus**, so that when you drag files from Kestrel into another app (a browser, an editor, a chat window) that app gets the focus, as it would on Windows. On GNOME on Wayland an app can't focus another app's window, so the extension does it when Kestrel asks; GNOME loads a newly installed extension at your next log-in, so log out and back in once. On X11 (Linux Mint, GNOME on Xorg) Kestrel needs no extension. The extension is copied to `~/.local/share/gnome-shell/extensions/` (the C++ version's .deb installs it for everyone) and added to your enabled extensions; `--uninstall` takes it out again and leaves your other extensions alone.
 
 It also makes Kestrel the app for `trash:///` (the dock's Trash icon, `gio open trash:///`), remembering which app had it so `--uninstall` can put it back. If GNOME Files is pinned in the dock, `--default` asks whether to put Kestrel in its place; `--dock` does that without asking. `--uninstall` puts GNOME Files back if the installer swapped it.
 
@@ -117,7 +117,7 @@ Kestrel is also on [PyPI](https://pypi.org/project/kestrel-explorer/) as `kestre
 
 With `--system-site-packages`, pip reuses Ubuntu's `python3-pyqt6`, `python3-pil` and `python3-gi` instead of downloading its own, so Kestrel gets the system's Qt image plugins (RAW, HEIC, AVIF, JPEG XL, PSD with `kimageformat6-plugins`) and GIO (Open With, default apps, drive and network mounting). In a plain virtual environment (without `--system-site-packages`), pip installs PyQt6 with its own Qt, which can't load those plugins, and the GIO features stay off unless you add the `[gio]` extra (`pip install "kestrel-explorer[gio]"`, which builds PyGObject and needs `libgirepository-2.0-dev` and `libcairo2-dev`).
 
-The first launch adds Kestrel to the app grid (`~/.local/share/applications/kestrel-explorer.desktop`, pointing at that `kes`).
+The first launch adds Kestrel to the app grid (`~/.local/share/applications/kestrel-explorer.desktop`, pointing at that `kes`), unless an entry is already there (from `install.sh`, or the C++ version's .deb).
 
 **Update / uninstall**
 
@@ -241,10 +241,12 @@ sudo apt install python3-pyqt6 python3-pil python3-gi gir1.2-glib-2.0 libglib2.0
 - Drag and drop:
   - Ctrl copies, Shift moves, Ctrl+Shift creates a link, and Alt asks what to do.
   - With no key held, a drop moves files on the same drive and copies them to another drive.
+  - The folder under the pointer is highlighted, so you can see where the files will go.
 - File operations run on background threads, so the window stays responsive even with tens of thousands of files. Copy, move, duplicate, move to trash, permanent delete, restore, empty trash, compress and extract show their status and a progress bar in the status bar at the bottom of the window, with ✕ to cancel. When several run at once, the bar shows the oldest with "+N more" (hover to see them all). Operations running in your other Kestrel windows are counted too ("+N in other windows"), or shown when this window has none; ✕ on one of those asks its window to cancel it, and 🛡 marks admin-session jobs. Closing a window while operations are running asks whether to stop them or keep going.
 - If a name already exists when copying or moving, you can replace, merge, skip or keep both.
 - Trash, permanent delete, and restoring or emptying the trash. The Trash shows everything you've deleted on every drive in one list: your home trash plus the trash folder each drive keeps for files deleted on it (`.Trash-<uid>`, the same as GNOME Files). The Location column shows where each item came from, and Restore, Delete Permanently and Empty Trash work across all of them.
 - Deleting handles read-only folders you own (common in extracted Windows archives): they're made writable and deleted.
+- Copies and deletes never follow a symbolic link inside the folders they work through, so a folder swapped for a link while they run can't send them anywhere else. A delete also stops at another drive mounted inside the folder, instead of emptying it.
 - Links and shortcuts:
   - Symbolic links (absolute or relative) and hard links.
   - Link to the Desktop.
@@ -440,7 +442,7 @@ Move to Trash itself doesn't run as administrator: if an item can't be trashed, 
 - **It only accepts a fixed set of file operations,** on absolute paths. It refuses to delete, replace or change the permissions of `/`, top-level folders (`/usr`, `/etc`, `/home`, `/var`, and any other folder directly under `/`) and home folders themselves (`/home/name`). One table in the helper lists what each operation may do to each of its paths.
 - **It can't be redirected by a symlink.** Files can change while root works on them: another user, or a program, could swap a folder for a symlink to `/etc`. So the helper never trusts a path as text. It opens each folder on the way one at a time without following symlinks, then works on the name inside the folder it opened. It follows a symlink on the way only if root controls it (owned by root, in a folder only root can write to), such as `/lib` → `usr/lib`. Kestrel resolves your own symlinked folders first, so those keep working. Recursive copies and deletes go folder by folder the same way, and stop if a folder is swapped while they run.
 - **It won't hand out root by accident.** A copy it makes is root's, so it drops the set-user-ID bit from someone else's program (a move between drives keeps the owner instead). It only hard-links your own files, and never deletes a mount point (the drive mounted there would be emptied).
-- **The trade-off:** the helper runs from the Kestrel folder, which your account can edit. Anything running as you could change that file before your next admin session. That's the same level of trust as typing `sudo` in your own terminal, which is fine on a personal computer.
+- **The trade-off:** the helper runs from the Kestrel folder (or the pip install's), which your account can edit. Anything running as you could change that file before your next admin session. That's the same level of trust as typing `sudo` in your own terminal, which is fine on a personal computer.
 
 ## Tests
 
@@ -449,7 +451,7 @@ tests/run.sh                  # every test
 tests/run.sh fileops atc_undo # only some
 ```
 
-There are 299 checks in 13 tests: file operations (copy, move, merge, delete, cancel, trash, links, undo), the tower that keeps several Kestrels in sync (shared changes, the shared task list, shared undo, opening folders as tabs), phones and cameras, rearranging the sidebar, following the desktop theme, the file chooser, the admin helper that runs as root, every menu entry and shortcut, screen-reader names and dropping onto folders, parsing that must match between the versions, and `install.sh`. Each test runs with a throwaway home folder on a private D-Bus bus, so your files, settings, dock and open windows are never touched. The [C++ version](https://github.com/RegulusArms/kes-c/tree/main/tests) has the same tests, and some checks launch the other version to test the two together. Details: [tests/README.md](https://github.com/RegulusArms/kestrel-explorer/blob/main/tests/README.md).
+There are 299 checks in 13 tests: file operations (copy, move, merge, delete, cancel, trash, links, undo), the tower that keeps several Kestrels in sync (shared changes, the shared task list, shared undo, opening folders as tabs), phones and cameras, rearranging the sidebar, following the desktop theme, the file chooser, the admin helper that runs as root, every menu entry and shortcut, screen-reader names and dropping onto folders, parsing that must match between the versions, and `install.sh`. Each test runs with a throwaway home folder on a private D-Bus bus, so your files, settings, dock and open windows are never touched. GitHub Actions runs them on Ubuntu 24.04 on every push (`.github/workflows/tests.yml`). The [C++ version](https://github.com/RegulusArms/kes-c/tree/main/tests) has the same tests, and some checks launch the other version to test the two together. Details: [tests/README.md](https://github.com/RegulusArms/kestrel-explorer/blob/main/tests/README.md).
 
 ## Architecture
 
@@ -463,10 +465,10 @@ There are 299 checks in 13 tests: file operations (copy, move, merge, delete, ca
  File UI      File jobs          GIO        External tools    D-Bus services      Radio
  panes,       (worker threads)   mounts,    7z, tar, zpaq,    Show in folder,     its link to
  sidebar,     copy · move ·      Open With, exiftool,         file chooser        the tower
- viewer,      delete · trash ·   trash      ffmpeg                                (see below)
- search       undo · extract
-              progress, cancel
-              and errors shown
+ viewer,      delete · trash ·   trash      ffmpeg, system                        (see below)
+ search,      undo · extract                thumbnailers
+ thumbnails   progress, cancel
+ (threads)    and errors shown
               in this window
    │              │               │              │
    └──────────────┴───────┬───────┴──────────────┘
@@ -507,8 +509,9 @@ Kestrel isn't single-instance: a folder opened from another app may start a Kest
        │   covers, bookmarks, cleared caches                           │
        │ • hands folders to an open window ("open folders as tabs")    │
        │                                                               │
-       │ Checks every message (protocol version, known types and       │
-       │ fields, absolute paths, size); so does each Kestrel.          │
+       │ Checks every message (protocol version, known types, the      │
+       │ types of known fields, absolute paths, size); so does each    │
+       │ Kestrel.                                                      │
        │                                                               │
        │ Never touches files, and runs no jobs. Started by the first   │
        │ Kestrel, gone shortly after the last one leaves.              │
@@ -558,10 +561,15 @@ The C++ and Python versions speak the same protocol (JSON messages), so A and B 
 | `kestrel/archive.py` | Archive engine: tool detection, the commands for every format, progress, cancel, password handling |
 | `kestrel/archive_ui.py` | Compress and Extract dialogs, password prompts, and the archive job flows |
 | `kestrel/uwp.py` | Integration with the UWP wallpaper manager (over D-Bus and the `uwp` command) |
+| `kestrel/stats.py` | The `KESTREL_STATS=1` performance counters (see [Performance counters](#performance-counters)) |
 | `kestrel/atc.py` | The tower (`kes --atc`) and each window's link to it, which keep several running Kestrels in sync |
 | `tests/` | The test suite (see [Tests](#tests)) |
 | `bench/` | The benchmark against GNOME Files and Nemo (see Performance: [vs GNOME Files](#performance-kestrel-vs-gnome-files), [vs Nemo](#performance-kestrel-vs-nemo)) |
+| `kes` | Starts the app from this folder (`install.sh` links `~/.local/bin/kes` to it) |
+| `kes-setup` | Makes Kestrel the default file manager for the current user, and puts things back (run by `install.sh`) |
+| `data/` | The app icon (`icons/hicolor`) and the GNOME Shell drop focus extension |
 | `pyproject.toml` | PyPI packaging metadata (see [PACKAGING.md](https://github.com/RegulusArms/kestrel-explorer/blob/main/PACKAGING.md)) |
+| `.github/workflows/tests.yml` | Runs the test suite on Ubuntu 24.04 on every push and pull request |
 | `.github/workflows/pypi.yml` | Publishes to PyPI by hand, with trusted publishing (see [PACKAGING.md](https://github.com/RegulusArms/kestrel-explorer/blob/main/PACKAGING.md)) |
 
 ## Performance counters

@@ -96,8 +96,8 @@ missing = list(dict.fromkeys(missing + unnamed()))
 check(not missing, "every control in the window has a name a screen reader can say (also with the search bar, "
                    "the list view and the info panel open)" + (f" (no name: {', '.join(missing)})" if missing else ""))
 
-# -- drag and drop: a file dropped onto a folder goes into it, in both views. The events go where a real drag's go: to
-# the innermost widget under the pointer that accepts drops
+# -- drag and drop: a file dropped onto a folder goes into it, in both views, and the folder is highlighted while the file
+# is over it. The events go where a real drag's go: to the innermost widget under the pointer that accepts drops
 w.pane().close_search()
 
 
@@ -125,15 +125,19 @@ def drop_onto_folder(mode, name):
     data = QMimeData()
     data.setUrls([QUrl.fromLocalFile(P(name))])
     actions = Qt.DropAction.CopyAction | Qt.DropAction.MoveAction
-    for event in (QDragEnterEvent(pos, actions, data, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier),
-                  QDragMoveEvent(pos, actions, data, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier),
-                  QDropEvent(QPointF(pos), actions, data, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)):
-        QApplication.sendEvent(target, event)
-    return wait_for(lambda: os.path.exists(os.path.join(P("folder"), name)) and not os.path.exists(P(name)))
+    buttons, mods = Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier
+    QApplication.sendEvent(target, QDragEnterEvent(pos, actions, data, buttons, mods))
+    QApplication.sendEvent(target, QDragMoveEvent(pos, actions, data, buttons, mods))
+    lit = v.property("drop_target") == P("folder")
+    QApplication.sendEvent(target, QDropEvent(QPointF(pos), actions, data, buttons, mods))
+    cleared = not v.property("drop_target")
+    return lit and cleared and wait_for(lambda: os.path.exists(os.path.join(P("folder"), name))
+                                        and not os.path.exists(P(name)))
 
 
 in_grid, in_list = drop_onto_folder("grid", "dropped-in-grid.txt"), drop_onto_folder("list", "dropped-in-list.txt")
-check(in_grid and in_list, "a file dropped onto a folder goes into it, in the grid and the list view"
+check(in_grid and in_list, "a file dropped onto a folder goes into it, in the grid and the list view, and the folder is "
+      "highlighted while the file is over it"
       + ("" if in_grid else " (not in the grid view)") + ("" if in_list else " (not in the list view)"))
 
 dump = os.environ.get("KESTREL_UI_DUMP")

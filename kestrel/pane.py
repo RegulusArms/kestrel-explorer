@@ -3,8 +3,9 @@ search, history and selection. The window around it is in app.py."""
 
 import os
 
-from PyQt6.QtCore import QDir, QEvent, QFileSystemWatcher, QItemSelectionModel, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QCursor, QDrag, QGuiApplication, QPainter, QPixmap
+from PyQt6.QtCore import (QDir, QEvent, QFileSystemWatcher, QItemSelectionModel, QModelIndex, QPersistentModelIndex,
+                          QRectF, QSize, Qt, QTimer, pyqtSignal)
+from PyQt6.QtGui import QCursor, QDrag, QGuiApplication, QPainter, QPalette, QPen, QPixmap
 from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListView,
                              QMessageBox, QStackedWidget, QStyle, QStyleOptionViewItem, QToolButton, QTreeView,
                              QVBoxLayout, QWidget)
@@ -26,7 +27,53 @@ def icon(*names):
 
 class FileViewDrag:
     """The file views. Their drags are Qt's, apart from giving the focus to the app the files are dropped into
-    (focus.py)."""
+    (focus.py) and highlighting the folder a drag is over (where the files will go)."""
+
+    _drop_target = None  # the folder highlighted under a drag (a QPersistentModelIndex)
+
+    def dragMoveEvent(self, ev):
+        super().dragMoveEvent(ev)
+        i = self.indexAt(ev.position().toPoint())
+        if i.isValid():
+            i = i.siblingAtColumn(0)
+        # a folder that takes the drop, and isn't one of the items being dragged
+        dragged = ev.source() is self and self.selectionModel().isSelected(i)
+        folder = i.isValid() and bool(self.model().flags(i) & Qt.ItemFlag.ItemIsDropEnabled)
+        self._set_drop_target(i if ev.isAccepted() and folder and not dragged else None)
+
+    def dragLeaveEvent(self, ev):
+        self._set_drop_target(None)
+        super().dragLeaveEvent(ev)
+
+    def dropEvent(self, ev):
+        self._set_drop_target(None)
+        super().dropEvent(ev)
+
+    def paintEvent(self, ev):
+        super().paintEvent(ev)
+        if self._drop_target is None or not self._drop_target.isValid():
+            return
+        r = QRectF(self.visualRect(QModelIndex(self._drop_target)))
+        if isinstance(self, QTreeView):
+            r, radius = QRectF(0, r.top(), self.viewport().width(), r.height()), 4  # the whole row
+        else:
+            r, radius = r.adjusted(3, 3, -3, -3), 8  # as the grid's selection
+        p = QPainter(self.viewport())
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        c = self.palette().color(QPalette.ColorRole.Highlight)
+        p.setPen(QPen(c, 2))
+        c.setAlpha(70)
+        p.setBrush(c)
+        p.drawRoundedRect(r.adjusted(1, 1, -1, -1), radius, radius)
+        p.end()
+
+    def _set_drop_target(self, i):
+        old = self._drop_target if self._drop_target is not None and self._drop_target.isValid() else None
+        if (old is None and i is None) or (old is not None and i is not None and QModelIndex(old) == i):
+            return
+        self._drop_target = QPersistentModelIndex(i) if i is not None else None
+        self.viewport().update()
+        self.setProperty("drop_target", i.data(PathRole) if i is not None else "")  # for the tests
 
     def startDrag(self, supported):
         indexes = [i for i in self.selectedIndexes() if self.model().flags(i) & Qt.ItemFlag.ItemIsDragEnabled]
@@ -179,7 +226,7 @@ class Pane(QWidget):
         v.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         v.setDragEnabled(True)
         v.setAcceptDrops(True)
-        v.setDropIndicatorShown(True)
+        v.setDropIndicatorShown(False)  # FileViewDrag highlights the folder instead (Qt's also marks between rows)
         v.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
         v.setDefaultDropAction(Qt.DropAction.MoveAction)
         v.viewport().setAcceptDrops(True)  # the grid's Static movement turns drops off there (QListView.setMovement)
