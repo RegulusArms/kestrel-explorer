@@ -74,7 +74,8 @@ class AdminSession(QObject):
         return shutil.which("pkexec") is not None and os.path.exists("/usr/bin/python3")
 
     def active(self):
-        return self.proc is not None and self.proc.poll() is None
+        p = self.proc  # read once: the reader thread sets it to None when the helper exits
+        return p is not None and p.poll() is None
 
     def start(self):
         """Start the root helper (blocks while the password prompt is up; call from a worker thread)."""
