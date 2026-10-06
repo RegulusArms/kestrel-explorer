@@ -2,6 +2,7 @@
 import os
 import stat
 import subprocess
+import time
 
 from common import A, check, finish, home_path as P, setup_app, wait_for
 from PyQt6.QtCore import QTimer
@@ -195,4 +196,31 @@ extract_closer.start()
 w.open_paths(w.pane(), [P("arc.tar.gz")])
 check(wait_for(lambda: bool(extract_shown)), "double-clicking an archive opens Kestrel's Extract dialog")
 extract_closer.stop()
+
+# -- running programs: a timeout holds even without pipes, or once the program has closed its output
+start = time.monotonic()
+try:
+    subprocess.run(["sh", "-c", 'echo $$ > "$0"; exec sleep 5', P("sleeper.pid")], stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL, timeout=0.3)
+    timed_out = False
+except subprocess.TimeoutExpired:
+    timed_out = True
+with open(P("sleeper.pid")) as f:
+    pid = int(f.read().strip() or 0)
+try:
+    os.kill(pid, 0)
+    gone = False
+except ProcessLookupError:
+    gone = True
+check(timed_out and time.monotonic() - start < 2 and pid > 0 and gone,
+      "a program's timeout holds without pipes, and it's stopped")
+start = time.monotonic()
+try:
+    subprocess.run(["sh", "-c", "exec >&- 2>&-; sleep 5"], capture_output=True, timeout=0.3)
+    timed_out = False
+except subprocess.TimeoutExpired:
+    timed_out = True
+check(timed_out and time.monotonic() - start < 2, "a program's timeout holds after it closes its output")
+r = subprocess.run(["sh", "-c", "echo hi"], capture_output=True, timeout=5)
+check(r.returncode == 0 and r.stdout == b"hi\n", "a program that finishes in time isn't affected")
 finish()
