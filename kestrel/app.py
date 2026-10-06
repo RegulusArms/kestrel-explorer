@@ -1546,7 +1546,8 @@ class MainWindow(QMainWindow):
                                  lambda t=t: self.new_file(os.path.join(tdir, t)))
             m.addSeparator()
             pa = m.addAction(icon("edit-paste"), "Paste", lambda: self.paste())
-            pa.setEnabled(bool(self.read_clipboard()[1]) or QGuiApplication.clipboard().mimeData().hasImage())
+            md = QGuiApplication.clipboard().mimeData()  # None when the clipboard is empty
+            pa.setEnabled(bool(self.read_clipboard()[1]) or (md is not None and md.hasImage()))
             pl = m.addAction("Paste as Link", lambda: self.paste(as_link=True))
             pl.setEnabled(bool(self.read_clipboard()[1]))
             m.addAction("Select All", lambda: pane.view().selectAll())

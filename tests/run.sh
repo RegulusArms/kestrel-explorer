@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Run the test suite (see tests/README.md).
 #   tests/run.sh                    every test
-#   tests/run.sh fileops atc_undo   only these (names: fileops atc_sync atc_tasks atc_undo atc_tabs devices sidebar theme chooser admin_helper installer)
+#   tests/run.sh fileops atc_undo   only these (names: fileops atc_sync atc_tasks atc_undo atc_tabs devices sidebar theme chooser admin_helper ui installer)
 # Each test runs with a throwaway HOME on a private D-Bus session bus: your files, settings, dock and running
 # Kestrel windows are never touched.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$HERE")"
-ALL=(fileops atc_sync atc_tasks atc_undo atc_tabs devices sidebar theme chooser admin_helper installer)
+ALL=(fileops atc_sync atc_tasks atc_undo atc_tabs devices sidebar theme chooser admin_helper ui installer)
 TESTS=("$@")
 (( ${#TESTS[@]} )) || TESTS=("${ALL[@]}")
 for t in "${TESTS[@]}"; do
