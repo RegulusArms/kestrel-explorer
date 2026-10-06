@@ -20,7 +20,6 @@ import subprocess
 import time
 
 from . import util
-from .fileops import Cancelled
 
 _SYSTEM_PATH = "/usr/local/bin:/usr/bin:/bin"
 # English messages (Kestrel parses them) but UTF-8 file names: under plain LC_ALL=C, rar stores non-ASCII names as
