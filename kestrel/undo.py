@@ -104,11 +104,9 @@ def _trashed_index():
 def undo(win):
     """Undo the newest recorded operation; progress and errors show in win's status bar."""
     got = atc.radio().request("UndoPop") if _shared() else None
-    if got:
-        try:
-            op = _from_json(got)
-        except (ValueError, AttributeError):
-            return
+    # replayed only if it's a valid entry (any program on the session bus can talk to the tower)
+    if got and atc.valid_undo(atc.parse(got)):
+        op = _from_json(got)
     elif _stack:
         op = _stack.pop()
     else:

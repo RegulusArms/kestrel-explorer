@@ -448,7 +448,7 @@ tests/run.sh                  # every test
 tests/run.sh fileops atc_undo # only some
 ```
 
-There are 276 checks in 11 tests: file operations (copy, move, merge, delete, cancel, trash, links, undo), the tower that keeps several Kestrels in sync (shared changes, the shared task list, shared undo, opening folders as tabs), phones and cameras, rearranging the sidebar, following the desktop theme, the file chooser, the admin helper that runs as root, and `install.sh`. Each test runs with a throwaway home folder on a private D-Bus bus, so your files, settings, dock and open windows are never touched. The [C++ version](https://github.com/RegulusArms/kes-c/tree/main/tests) has the same tests, and some checks launch the other version to test the two together. Details: [tests/README.md](https://github.com/RegulusArms/kestrel-explorer/blob/main/tests/README.md).
+There are 280 checks in 11 tests: file operations (copy, move, merge, delete, cancel, trash, links, undo), the tower that keeps several Kestrels in sync (shared changes, the shared task list, shared undo, opening folders as tabs), phones and cameras, rearranging the sidebar, following the desktop theme, the file chooser, the admin helper that runs as root, and `install.sh`. Each test runs with a throwaway home folder on a private D-Bus bus, so your files, settings, dock and open windows are never touched. The [C++ version](https://github.com/RegulusArms/kes-c/tree/main/tests) has the same tests, and some checks launch the other version to test the two together. Details: [tests/README.md](https://github.com/RegulusArms/kestrel-explorer/blob/main/tests/README.md).
 
 ## Architecture
 
@@ -505,6 +505,9 @@ Kestrel isn't single-instance: a folder opened from another app may start a Kest
        │ • shared changes: Preferences, stars, folder colours,         │
        │   covers, bookmarks, cleared caches                           │
        │ • hands folders to an open window ("open folders as tabs")    │
+       │                                                               │
+       │ Checks every message (protocol version, known types and       │
+       │ fields, absolute paths, size); so does each Kestrel.          │
        │                                                               │
        │ Never touches files, and runs no jobs. Started by the first   │
        │ Kestrel, gone shortly after the last one leaves.              │
