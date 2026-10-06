@@ -65,6 +65,7 @@ FOLDER_TESTS = ("open_gallery", "videos", "pdfs")   # "open a folder": timed by 
 FIRST = 12          # "open a folder": time until the first FIRST files (by name) have thumbnails
 WINDOWS = 5         # "several windows": folders opened from outside, one after another
 IDLE_SECONDS = 30   # "idle": CPU used in this long with a folder open and nothing happening
+EMPTY_TIMEOUT = 600 # emptying the trash through a D-Bus service: Nemo's deletes about 50 files a second (3+ min)
 THUMB_FLAVORS = ("normal", "large", "x-large", "xx-large")
 
 
@@ -384,7 +385,7 @@ def measure_trash(app):
         t0 = time.monotonic()
         n.call("EmptyTrash")
         try:
-            n.wait(lambda: not listing(f"{trash}/files") and not listing(f"{trash}/info"))
+            n.wait(lambda: not listing(f"{trash}/files") and not listing(f"{trash}/info"), EMPTY_TIMEOUT)
         except Stuck as e:
             return {"s": s, "rss_mb": n.peak(), "stuck_empty": str(e)}
         return {"s": s, "empty_s": time.monotonic() - t0, "rss_mb": n.peak()}
@@ -715,7 +716,7 @@ def section(t1, t2, summary, runs, other):
                     f"setup{headless} rather than from everyday use.")
     if summary["stuck"]:
         untimed += (f"\n- **Didn't finish:** asked through its D-Bus service to {' or '.join(summary['stuck'])}, "
-                    f"{label} didn't finish within 2 minutes (it may have been waiting for a confirmation), so those "
+                    f"{label} didn't finish within the time limit (2 minutes; {EMPTY_TIMEOUT // 60} for emptying the trash), so those "
                     f"rows show —.")
     return f"""{OTHERS[other]["heading"]}
 

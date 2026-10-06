@@ -687,7 +687,7 @@ Kestrel (C++) compared with Nemo:
 - **Opening a folder not timed:** Nemo makes no thumbnails in this setup (a fresh home folder with its default settings), so the folder tests are skipped for it and those rows show —, as does its peak memory with the 600-image folder open.
 - **Not timed:** Nemo's D-Bus file-operations service has no way to move files to the trash, so those rows show —. For "Empty the trash", the files were put in the trash with `gio trash` first.
 - **CPU while idle:** Nemo kept about 21% of a core busy with nothing happening. That's unusual for a file manager at rest, so it probably comes from this headless setup (where it also made no thumbnails) rather than from everyday use.
-- **Didn't finish:** asked through its D-Bus service to empty the trash, Nemo didn't finish within 2 minutes (it may have been waiting for a confirmation), so those rows show —.
+- **Didn't finish:** asked through its D-Bus service to empty the trash, Nemo didn't finish within 2 minutes (its service deletes the files one at a time, about 50 a second), so those rows show —.
 - **Memory:** Nemo makes thumbnails in separate helper processes, whose memory isn't counted in its figures. Kestrel makes them inside the app.
 - **Search:** Nemo's search can't be timed from outside, so it isn't compared.
 
