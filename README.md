@@ -15,6 +15,7 @@ A file manager for Ubuntu and Linux Mint that's easy to pick up and puts many jo
 - **Metadata:** view and edit EXIF, XMP and other metadata with `exiftool`, from a searchable list of tags.
 - **Search and rename:** search subfolders with wildcards or inside files, and batch rename with templates or regular expressions.
 - **Shortcuts out:** Open in Terminal or VS Code, your Nautilus scripts, and Samba network sharing.
+- **Secure deletion:** with [BleachBit](https://www.bleachbit.org) installed, shred files and folders or empty the trash so they can't be recovered, from the right-click menu; `kes-setup --bleachbit` also adds a cleaner for Kestrel's own cache and history to BleachBit.
 
 **Improvements over GNOME Files:**
 - Undo for moves, renames, Move to Trash and new files.
@@ -108,7 +109,7 @@ Kestrel is also on [PyPI](https://pypi.org/project/kestrel-explorer/) as `kestre
 
   ```bash
   sudo apt install 7zip unrar zip unzip pigz zpaq zstd xz-utils bzip2 lzip \
-                   libimage-exiftool-perl ffmpeg pkexec gvfs gvfs-backends udisks2 \
+                   libimage-exiftool-perl ffmpeg pkexec gvfs gvfs-backends udisks2 bleachbit \
                    python3-pyqt6 python3-pil python3-gi kimageformat6-plugins
   ```
 
