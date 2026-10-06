@@ -66,6 +66,7 @@ FIRST = 12          # "open a folder": time until the first FIRST files (by name
 WINDOWS = 5         # "several windows": folders opened from outside, one after another
 IDLE_SECONDS = 30   # "idle": CPU used in this long with a folder open and nothing happening
 EMPTY_TIMEOUT = 600 # emptying the trash through a D-Bus service: Nemo's deletes about 50 files a second (3+ min)
+SLOW = 120          # a measurement that takes longer than this is run once: its median wouldn't tell more
 THUMB_FLAVORS = ("normal", "large", "x-large", "xx-large")
 
 
@@ -646,7 +647,11 @@ def tables(res, other):
                if runs_of(test) and med(other, test) is None and phrase not in stuck]
     kinds = {"open_gallery": "images", "videos": "videos", "pdfs": "PDFs"}
     no_thumbs = [kinds[t] for t in kinds if res.get((other, t)) and all(r.get("no_thumbs") for r in res[(other, t)])]
-    summary = {"vs": "\n".join(vs), "no_thumbs": no_thumbs,
+    # measured once (over SLOW): say so, since the others are medians of several runs
+    most = max((len(v) for (_a, t), v in res.items() if t not in ("startup", "idle")), default=0)
+    once = [{"copy": "copying", "move_xdev": "moving to another drive", "trash": "the trash test"}[t]
+            for t in ("copy", "move_xdev", "trash") if len(runs_of(t)) == 1 < most]
+    summary = {"vs": "\n".join(vs), "no_thumbs": no_thumbs, "once": once,
                "files_n": round(gallery_n) if gallery_n else None,
                "files_all": secs(med(other, "open_gallery", "all_s")),
                "kestrel_n": round(kes_n) if kes_n else None,
@@ -714,6 +719,9 @@ def section(t1, t2, summary, runs, other):
         untimed += (f"\n- **CPU while idle:** {label} kept about {summary['busy_idle']:.0f}% of a core busy with nothing "
                     f"happening. That's unusual for a file manager at rest, so it probably comes from this headless "
                     f"setup{headless} rather than from everyday use.")
+    if summary["once"]:
+        untimed += (f"\n- **Measured once:** {label} took over {SLOW // 60} minutes for {' and '.join(summary['once'])}, "
+                    f"so it was run once instead of {runs} times.")
     if summary["stuck"]:
         untimed += (f"\n- **Didn't finish:** asked through its D-Bus service to {' or '.join(summary['stuck'])}, "
                     f"{label} didn't finish within the time limit (2 minutes; {EMPTY_TIMEOUT // 60} for emptying the trash), so those "
@@ -868,6 +876,9 @@ def main():
                     took = (f"{r['s']:.3f} s" if r["s"] is not None else "didn't finish" if r.get("stuck")
                             else "no thumbnails" if r.get("no_thumbs") else "not offered")
                     print(f"  {test:13} {app:9} run {i + 1}/{n}: {took}{detail}", flush=True)
+                    if max(r.get("s") or 0, r.get("empty_s") or 0) > SLOW and i + 1 < n:
+                        print(f"  {test:13} {app:9} over {SLOW // 60} minutes: measured once", flush=True)
+                        break
                 with open(results_file, "w") as f:   # saved as it goes, so an interrupted run isn't lost
                     json.dump({f"{a} {t}": v for (a, t), v in res.items()}, f, indent=1)
     finally:

@@ -12,7 +12,7 @@ bench/run.sh --only startup,copy   # re-run some measurements and keep the rest 
 bench/run.sh --report             # rebuild the tables (and results.md) from the last results without running anything
 ```
 
-A full run takes about 12 minutes (about 10 more with Nemo, whose Empty Trash is slow), plus about a minute and a half the first time to generate the data. Raw results are saved in `bench/results.json`, and the README sections in `bench/results.md`.
+A full run takes about 12 minutes (about 7 more with Nemo, whose Empty Trash is slow), plus about a minute and a half the first time to generate the data. Raw results are saved in `bench/results.json`, and the README sections in `bench/results.md`.
 
 ## Requirements
 
@@ -35,7 +35,7 @@ A full run takes about 12 minutes (about 10 more with Nemo, whose Empty Trash is
 
 ### Compared with GNOME Files or Nemo (measured from outside)
 
-Nemo is measured exactly like GNOME Files below, through its own D-Bus service (`org.Nemo.FileOperations`). Nemo is a fork of an older GNOME Files, and its service offers fewer operations: the benchmark asks the service which ones it has, and an operation it doesn't have shows "—" with a note under the table. Emptying the trash then starts from files put there with `gio trash`. Nemo's "confirm before emptying the trash" setting is turned off in the throwaway home, so Empty Trash doesn't wait for a click. Its service empties the trash one file at a time, about 50 files a second, so that test takes several minutes per run with 10,000 files: it gets 10 minutes, the other operations 2. Nemo makes no thumbnails in this setup, so "Open a folder" isn't measured for it: each run would only wait out the 2-minute timeout. Those rows, and its peak memory with the 600-image folder open, show "—".
+Nemo is measured exactly like GNOME Files below, through its own D-Bus service (`org.Nemo.FileOperations`). Nemo is a fork of an older GNOME Files, and its service offers fewer operations: the benchmark asks the service which ones it has, and an operation it doesn't have shows "—" with a note under the table. Emptying the trash then starts from files put there with `gio trash`. Nemo's "confirm before emptying the trash" setting is turned off in the throwaway home, so Empty Trash doesn't wait for a click. Its service empties the trash one file at a time, about 50 files a second, so that test takes several minutes with 10,000 files: it gets 10 minutes, the other operations 2. A measurement that takes over 2 minutes is run only once (a median of several wouldn't tell more), and the README section says so. Nemo makes no thumbnails in this setup, so "Open a folder" isn't measured for it: each run would only wait out the 2-minute timeout. Those rows, and its peak memory with the 600-image folder open, show "—".
 
 | Measurement | How |
 |---|---|
