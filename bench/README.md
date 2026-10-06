@@ -54,7 +54,7 @@ Nemo is measured exactly like GNOME Files below, through its own D-Bus service (
 - "Generate Previews" on the 600 images;
 - the mosaics for 150 folders;
 - a recursive search for `*_7.jpg` among 50,000 files (500 matches);
-- reading the EXIF and AI-generation info for 400 images.
+- reading the EXIF and image-generation prompts for 400 images.
 
 Each one prints its time and peak memory. GNOME Files has no equivalent of these. Its search can't be timed from outside without its file indexer.
 

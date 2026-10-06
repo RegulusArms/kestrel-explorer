@@ -624,7 +624,7 @@ def tables(res, other):
           row2("Thumbnail all 600 images (\"Generate Previews\")", "bulk_thumbs"),
           row2("Build 150 folder mosaics", "mosaics"),
           row2("Recursive search over 50,000 files", "search"),
-          row2("Read EXIF / AI metadata for 400 images", "metadata"),
+          row2("Read EXIF / image-generation prompts for 400 images", "metadata"),
           f"| Peak memory (background jobs) | {bg('python')} | {bg('cxx')} | |"]
 
     vs = []
@@ -730,7 +730,7 @@ def section(t1, t2, summary, runs, other):
 
 Kestrel Explorer exists in two versions with the same features: the original [Python/PyQt6 version]({py_link}) and the [C++/Qt 6 port]({cxx_link}). They share settings, bookmarks and caches, so you can switch between them. Both are compared here with {version}, the file manager they replace.
 
-**Test machine:** {cpu} ({threads} threads), {distro}. The test data is on a RAM disk: 600 JPEGs at 1600×1200 with camera EXIF, 40 videos, 40 PDFs, 150 folders of 4 images, a tree of 50,000 files, 20,000 small files plus 250 MB, a folder of 10,000 files, and 200 PNGs with AI-generation metadata.
+**Test machine:** {cpu} ({threads} threads), {distro}. The test data is on a RAM disk: 600 JPEGs at 1600×1200 with camera EXIF, 40 videos, 40 PDFs, 150 folders of 4 images, a tree of 50,000 files, 20,000 small files plus 250 MB, a folder of 10,000 files, and 200 PNGs with Stable Diffusion prompts.
 
 **How it was measured:** each test ran {runs} times, and the tables show medians. Every run started with a fresh home folder, so the thumbnail cache was empty. All three apps ran on a headless X server with software rendering (Qt's raster engine, GTK's cairo renderer), on a private session bus where only the desktop's settings and virtual file system (gvfs) services could start, so no file indexer ran. The benchmark is in [bench/]({bench_link}) and is run with `bench/run.sh`.
 
