@@ -720,6 +720,19 @@ def url_list(paths):
     return [QUrl.fromLocalFile(p) for p in paths]
 
 
+# Kestrel's icon in this project (data/icons); a pip install doesn't have it
+ICON_FILE = Path(__file__).resolve().parent.parent / "data/icons/hicolor/256x256/apps" / f"{APP_ID}.png"
+
+
+def app_icon():
+    """Kestrel's own icon: from the icon theme once installed (install.sh), else the project's copy."""
+    if QIcon.hasThemeIcon(APP_ID):
+        return QIcon.fromTheme(APP_ID)
+    if ICON_FILE.exists():
+        return QIcon(str(ICON_FILE))
+    return theme_icon("folder")
+
+
 DESKTOP_ENTRY = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "applications" / f"{APP_ID}.desktop"
 
 
@@ -741,11 +754,17 @@ def ensure_desktop_entry():
     if not launcher.exists():  # installed with pip: use the `kes` entry point, or the module as a last resort
         launcher = shutil.which(APP_COMMAND) or f"{sys.executable} -m kestrel"
     try:
+        # the icon the entry names: into the user's icon theme, from the project's copy
+        icon = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / \
+            f"icons/hicolor/256x256/apps/{APP_ID}.png"
+        if not QIcon.hasThemeIcon(APP_ID) and not icon.exists() and ICON_FILE.exists():
+            icon.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ICON_FILE, icon)
         DESKTOP_ENTRY.parent.mkdir(parents=True, exist_ok=True)
         DESKTOP_ENTRY.write_text(
             f"[Desktop Entry]\nType=Application\nName={APP_NAME}\nGenericName=File Manager\n"
             "Comment=Manage files, with archive, admin, permission and metadata tools built in\n"
-            f"Exec={launcher} %U\nIcon=folder\nTerminal=false\n"
+            f"Exec={launcher} %U\nIcon={APP_ID}\nTerminal=false\n"
             "Categories=System;FileTools;FileManager;Viewer;\n"
             f"MimeType=inode/directory;x-directory/normal;\nStartupWMClass={APP_ID}\n")
     except OSError:

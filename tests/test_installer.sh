@@ -68,6 +68,9 @@ check '[[ "$(trash_handler)" == kestrel-explorer.desktop ]]' "--default: trash:/
 check 'grep -q "replacing xfce4-file-manager.desktop" "$WORK/out1"' "--default: says what it replaced"
 check 'grep -q "^MimeType=.*x-scheme-handler/trash" "$HOME/.local/share/applications/kestrel-explorer.desktop"' \
     "the desktop file lists trash:///"
+check '[[ "$(ls "$HOME"/.local/share/icons/hicolor/*/apps/kestrel-explorer.png | wc -l)" == 8 ]] &&
+       grep -qx "Icon=kestrel-explorer" "$HOME/.local/share/applications/kestrel-explorer.desktop"' \
+    "the app icon is installed in every size, and the menu entry uses it"
 check '[[ -f "$HOME/.local/share/dbus-1/services/org.freedesktop.FileManager1.service" ]]' \
     "--default: installs the Show-in-folder service"
 dock_check '[[ "$(fav)" == "$DOCK_AFTER" ]]' "--dock: Kestrel takes GNOME Files' place in the dock"
@@ -94,6 +97,7 @@ check '[[ "$(folder_handler)" == nemo.desktop ]]' "--uninstall: folders open in 
 dock_check '[[ "$(fav)" == "$DOCK_BEFORE" ]]' "--uninstall: GNOME Files is back in the dock"
 check '[[ ! -e "$(STATE_FILE)" && ! -e "$HOME/.local/share/applications/kestrel-explorer.desktop" ]]' \
     "--uninstall: removes its files"
+check '! ls "$HOME"/.local/share/icons/hicolor/*/apps/kestrel-explorer.png >/dev/null 2>&1' "--uninstall: removes the app icon"
 check '[[ ! -e "$(PORTAL_CONF)" && ! -e "$(CHOOSER_SERVICE)" && ! -e "$WORK/portals/kestrel.portal" ]]' \
     "--uninstall: the file chooser is GNOME's again"
 check '! grep -q kestrel-explorer "$HOME/.bashrc" && [[ "$(cat "$HOME/.bashrc")" == "alias ll='"'"'ls -l'"'"'" ]]' \

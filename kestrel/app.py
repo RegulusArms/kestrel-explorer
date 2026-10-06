@@ -847,7 +847,7 @@ class MainWindow(QMainWindow):
         self.viewers = []
         self._prefs = None   # the open Preferences window
         self.setWindowTitle(util.APP_NAME)
-        self.setWindowIcon(icon("folder"))
+        self.setWindowIcon(util.app_icon())
         if chooser_mode:
             self.resize(960, 620)  # a dialog: smaller than a main window
         else:
@@ -2438,7 +2438,7 @@ def main(argv=None):
     app = QApplication(argv)
     util.setup_icon_theme()
     util.follow_gtk_theme()  # Qt < 6.5: the GTK theme's colours, following changes
-    app.setWindowIcon(util.theme_icon("folder"))
+    app.setWindowIcon(util.app_icon())
     util.migrate_legacy()
     util.ensure_desktop_entry()
     from PyQt6.QtGui import QImageReader
