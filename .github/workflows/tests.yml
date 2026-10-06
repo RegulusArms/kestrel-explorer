@@ -24,10 +24,12 @@ jobs:
       - name: Install the app's and the tests' dependencies
         # python3-pyqt6, python3-pil, python3-gi: what install.sh checks for; dbus: each test's private session bus;
         # libglib2.0-bin, xdg-utils, desktop-file-utils: the installer test; gnome-shell-common: GNOME Shell's
-        # settings (the dock and extension checks are skipped without them); p7zip-full, zip, unzip: archive checks
+        # settings (the dock and extension checks are skipped without them); p7zip-full, zip, unzip: archive checks;
+        # bleachbit, libxml2-utils: the BleachBit cleaner's dry run and schema check (skipped without them)
         run: |
           sudo apt-get update && sudo apt-get install -y python3-pyqt6 python3-pil python3-gi gir1.2-glib-2.0 dbus \
-            libglib2.0-bin xdg-utils desktop-file-utils gnome-shell-common util-linux p7zip-full zip unzip
+            libglib2.0-bin xdg-utils desktop-file-utils gnome-shell-common util-linux p7zip-full zip unzip \
+            bleachbit libxml2-utils
 
       - name: Run the tests
         run: tests/run.sh
