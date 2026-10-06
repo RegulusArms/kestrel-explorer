@@ -3,9 +3,9 @@
 
   bench/run.sh                      build, generate the data (first time), run everything, print the tables
   bench/run.sh --runs 5             more runs per measurement (medians are reported)
-  bench/run.sh --update-readme      ...and write the results into both projects' README.md
   bench/run.sh --only startup,copy  re-run only some measurements (the rest are kept from the last run)
   bench/run.sh --report             rebuild the tables from the last results without running anything
+The tables are printed and written to bench/results.md, as Performance sections ready to paste into the READMEs.
 
 Every run happens on a headless X server (Xvfb) with a fresh home folder and a private D-Bus session bus on which
 only the desktop's settings (dconf) and virtual file system (gvfs) services can start, so caches are empty and no
@@ -679,9 +679,12 @@ def machine(other):
     return cpu, os.cpu_count(), version or OTHERS[other]["label"], distro
 
 
-def section(t1, t2, summary, runs, py_link, cxx_link, bench_link, other):
+def section(t1, t2, summary, runs, other):
     cpu, threads, version, distro = machine(other)
     label = OTHERS[other]["label"]
+    # absolute links, so the section reads the same pasted into either README (the Python one is also PyPI's page)
+    gh = "https://github.com/RegulusArms"
+    py_link, cxx_link, bench_link = f"{gh}/kestrel-explorer", f"{gh}/kes-c", f"{gh}/kes-c/tree/main/bench"
     owns = label + ("'" if label.endswith("s") else "'s")   # GNOME Files', Nemo's
     if not OTHERS[other]["thumbnails"]:
         thumbs = f"{label} wasn't timed on this (see below)."
@@ -756,29 +759,13 @@ Thumbnails and mosaics take about as long in both versions, because both decode 
 """
 
 
-def update_readmes(t1, t2, summary, runs, other):
-    """Write the section for `other` into both READMEs: in place of its old one, or after the other Performance
-    sections (a run on Linux Mint adds "vs Nemo" and leaves "vs GNOME Files" as it was)."""
-    heading = OTHERS[other]["heading"]
-    # the Python README is also PyPI's project page, where only absolute links work
-    gh = "https://github.com/RegulusArms"
-    for root, py_link, cxx_link, bench_link in (
-            (CXX_ROOT, "../kestrel-explorer", ".", "bench"),
-            (PY_ROOT, f"{gh}/kestrel-explorer", f"{gh}/kes-c", f"{gh}/kestrel-explorer/tree/main/bench")):
-        path = os.path.join(root, "README.md")
-        with open(path) as f:
-            s = f.read()
-        text = section(t1, t2, summary, runs, py_link, cxx_link, bench_link, other) + "\n"
-        if heading + "\n" in s:
-            start = s.index(heading + "\n")
-            end = s.index("\n## ", start + 1) + 1
-        else:
-            last = max(s.rfind("\n" + o["heading"] + "\n") for o in OTHERS.values())
-            start = end = s.index("\n## ", last + 1) + 1 if last >= 0 else len(s)
-        s = s[:start] + text + s[end:]
-        with open(path, "w") as f:
-            f.write(s)
-        print(f"Updated {path}")
+def write_results(sections):
+    """bench/results.md: a README Performance section for each app compared with ("Kestrel vs GNOME Files", and/or
+    "Kestrel vs Nemo" from a run on Linux Mint), to paste into both READMEs."""
+    path = os.path.join(HERE, "results.md")
+    with open(path, "w") as f:
+        f.write("\n".join(sections))
+    print(f"\nWrote {path}")
 
 
 # ---------------------------------------------------------------- main
@@ -805,22 +792,23 @@ def runs_for(test, runs):
 def report(res, args):
     runs = max((len(v) for (a, t), v in res.items() if t not in ("startup", "idle")), default=args.runs)
     others = [o for o in OTHERS if any(a == o for a, _t in res)]
-    t2 = None
+    t2, sections = None, []
     for other in others or [next(iter(OTHERS))]:
         t1, t2, summary = tables(res, other)
         print()
         print("\n".join(t1))
-        if args.update_readme and others:
-            update_readmes(t1, t2, summary, runs, other)
+        if others:
+            sections.append(section(t1, t2, summary, runs, other))
     print()
     print("\n".join(t2))
+    if sections:
+        write_results(sections)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--runs", type=int, default=3)
     ap.add_argument("--only", default="")
-    ap.add_argument("--update-readme", action="store_true")
     ap.add_argument("--report", action="store_true", help="rebuild the tables from results.json without running")
     ap.add_argument("--measure", nargs=2, metavar=("APP", "TEST"), help=argparse.SUPPRESS)
     args = ap.parse_args()
