@@ -236,4 +236,6 @@ try:
 except ProcessLookupError:
     gone = True
 check(left > 0 and gone, "a tool still running when nothing refers to it any more is stopped")
+r = subprocess.run(["true"], input=b"x" * (4 << 20), capture_output=True, timeout=10)
+check(r.returncode == 0, "writing to a program that exits without reading its input doesn't kill Kestrel")
 finish()
