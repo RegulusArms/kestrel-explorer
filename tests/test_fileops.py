@@ -2,9 +2,10 @@
 import os
 import stat
 import subprocess
+import threading
 import time
 
-from common import A, check, finish, home_path as P, setup_app, wait_for
+from common import A, check, finish, home_path as P, setup_app, skip, wait_for
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
@@ -238,4 +239,55 @@ except ProcessLookupError:
 check(left > 0 and gone, "a tool still running when nothing refers to it any more is stopped")
 r = subprocess.run(["true"], input=b"x" * (4 << 20), capture_output=True, timeout=10)
 check(r.returncode == 0, "writing to a program that exits without reading its input doesn't kill Kestrel")
+
+# -- archive passwords: never on a tool's command line (where every user can see it), apart from zpaq's
+pw = 'Kestrel-pw-7731 "quoted"'
+os.makedirs(P("pwsrc"), exist_ok=True)
+with open("/dev/urandom", "rb") as rnd, open(P("pwsrc/data.bin"), "wb") as f:
+    f.write(rnd.read(30 << 20))  # big enough that the tool runs a while, for the watcher to see it
+for t in ("rar", "zip"):
+    label = f"{t}: a password-protected archive is made and opened, and the password is never on a command line"
+    if not archive.tool(t) or not archive.tool("unrar" if t == "rar" else "7z"):
+        skip(f"{label} ({t} isn't installed)")
+        continue
+    fmt = next(f for f in archive.formats() if f["id"] == t)
+    out = P(f"secret.{t}")
+    watching, seen, leaked = [True], [0], [0]
+
+    def watch(name=f"secret.{t}".encode(), needle=pw[:15].encode()):
+        """Every command line on the system, while the jobs run."""
+        while watching[0]:
+            for pid in os.listdir("/proc"):
+                if pid.isdigit():
+                    try:
+                        with open(f"/proc/{pid}/cmdline", "rb") as f:
+                            line = f.read()
+                    except OSError:
+                        continue
+                    if name in line:
+                        seen[0] += 1
+                        leaked[0] += needle in line
+
+    watcher = threading.Thread(target=watch)
+    watcher.start()
+    task = fileops.Task("test", lambda _t: None)
+    spec = {"format": fmt, "tool": t, "base": P("pwsrc"), "rels": ["data.bin"], "out": out, "level": 1,
+            "password": pw, "total": 30 << 20}
+    made = opened = refused = False
+    try:
+        archive.compress(task, spec)
+        made = os.path.exists(out)
+        os.makedirs(P(f"pwout-{t}"), exist_ok=True)
+        archive.extract(task, out, P(f"pwout-{t}"), pw, "overwrite")
+        with open(P(f"pwout-{t}/data.bin"), "rb") as a, open(P("pwsrc/data.bin"), "rb") as b:
+            opened = a.read() == b.read()
+        os.makedirs(P(f"pwbad-{t}"), exist_ok=True)
+        archive.extract(task, out, P(f"pwbad-{t}"), "wrong", "overwrite")
+    except archive.WrongPassword:
+        refused = True
+    except Exception:
+        pass
+    watching[0] = False
+    watcher.join()
+    check(made and opened and refused and seen[0] > 0 and leaked[0] == 0, label)
 finish()
