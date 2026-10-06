@@ -11,7 +11,7 @@ from PyQt6.QtGui import QPainter, QPalette
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QMessageBox,
                              QProgressBar, QToolButton, QVBoxLayout, QWidget)
 
-from . import atc, util
+from . import atc, stats, util
 
 CHUNK = 4 * 1024 * 1024
 
@@ -100,6 +100,7 @@ class TaskBoard(QObject):
 
     def add(self, task):
         self.local.append(task)
+        stats.peak("tasks at once", len(self.local))
         task.progress.connect(self._progress)
         task.finished.connect(lambda t=task: self._finished(t))
         self._schedule(0)
@@ -348,6 +349,57 @@ def run_task(parent, title, fn, on_done=None, quiet=False):
     return run_job(parent, title, lambda _task: fn(), on_done, cancellable=False, quiet=quiet)
 
 
+# Within a tree, copies and deletes work through open folders, by name, never by path again: each folder is opened
+# without following a symlink and must still be the folder that was listed, so a folder swapped for a symlink while the
+# job runs (in /tmp, a shared folder, a USB drive) stops the job instead of leading it into the symlink's target. The
+# path you chose itself, symlinked folders on the way included, is used as it is. A delete doesn't cross into another
+# drive mounted inside the tree.
+def _call(fn, shown, *args, **kw):
+    """fn(*args), its error naming `shown` (the path), not the bare name it was given."""
+    try:
+        return fn(*args, **kw)
+    except OSError as e:
+        raise type(e)(e.errno, e.strerror, shown) from None
+
+
+def _open_parent(path):
+    """The folder a path's last part is in."""
+    d = os.path.dirname(path) or "/"
+    return _call(os.open, d, d, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+
+
+def _lstat_at(dirfd, name, shown, missing_ok=False):
+    try:
+        return os.stat(name, dir_fd=dirfd, follow_symlinks=False)
+    except FileNotFoundError:
+        if missing_ok:
+            return None
+        raise FileNotFoundError(2, "No such file or directory", shown) from None
+
+
+def _open_dir_at(dirfd, name, st, shown):
+    fd = _call(os.open, shown, name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dirfd)
+    now = os.fstat(fd)
+    if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
+        os.close(fd)
+        raise RuntimeError(f"{shown} changed while it was being worked on")
+    return fd
+
+
+def _names_in(dirfd, shown):
+    """The names in an open folder."""
+    return _call(os.listdir, shown, dirfd)
+
+
+def _copy_times_mode(fd, st):
+    """On a descriptor: never through a symlink."""
+    try:
+        os.utime(fd, ns=(st.st_atime_ns, st.st_mtime_ns))
+        os.chmod(fd, stat.S_IMODE(st.st_mode))
+    except OSError:
+        pass
+
+
 class _Ops:
     """Runs a list of (op, src, dst) where op in copy/move/merge_copy/merge_move/delete, for a Task.
     Progress is in bytes, or in files when every job is a delete. Returns the list of error strings."""
@@ -396,6 +448,7 @@ class _Ops:
             if not (op == "move" and self._same_dev(src, dst)):
                 self.total += self._size(src)
         self.total = max(self.total, 1)
+        started = stats.now_ms()
         for op, src, dst in self.jobs:
             self.task.check()
             try:
@@ -412,6 +465,9 @@ class _Ops:
                 self.denied.append((op, src, dst))
             except Exception as e:
                 self.errors.append(f"{os.path.basename(src)}: {e}")
+        ms = stats.now_ms() - started
+        if not self.by_count and self.done > 0 and ms > 0:
+            stats.sample("copy speed (MB/s)", self.done / 1e6 / (ms / 1000))
         return self.errors
 
     @staticmethod
@@ -441,21 +497,35 @@ class _Ops:
                 raise
             self._remove_tree(path)
 
+    # The tree is worked on through open folders, by name (see "Within a tree" above the class)
     def _remove_tree(self, path):
-        if os.path.isdir(path) and not os.path.islink(path):
-            for root, dirs, files in os.walk(path, topdown=False):
-                for name in files + dirs:
-                    self.task.check()
-                    p = os.path.join(root, name)
-                    if name in dirs and not os.path.islink(p):
-                        os.rmdir(p)
-                    else:
-                        os.unlink(p)
-                    self._count(name)
-            os.rmdir(path)
+        st = os.lstat(path)
+        if stat.S_ISDIR(st.st_mode):
+            parent = _open_parent(path)
+            try:
+                self._remove_at(parent, os.path.basename(path), st, path, st.st_dev)
+            finally:
+                os.close(parent)
         else:
             os.unlink(path)
         self._count(os.path.basename(path))
+
+    def _remove_at(self, dirfd, name, st, shown, dev):
+        if stat.S_ISDIR(st.st_mode):
+            if st.st_dev != dev:
+                raise RuntimeError(f"{shown} is on another drive (a mount point); not deleting it")
+            d = _open_dir_at(dirfd, name, st, shown)
+            try:
+                for e in _names_in(d, shown):
+                    self.task.check()
+                    p = os.path.join(shown, e)
+                    self._remove_at(d, e, _lstat_at(d, e, p), p, dev)
+                    self._count(e)
+            finally:
+                os.close(d)
+            _call(os.rmdir, shown, name, dir_fd=dirfd)
+        else:  # a file or a symlink: the name itself
+            _call(os.unlink, shown, name, dir_fd=dirfd)
 
     def _count(self, name):
         if self.by_count:
@@ -463,35 +533,91 @@ class _Ops:
             self._report(name)
 
     def _copy(self, src, dst, merge=False):
-        if os.path.islink(src):
-            if os.path.lexists(dst):
-                os.unlink(dst)
-            os.symlink(os.readlink(src), dst)
-        elif os.path.isdir(src):
-            if os.path.exists(dst) and not merge:
-                self._remove(dst)
-            os.makedirs(dst, exist_ok=True)
-            for entry in os.scandir(src):
-                self._copy(entry.path, os.path.join(dst, entry.name), merge=merge)
-            shutil.copystat(src, dst, follow_symlinks=False)
-        else:
-            self._copy_file(src, dst)
+        st = os.lstat(src)
+        sp, dp = _open_parent(src), _open_parent(dst)
+        try:
+            self._copy_at(sp, os.path.basename(src), st, src, dp, os.path.basename(dst), dst, merge)
+        finally:
+            os.close(sp)
+            os.close(dp)
 
-    def _copy_file(self, src, dst):
+    def _copy_at(self, sdir, sname, st, src, ddir, dname, dst, merge):
+        dst_st = _lstat_at(ddir, dname, dst, missing_ok=True)
+        if dst_st is not None and stat.S_ISDIR(dst_st.st_mode) and not stat.S_ISDIR(st.st_mode):
+            raise RuntimeError(f"{dst} is a folder")
+        if stat.S_ISLNK(st.st_mode):
+            target = _call(os.readlink, src, sname, dir_fd=sdir)
+            if dst_st is not None:
+                _call(os.unlink, dst, dname, dir_fd=ddir)
+            _call(os.symlink, dst, target, dname, dir_fd=ddir)
+        elif stat.S_ISDIR(st.st_mode):
+            in_fd = _open_dir_at(sdir, sname, st, src)
+            try:
+                if dst_st is not None and not merge:
+                    self._remove_at_or_retry(ddir, dname, dst_st, dst)
+                    dst_st = None
+                elif dst_st is not None and not stat.S_ISDIR(dst_st.st_mode):
+                    raise RuntimeError(f"{dst} exists and isn't a folder")
+                if dst_st is None:
+                    _call(os.mkdir, dst, dname, 0o700, dir_fd=ddir)
+                out_fd = _open_dir_at(ddir, dname, _lstat_at(ddir, dname, dst), dst)
+                try:
+                    for e in _names_in(in_fd, src):
+                        self._copy_at(in_fd, e, _lstat_at(in_fd, e, os.path.join(src, e)), os.path.join(src, e),
+                                      out_fd, e, os.path.join(dst, e), merge)
+                    _copy_times_mode(out_fd, st)
+                finally:
+                    os.close(out_fd)
+            finally:
+                os.close(in_fd)
+        elif stat.S_ISREG(st.st_mode):
+            self._copy_file_at(sdir, sname, st, src, ddir, dname, dst,
+                               dst_st is not None and stat.S_ISLNK(dst_st.st_mode))
+        else:
+            raise RuntimeError(f"{src} isn't a regular file, folder or link")
+
+    def _copy_file_at(self, sdir, sname, st, src, ddir, dname, dst, dst_is_link):
         name = os.path.basename(src)
-        with open(src, "rb") as fi, open(dst, "wb") as fo:
-            while True:
-                if self.task.cancelled:
-                    fo.close()
-                    os.unlink(dst)
-                    raise Cancelled()
-                buf = fi.read(CHUNK)
-                if not buf:
-                    break
-                fo.write(buf)
-                self.done += len(buf)
-                self._report(name)
-        shutil.copystat(src, dst)
+        in_fd = _call(os.open, src, sname, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=sdir)
+        try:
+            now = os.fstat(in_fd)
+            if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
+                raise RuntimeError(f"{src} changed while it was being copied")
+            # a symlink in the way is replaced, never written through; an existing file is overwritten in place
+            if dst_is_link:
+                _call(os.unlink, dst, dname, dir_fd=ddir)
+            out_fd = _call(os.open, dst, dname, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC,
+                           0o666, dir_fd=ddir)
+            try:
+                while True:
+                    if self.task.cancelled:
+                        os.close(out_fd)
+                        out_fd = -1
+                        os.unlink(dname, dir_fd=ddir)
+                        raise Cancelled()
+                    buf = os.read(in_fd, CHUNK)
+                    if not buf:
+                        break
+                    view = memoryview(buf)
+                    while view:
+                        view = view[os.write(out_fd, view):]
+                    self.done += len(buf)
+                    self._report(name)
+                _copy_times_mode(out_fd, st)
+            finally:
+                if out_fd >= 0:
+                    os.close(out_fd)
+        finally:
+            os.close(in_fd)
+
+    def _remove_at_or_retry(self, dirfd, name, st, shown):
+        """A folder in the way of a copy: deleted, with the same retry for read-only folders as _remove()."""
+        try:
+            self._remove_at(dirfd, name, st, shown, st.st_dev)
+        except OSError:
+            if not _make_writable(shown):
+                raise
+            self._remove_at(dirfd, name, st, shown, st.st_dev)
 
 
 def _make_writable(path):

@@ -1,0 +1,33 @@
+# Runs the test suite (tests/run.sh) on Ubuntu 24.04, the oldest supported system, with the system's Python and PyQt6,
+# on every push and pull request. The C++ version's CI (kes-c, .github/workflows/deb.yml) runs the same tests there.
+# Skipped here: the checks that need rar, and the cross-version checks that need the C++ version's build next to this.
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the app's and the tests' dependencies
+        # python3-pyqt6, python3-pil, python3-gi: what install.sh checks for; dbus: each test's private session bus;
+        # libglib2.0-bin, xdg-utils, desktop-file-utils: the installer test; gnome-shell-common: GNOME Shell's
+        # settings (the dock and extension checks are skipped without them); p7zip-full, zip, unzip: archive checks
+        run: |
+          sudo apt-get update && sudo apt-get install -y python3-pyqt6 python3-pil python3-gi gir1.2-glib-2.0 dbus \
+            libglib2.0-bin xdg-utils desktop-file-utils gnome-shell-common util-linux p7zip-full zip unzip
+
+      - name: Run the tests
+        run: tests/run.sh

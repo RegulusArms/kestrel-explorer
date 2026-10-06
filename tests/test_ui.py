@@ -4,9 +4,10 @@ menu entry or shortcut lost when code moves (or added in one version only) shows
 KESTREL_UI_DUMP=file writes the list there instead of comparing (to update ui_actions.txt after a deliberate change)."""
 import os
 
-from common import A, check, finish, home_path as P, setup_app, wait_for
+from common import A, check, finish, home_path as P, setup_app, spin, wait_for
 from PyQt6.QtGui import QKeySequence
-from PyQt6.QtWidgets import QToolButton
+from PyQt6.QtWidgets import (QAbstractButton, QAbstractItemView, QAbstractSlider, QComboBox, QHeaderView, QLineEdit,
+                             QToolButton, QWidget)
 
 from kestrel import util
 
@@ -65,6 +66,34 @@ for name, paths in cases:
     m = w.build_menu(w.pane(), paths)
     walk(m, f"context menu, {name}", out)
     m.deleteLater()
+
+# -- accessibility: every control has a name a screen reader can say, as the window opens and with the search bar,
+# the list view and the info panel open. PyQt6 has no QAccessible, so this is Qt's rule for these controls: the
+# accessible name, or a button's own text (a toolbar button's is its action's)
+CONTROLS = (QAbstractButton, QLineEdit, QAbstractSlider, QComboBox, QAbstractItemView, QHeaderView)
+
+
+def unnamed():
+    out = []
+    for wd in w.findChildren(QWidget):
+        if not isinstance(wd, CONTROLS) or not wd.isVisibleTo(w):
+            continue
+        name = wd.accessibleName().strip() or (wd.text().replace("&", "").strip() if isinstance(wd, QAbstractButton) else "")
+        if not name:
+            out.append(f'{type(wd).__name__} "{wd.toolTip().split(chr(10))[0]}"')
+    return out
+
+
+missing = unnamed()
+w.pane().start_search()
+w.set_view("list")
+for a in w.actions():
+    if a.text() == "Info Panel" and not a.isChecked():
+        a.trigger()
+spin(200)
+missing = list(dict.fromkeys(missing + unnamed()))
+check(not missing, "every control in the window has a name a screen reader can say (also with the search bar, "
+                   "the list view and the info panel open)" + (f" (no name: {', '.join(missing)})" if missing else ""))
 
 dump = os.environ.get("KESTREL_UI_DUMP")
 if dump:

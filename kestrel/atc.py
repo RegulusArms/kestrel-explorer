@@ -17,7 +17,7 @@ import time
 
 from PyQt6.QtCore import QCoreApplication, QObject, QTimer, pyqtSignal
 
-from . import __version__, util
+from . import __version__, stats, util
 
 NAME = "kestrel_explorer.ATC"
 PATH = "/kestrel_explorer/ATC"
@@ -290,7 +290,8 @@ class Radio(QObject):
             msg["keep"] = True
             self._kept[type_] = msg
         if self._conn is not None and self._tower:
-            self._conn.call(NAME, PATH, IFACE, "Report", util.GLib.Variant("(s)", (_compact(msg),)), None,
+            sent = dict(msg, sent=float(time.time() * 1000)) if stats.enabled() else msg  # others ignore it unless counting
+            self._conn.call(NAME, PATH, IFACE, "Report", util.GLib.Variant("(s)", (_compact(sent),)), None,
                             util.Gio.DBusCallFlags.NONE, -1, None, None, None)
         own = dict(msg, own=True)
         QTimer.singleShot(0, lambda: self.heard.emit(own))
@@ -356,6 +357,8 @@ class Radio(QObject):
         msg = parse(raw)
         if not valid_message(msg):
             return
+        if isinstance(msg.get("sent"), (int, float)) and not isinstance(msg.get("sent"), bool):
+            stats.sample("tower delay (ms)", time.time() * 1000 - msg["sent"])  # KESTREL_STATS (both ends)
         msg["from"] = flight
         self.heard.emit(msg)
 

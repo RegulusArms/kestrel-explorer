@@ -20,7 +20,7 @@ from PyQt6.QtCore import (QBuffer, QByteArray, QObject, QRectF, QRunnable, QSize
                           pyqtSignal)
 from PyQt6.QtGui import QColor, QIcon, QImage, QImageReader, QPainter, QPainterPath, QPixmap
 
-from . import atc, util
+from . import atc, stats, util
 
 FLAVORS = {128: "normal", 256: "large", 512: "x-large"}
 COVER_NAMES = ("cover", "folder", ".cover", ".folder", "front", "poster")
@@ -231,6 +231,7 @@ def file_thumb(path, mtime, size):
     if not in_cache_dir and cache_path.exists():
         img = QImage(str(cache_path))
         if not img.isNull() and img.text("Thumb::MTime") == str(int(mtime)):
+            stats.count("thumbnails from the disk cache")
             return img
     if util.is_image(path):
         img = load_scaled(path, size)
@@ -243,6 +244,7 @@ def file_thumb(path, mtime, size):
         img = system_thumb(path, size)
     if img is None:
         return None
+    stats.count("thumbnails made")
     # don't bother caching images that are already thumbnail sized
     if not in_cache_dir and (img.width() >= size or img.height() >= size or util.is_video(path) or not own):
         try:
@@ -399,6 +401,7 @@ def folder_thumb(path, mtime, size, opts):
     if cache.exists():
         img = QImage(str(cache))
         if not img.isNull() and img.text("FE::Tag") == tag:
+            stats.count("folder previews from the disk cache")
             return img
         if not img.isNull() and img.text("FE::Tag") == "empty|" + tag:
             return None
@@ -426,6 +429,7 @@ def folder_thumb(path, mtime, size, opts):
     img = compose_folder(images, size, color, videos)
     img.setText("FE::Tag", tag)
     img.save(str(cache), "PNG")
+    stats.count("folder previews made")
     return img
 
 
@@ -732,6 +736,8 @@ class ThumbnailManager(QObject):
                 self.failed.add(k)
                 return None
             self.pending.add(k)
+            stats.count("thumbnails not in memory")
+            stats.peak("thumbnail queue", len(self.pending))
             self._prio += 1
             opts = {"count": self.folder_count, "order": self.folder_order,
                     "color": self.color_for(path), "cover": self.covers.get(path)}

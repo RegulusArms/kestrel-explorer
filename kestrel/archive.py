@@ -10,6 +10,7 @@ bytes Kestrel pipes through them, Cancel kills the whole process group, and part
 Passwords go to 7z on stdin. unrar, rar and zpaq only accept them as a command-line switch, which other
 local users could read from the process list while the job runs.
 """
+import functools
 import os
 import re
 import select
@@ -19,7 +20,7 @@ import signal
 import subprocess
 import time
 
-from . import util
+from . import stats, util
 
 _SYSTEM_PATH = "/usr/local/bin:/usr/bin:/bin"
 # English messages (Kestrel parses them) but UTF-8 file names: under plain LC_ALL=C, rar stores non-ASCII names as
@@ -466,6 +467,19 @@ def _volume_files(out):
         return []
 
 
+def _job_clock(fn):
+    """KESTREL_STATS: how long a compress or extract job took (however it ends)."""
+    @functools.wraps(fn)
+    def run(*args, **kw):
+        started = stats.now_ms()
+        try:
+            return fn(*args, **kw)
+        finally:
+            stats.sample("archive job (s)", (stats.now_ms() - started) / 1000)
+    return run
+
+
+@_job_clock
 def compress(task, spec):
     """Create the archive described by spec (see archive_ui.CompressDialog.spec()). Returns the output path."""
     fmt, out = spec["format"], spec["out"]
@@ -619,6 +633,7 @@ def _extract_command(path, dest, password, overwrite, threads):
     return t, argv, stdin, env
 
 
+@_job_clock
 def extract(task, path, dest, password=None, overwrite="rename", threads=0):
     """Extract `path` into the existing folder `dest`. Raises WrongPassword, RuntimeError or Cancelled."""
     path = first_volume(path)

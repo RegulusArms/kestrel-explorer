@@ -9,8 +9,8 @@ from PyQt6.QtGui import QAction, QGuiApplication, QKeySequence, QWindow
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox,
                              QProgressBar, QSlider, QSplitter, QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget)
 
-from . import (__version__, admin, archive, archive_ui, atc, chooser, dialogs, fileops, fm1, places, sharing, thumbs,
-               undo, util, uwp)
+from . import (__version__, admin, archive, archive_ui, atc, chooser, dialogs, fileops, fm1, places, sharing, stats,
+               thumbs, undo, util, uwp)
 from .actions import FileActions
 from .chooser import ChooserBar
 from .incoming import handle_fm1, on_atc, open_in_tabs, report_windows, window_focused  # noqa: F401 (tests use A.on_atc)
@@ -79,6 +79,7 @@ class MainWindow(FileActions, Opening, QMainWindow):
         self.zoom_slider = QSlider(Qt.Orientation.Horizontal)
         self.zoom_slider.setFixedWidth(140)
         self.zoom_slider.setToolTip("Zoom (Ctrl+scroll)")
+        self.zoom_slider.setAccessibleName("Zoom")
         self.zoom_slider.valueChanged.connect(lambda v: self.pane() and self.pane().zoom_value() != v and self.pane().zoom(absolute=v))
         self.thumb_progress = QProgressBar()
         self.thumb_progress.setFixedWidth(220)
@@ -153,13 +154,14 @@ class MainWindow(FileActions, Opening, QMainWindow):
         self.a_search = tb.addAction(icon("system-search-symbolic", "edit-find"), "Search (Ctrl+F)",
                                      lambda: self.pane().start_search())
         self.view_btn = QToolButton()
-        self.view_btn.setAutoRaise(True)
+        self.view_btn.setAutoRaise(True)  # its name and tooltip follow the view (_sync_view_btn)
         self.view_btn.clicked.connect(self.toggle_view)
         tb.addWidget(self.view_btn)
         self.sort_btn = QToolButton()
         self.sort_btn.setAutoRaise(True)
         self.sort_btn.setIcon(icon("view-sort-ascending-symbolic", "view-sort-ascending"))
         self.sort_btn.setToolTip("Sort")
+        self.sort_btn.setAccessibleName("Sort")
         self.sort_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.sort_menu = QMenu(self)
         self.sort_menu.aboutToShow.connect(self._fill_sort_menu)
@@ -168,6 +170,8 @@ class MainWindow(FileActions, Opening, QMainWindow):
         self.menu_btn = QToolButton()
         self.menu_btn.setAutoRaise(True)
         self.menu_btn.setIcon(icon("open-menu-symbolic", "application-menu", "preferences-system"))
+        self.menu_btn.setToolTip("Menu")
+        self.menu_btn.setAccessibleName("Menu")
         self.menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         tb.addWidget(self.menu_btn)
 
@@ -457,6 +461,7 @@ class MainWindow(FileActions, Opening, QMainWindow):
         self.view_btn.setIcon(icon("view-list-symbolic", "view-list-details") if grid else
                               icon("view-grid-symbolic", "view-grid", "view-list-icons"))
         self.view_btn.setToolTip("Switch to list view (Ctrl+2)" if grid else "Switch to grid view (Ctrl+1)")
+        self.view_btn.setAccessibleName("Switch to list view" if grid else "Switch to grid view")
 
     def sync_zoom_slider(self):
         p = self.pane()
@@ -1024,6 +1029,18 @@ def open_window(paths):
     return w
 
 
+# The app-wide objects, and their order. Each is created once and lives until the process exits:
+#   _settings        here, right after the QApplication, before any thread starts. Used from the UI thread only.
+#                    Other Kestrels change the same file: on_atc("settings") re-reads it.
+#   _thumbs          here, after _settings (apply_thumb_settings reads it). Its thread pool runs for the process.
+#   TaskBoard        fileops.py, on first use (the first task, or the first window's task panel).
+#   atc.radio()      atc.py, on first use; start() here, after focus tracking and on_atc are connected, so the first
+#                    messages from other Kestrels find them. The tower is a separate process.
+#   admin.session()  admin.py, on first use (a "Retry as Administrator" or the menu); the helper process it starts
+#                    ends when its pipe closes, at the latest when this process exits.
+#   WINDOWS          app.py; a window is added when opened and removed when it closes (choosers aren't in it).
+#   last used window incoming.py (window_focused); checked against WINDOWS before use.
+# A file-chooser process (--file-chooser) makes _settings and _thumbs, then only chooser windows.
 def main(argv=None):
     global _thumbs, _settings
     # LibRaw (RAW image plugin) uses OpenMP; by default each decode spawns one
@@ -1042,6 +1059,7 @@ def main(argv=None):
     QApplication.setApplicationDisplayName(util.APP_NAME)
     QApplication.setDesktopFileName(util.APP_ID)
     app = QApplication(argv)
+    stats.print_at_quit(app)  # KESTREL_STATS=1
     util.setup_icon_theme()
     util.follow_gtk_theme()  # Qt < 6.5: the GTK theme's colours, following changes
     app.setWindowIcon(util.app_icon())

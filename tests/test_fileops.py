@@ -1,5 +1,7 @@
 """File operations: copy, move, merge, replace, delete, cancel, trash, links, unique names, and undoing them."""
+import ctypes
 import os
+import shutil
 import stat
 import subprocess
 import threading
@@ -9,7 +11,7 @@ from common import A, check, finish, home_path as P, setup_app, skip, wait_for
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
-from kestrel import archive, fileops, places, undo, util
+from kestrel import archive, fileops, places, stats, undo, util
 from kestrel.archive_ui import ExtractDialog
 
 boxes = []   # texts of message boxes that popped up (closed automatically)
@@ -42,6 +44,7 @@ def undo_and_wait(w, result):
 
 
 app = setup_app()
+stats.enable()  # KESTREL_STATS: checked at the end
 w = A.open_window([os.path.expanduser("~")])
 
 
@@ -197,6 +200,96 @@ extract_closer.start()
 w.open_paths(w.pane(), [P("arc.tar.gz")])
 check(wait_for(lambda: bool(extract_shown)), "double-clicking an archive opens Kestrel's Extract dialog")
 extract_closer.stop()
+
+# -- symlinks inside a tree: never followed, even when one is swapped in while a job runs
+victim = P("victim")  # stands for files elsewhere that a job mustn't touch
+AT_FDCWD, RENAME_EXCHANGE = -100, 2
+_libc = ctypes.CDLL(None, use_errno=True)
+
+
+def reset_victim():
+    shutil.rmtree(victim, ignore_errors=True)
+    make(os.path.join(victim, "keep"), b"keep")
+    make(os.path.join(victim, "sub/deeper"), b"deeper")
+
+
+def victim_intact():
+    return (text_of(os.path.join(victim, "keep")) == "keep" and text_of(os.path.join(victim, "sub/deeper")) == "deeper"
+            and len(os.listdir(victim)) == 2)
+
+
+reset_victim()
+make(P("mc_src/sub/new.txt"), b"new")
+os.makedirs(P("mc_dst"), exist_ok=True)
+os.symlink(victim, P("mc_dst/sub"))
+run_ops(w, [("merge_copy", P("mc_src"), P("mc_dst"))])
+check(victim_intact() and os.path.islink(P("mc_dst/sub")), "a merge copy doesn't write through a symlink in the destination")
+reset_victim()
+make(P("lk_src.txt"), b"new")
+os.symlink(os.path.join(victim, "keep"), P("lk_dst.txt"))
+run_ops(w, [("copy", P("lk_src.txt"), P("lk_dst.txt"))])
+check(victim_intact() and not os.path.islink(P("lk_dst.txt")) and text_of(P("lk_dst.txt")) == "new",
+      "copying onto a symlink replaces the link, not the file it points to")
+# a folder swapped for a symlink to the victim (renameat2 exchange: the path always exists) while a delete runs
+safe, start, rnd = True, time.monotonic(), 0
+while time.monotonic() - start < 4 and safe:
+    reset_victim()
+    race, links = P(f"race{rnd}"), P(f"links{rnd}")
+    for d in range(30):
+        for f in range(5):
+            make(os.path.join(race, f"d{d}/f{f}"))
+    os.makedirs(links)
+    for d in range(30):
+        os.symlink(victim, os.path.join(links, f"d{d}"))
+    stop = threading.Event()
+
+    def swapper():
+        while not stop.is_set():
+            for d in range(30):
+                if stop.is_set():
+                    break
+                a, b = os.fsencode(os.path.join(race, f"d{d}")), os.fsencode(os.path.join(links, f"d{d}"))
+                if _libc.renameat2(AT_FDCWD, a, AT_FDCWD, b, RENAME_EXCHANGE) == 0:
+                    time.sleep(0.0002)
+                    _libc.renameat2(AT_FDCWD, a, AT_FDCWD, b, RENAME_EXCHANGE)
+
+    t = threading.Thread(target=swapper)
+    t.start()
+    run_ops(w, [("delete", race, None)])
+    stop.set()
+    t.join()
+    safe = victim_intact()
+    rnd += 1
+check(safe, "a folder swapped for a symlink during a delete doesn't let it delete outside the tree")
+
+# -- crafted archives (tests/fixtures, make_evil_archives.sh): "../" names, absolute paths, and a symlink out of the
+# destination with a file written through it, extracted by whichever tool Kestrel picks
+for ext in ("tar.gz", "zip", "7z", "rar"):
+    label = f"a crafted {ext} archive can't write outside the folder it's extracted into"
+    base = P("evil-" + ext.replace(".", "-"))
+    archive_path = os.path.join(base, f"evil.{ext}")
+    os.makedirs(os.path.join(base, "dest"), exist_ok=True)
+    os.makedirs(os.path.join(base, "outside"), exist_ok=True)
+    shutil.copy(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", f"evil.{ext}"), archive_path)
+    if not archive.extract_tool(archive_path):
+        skip(f"{label} (no tool for it is installed)")
+        continue
+    if os.path.lexists("/tmp/kestrel-evil-abs.txt"):
+        os.unlink("/tmp/kestrel-evil-abs.txt")
+    try:
+        archive.extract(fileops.Task("test", lambda _t: None), archive_path, os.path.join(base, "dest"), None,
+                        "overwrite")
+    except Exception:  # refusing an entry may fail the job: fine, as long as nothing got out
+        pass
+    check(bool(os.listdir(os.path.join(base, "dest"))) and not os.listdir(os.path.join(base, "outside"))
+          and not os.path.lexists(os.path.join(base, "escape.txt")) and not os.path.lexists("/tmp/kestrel-evil-abs.txt"),
+          label)
+
+# -- KESTREL_STATS: what this test did was counted
+report = stats.summary()
+check("  folder listing (ms): " in report and "  copy speed (MB/s): " in report and "  archive job (s): " in report
+      and "  tasks at once: most " in report,
+      "with KESTREL_STATS, folder listings, copy speed, archive jobs and tasks at once are counted")
 
 # -- running programs: a timeout holds even without pipes, or once the program has closed its output
 start = time.monotonic()

@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QHBoxLayout, QHeaderV
                              QMessageBox, QStackedWidget, QStyle, QStyleOptionViewItem, QToolButton, QTreeView,
                              QVBoxLayout, QWidget)
 
-from . import animate, fileops, focus, places, util
+from . import animate, fileops, focus, places, stats, util
 from .overview import OVERVIEW, OVERVIEW_TITLE, OverviewPage
 from .widgets import FSModel, GridDelegate, PathRole, SearchModel, SearchThread, can_search_contents
 
@@ -93,6 +93,7 @@ class Pane(QWidget):
         self.type_filters = []  # chooser: the chosen file type's globs
         self._search_recorded = False  # the folder as it was before the active search is on back_stack
         self._pending_select = None
+        self._listing_since = None   # KESTREL_STATS: when the folder now shown started loading
         self._trash_gen = 0          # bumps on every combined-trash reload, so stale loads are dropped
         self._trash_watch = None     # QFileSystemWatcher on every trash files/ folder while showing the trash
         places.signals.starred_changed.connect(self._starred_changed)
@@ -108,11 +109,14 @@ class Pane(QWidget):
         sl.setContentsMargins(6, 4, 6, 4)
         self.search_edit = QLineEdit()
         self.search_edit.setPlaceholderText("Search… (supports * and ? wildcards)")
+        self.search_edit.setAccessibleName("Search")
         self.search_edit.setClearButtonEnabled(True)
         self.search_sub = QCheckBox("Include subfolders")
         self.search_sub.setChecked(win.view_value("search_recursive", False, type=bool))
         close = QToolButton()
         close.setIcon(icon("window-close-symbolic", "window-close"))
+        close.setToolTip("Close the search (Esc)")
+        close.setAccessibleName("Close the search")
         close.setAutoRaise(True)
         close.clicked.connect(lambda: self.close_search())
         self.search_contents = QCheckBox("File contents")
@@ -170,6 +174,7 @@ class Pane(QWidget):
 
     # -- setup
     def _setup_common(self, v):
+        v.setAccessibleName("Files")
         v.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         v.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         v.setDragEnabled(True)
@@ -210,6 +215,7 @@ class Pane(QWidget):
         t.setAlternatingRowColors(True)
         t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         t.setSortingEnabled(True)
+        t.header().setAccessibleName("Columns")
         t.setFrameShape(QTreeView.Shape.NoFrame)
         t.setIconSize(QSize(self.list_size, self.list_size))
         col = int(self.win.view_value("sort_col", 0))
@@ -327,6 +333,7 @@ class Pane(QWidget):
 
     # -- navigation
     def set_path(self, path, record=True, select=None):
+        self._listing_since = stats.now_ms()
         if path == OVERVIEW:
             if record and self.path and self.path != OVERVIEW:
                 self.back_stack.append(self._snapshot(OVERVIEW))
@@ -454,6 +461,9 @@ class Pane(QWidget):
 
     def _dir_loaded(self, p):
         if p == self.path:
+            if self._listing_since is not None:
+                stats.sample("folder listing (ms)", float(stats.now_ms() - self._listing_since))
+            self._listing_since = None
             self._update_empty()
             if self.win.pane() is self:
                 self.win.update_status()

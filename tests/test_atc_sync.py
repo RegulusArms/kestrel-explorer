@@ -3,14 +3,16 @@ import json
 import os
 import signal
 import subprocess
+import time
 
 from common import A, FakeFlight, check, finish, home_path as P, setup_app, spin, start_radio, wait_for
 from gi.repository import Gio
 from PyQt6.QtCore import Qt
 
-from kestrel import atc, dialogs, places, thumbs, util
+from kestrel import atc, dialogs, places, stats, thumbs, util
 
 app = setup_app()
+stats.enable()  # KESTREL_STATS: the tower delay check
 home = os.path.expanduser("~")
 for d in ("d1", "d2"):
     os.makedirs(P(d), exist_ok=True)
@@ -55,6 +57,9 @@ places.STARRED_FILE.write_text(json.dumps([f2]))
 fake.report({"type": "starred"})
 check(wait_for(lambda: places.is_starred(f2) and not places.is_starred(f1)) and bool(sig),
       "Another Kestrel's stars are picked up")
+fake.report({"type": "starred", "sent": time.time() * 1000})
+check(wait_for(lambda: "  tower delay (ms): " in stats.summary()),
+      "with KESTREL_STATS, a report's time to arrive through the tower is counted")
 thumbs.STYLES_FILE.write_text(json.dumps({d1: {"color": "#abcdef"}}))
 thumbs.COVERS_FILE.write_text("{}")
 fake.report({"type": "folders", "paths": [d1]})

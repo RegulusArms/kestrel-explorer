@@ -1,67 +1,67 @@
-button "menu" > File
-button "menu" > File > New Window [Ctrl+N]
-button "menu" > File > New Tab [Ctrl+T]
-button "menu" > File > Close Tab [Ctrl+W]
-button "menu" > File > ---
-button "menu" > File > New Folder… [Ctrl+Shift+N]
-button "menu" > File > New Empty File… [Ctrl+Alt+N]
-button "menu" > File > Open Terminal Here [Ctrl+Alt+T]
-button "menu" > File > ---
-button "menu" > File > Bookmark This Location [Ctrl+D]
-button "menu" > File > Properties of This Folder
-button "menu" > File > ---
-button "menu" > File > Quit [Ctrl+Q]
-button "menu" > Edit
-button "menu" > Edit > Undo [Ctrl+Z]
-button "menu" > Edit > ---
-button "menu" > Edit > Cut [Ctrl+X]
-button "menu" > Edit > Copy [Ctrl+C]
-button "menu" > Edit > Paste [Ctrl+V]
-button "menu" > Edit > Paste as Link [Ctrl+Shift+V]
-button "menu" > Edit > ---
-button "menu" > Edit > Select All [Ctrl+A]
-button "menu" > Edit > Invert Selection [Ctrl+Shift+I]
-button "menu" > Edit > ---
-button "menu" > Edit > Rename… [F2]
-button "menu" > Edit > Duplicate [Ctrl+Shift+D]
-button "menu" > Edit > Move to Trash [Del]
-button "menu" > Edit > Delete Permanently [Shift+Del]
-button "menu" > Edit > Copy Path [Ctrl+Shift+C]
-button "menu" > Edit > ---
-button "menu" > Edit > Properties [Alt+Return, Ctrl+I]
-button "menu" > View
-button "menu" > View > Grid View [Ctrl+1]
-button "menu" > View > List View [Ctrl+2]
-button "menu" > View > ---
-button "menu" > View > Zoom In [Ctrl++, Ctrl+=]
-button "menu" > View > Zoom Out [Ctrl+-]
-button "menu" > View > Reset Zoom [Ctrl+0]
-button "menu" > View > ---
-button "menu" > View > Toggle Folder Previews [Ctrl+Shift+P]
-button "menu" > View > Show Hidden Files [Ctrl+H] (toggle)
-button "menu" > View > Sidebar [F9] (toggle)
-button "menu" > View > Info Panel [F3] (toggle)
-button "menu" > View > Fullscreen [F11]
-button "menu" > View > Reload [F5, Ctrl+R]
-button "menu" > Go
-button "menu" > Go > Back [Alt+Left, Backspace]
-button "menu" > Go > Forward [Alt+Right]
-button "menu" > Go > Parent Folder [Alt+Up]
-button "menu" > Go > Open Selected [Alt+Down]
-button "menu" > Go > Homepage [Alt+Home]
-button "menu" > Go > Home Folder
-button "menu" > Go > Overview (Drives & Bookmarks)
-button "menu" > Go > Enter Location… [Ctrl+L, F6]
-button "menu" > Go > Search [Ctrl+F]
-button "menu" > Go > Next Tab [Ctrl+PgDown, Ctrl+Tab]
-button "menu" > Go > Previous Tab [Ctrl+PgUp, Ctrl+Shift+Tab]
-button "menu" > ---
-button "menu" > Preferences… [Ctrl+,]
-button "menu" > Start Admin Session…
-button "menu" > Clear Folder Preview Cache
-button "menu" > Delete All Thumbnails…
-button "menu" > Keyboard Shortcuts [F1]
-button "menu" > About
+button "Menu" > File
+button "Menu" > File > New Window [Ctrl+N]
+button "Menu" > File > New Tab [Ctrl+T]
+button "Menu" > File > Close Tab [Ctrl+W]
+button "Menu" > File > ---
+button "Menu" > File > New Folder… [Ctrl+Shift+N]
+button "Menu" > File > New Empty File… [Ctrl+Alt+N]
+button "Menu" > File > Open Terminal Here [Ctrl+Alt+T]
+button "Menu" > File > ---
+button "Menu" > File > Bookmark This Location [Ctrl+D]
+button "Menu" > File > Properties of This Folder
+button "Menu" > File > ---
+button "Menu" > File > Quit [Ctrl+Q]
+button "Menu" > Edit
+button "Menu" > Edit > Undo [Ctrl+Z]
+button "Menu" > Edit > ---
+button "Menu" > Edit > Cut [Ctrl+X]
+button "Menu" > Edit > Copy [Ctrl+C]
+button "Menu" > Edit > Paste [Ctrl+V]
+button "Menu" > Edit > Paste as Link [Ctrl+Shift+V]
+button "Menu" > Edit > ---
+button "Menu" > Edit > Select All [Ctrl+A]
+button "Menu" > Edit > Invert Selection [Ctrl+Shift+I]
+button "Menu" > Edit > ---
+button "Menu" > Edit > Rename… [F2]
+button "Menu" > Edit > Duplicate [Ctrl+Shift+D]
+button "Menu" > Edit > Move to Trash [Del]
+button "Menu" > Edit > Delete Permanently [Shift+Del]
+button "Menu" > Edit > Copy Path [Ctrl+Shift+C]
+button "Menu" > Edit > ---
+button "Menu" > Edit > Properties [Alt+Return, Ctrl+I]
+button "Menu" > View
+button "Menu" > View > Grid View [Ctrl+1]
+button "Menu" > View > List View [Ctrl+2]
+button "Menu" > View > ---
+button "Menu" > View > Zoom In [Ctrl++, Ctrl+=]
+button "Menu" > View > Zoom Out [Ctrl+-]
+button "Menu" > View > Reset Zoom [Ctrl+0]
+button "Menu" > View > ---
+button "Menu" > View > Toggle Folder Previews [Ctrl+Shift+P]
+button "Menu" > View > Show Hidden Files [Ctrl+H] (toggle)
+button "Menu" > View > Sidebar [F9] (toggle)
+button "Menu" > View > Info Panel [F3] (toggle)
+button "Menu" > View > Fullscreen [F11]
+button "Menu" > View > Reload [F5, Ctrl+R]
+button "Menu" > Go
+button "Menu" > Go > Back [Alt+Left, Backspace]
+button "Menu" > Go > Forward [Alt+Right]
+button "Menu" > Go > Parent Folder [Alt+Up]
+button "Menu" > Go > Open Selected [Alt+Down]
+button "Menu" > Go > Homepage [Alt+Home]
+button "Menu" > Go > Home Folder
+button "Menu" > Go > Overview (Drives & Bookmarks)
+button "Menu" > Go > Enter Location… [Ctrl+L, F6]
+button "Menu" > Go > Search [Ctrl+F]
+button "Menu" > Go > Next Tab [Ctrl+PgDown, Ctrl+Tab]
+button "Menu" > Go > Previous Tab [Ctrl+PgUp, Ctrl+Shift+Tab]
+button "Menu" > ---
+button "Menu" > Preferences… [Ctrl+,]
+button "Menu" > Start Admin Session…
+button "Menu" > Clear Folder Preview Cache
+button "Menu" > Delete All Thumbnails…
+button "Menu" > Keyboard Shortcuts [F1]
+button "Menu" > About
 button "Admin session open: administrator actions don't ask for your password again." > End Admin Session
 shortcut > Back [Alt+Left, Backspace]
 shortcut > Bookmark This Location [Ctrl+D]
