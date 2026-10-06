@@ -36,7 +36,7 @@ A file manager for Ubuntu and Linux Mint that's easy to pick up and puts many jo
 - A built-in image viewer, and GIF/WebM playback in the file view.
 - Metadata viewing and editing (EXIF, XMP, AI-generation prompts) and checksums in Properties.
 - Phones: thumbnails from the phone's own previews, and iPhone videos copied once so they play smoothly.
-- Faster file operations in the benchmark: copying about 14× faster and moving to another drive about 4.9× faster (see [Performance: Kestrel vs Nemo](#performance-kestrel-vs-nemo)).
+- Faster file operations in the benchmark: copying about 20× faster, moving to another drive 5.4× faster, and emptying the trash several hundred times faster (see [Performance: Kestrel vs Nemo](#performance-kestrel-vs-nemo)).
 
 **Installs alongside GNOME Files:** Kestrel installs next to GNOME Files (or Nemo on Linux Mint) instead of replacing it. The two share bookmarks, thumbnails, the clipboard, the trash and Recent files, so you can use either. `./install.sh --default` makes Kestrel open folders and "Show in folder" requests and show other apps' Open/Save dialogs, and `./install.sh --uninstall` hands them back.
 
@@ -661,33 +661,34 @@ All three apps are measured in the same way:
 
 | Test | Kestrel (Python) | Kestrel (C++) | Nemo |
 |---|---|---|---|
-| Startup (launch to window shown) | 0.94 s | 0.61 s | 0.81 s |
-| Open a 600-image folder (launch to the first 12 thumbnails) | 1.07 s | 0.74 s | — |
-| Open a folder of 40 videos (launch to the first 12 thumbnails) | 3.53 s | 3.36 s | — |
-| Open a folder of 40 PDFs (launch to the first 12 thumbnails) | 1.66 s | 1.10 s | — |
-| Copy 20,000 small files + 5 × 50 MB | 3.84 s | 1.89 s | 26.85 s |
-| Move the same to another drive | 3.37 s | 1.61 s | 7.80 s |
-| Move 10,000 files to the trash (all selected in one folder) | 4.33 s | 3.40 s | — |
-| Empty the trash (those 10,000 files) | 1.35 s | 0.76 s | — |
-| Peak memory (startup / 600-image folder open) | 146 / 157 MB | 114 / 123 MB | 124 / — MB |
-| Memory with 5 folders opened from other apps | 159 MB (70 MB as tabs) | 56 MB (35 MB as tabs) | 51 MB |
-| CPU time used in 30 s with a folder open, idle | 45 ms (0.15% of a core) | 35 ms (0.12% of a core) | 6375 ms (21.25% of a core) |
+| Startup (launch to window shown) | 1.02 s | 0.75 s | 0.82 s |
+| Open a 600-image folder (launch to the first 12 thumbnails) | 1.45 s | 0.88 s | — |
+| Open a folder of 40 videos (launch to the first 12 thumbnails) | 4.12 s | 4.55 s | — |
+| Open a folder of 40 PDFs (launch to the first 12 thumbnails) | 2.01 s | 1.52 s | — |
+| Copy 20,000 small files + 5 × 50 MB | 3.37 s | 1.71 s | 34.87 s |
+| Move the same to another drive | 3.81 s | 1.62 s | 8.70 s |
+| Move 10,000 files to the trash (all selected in one folder) | 4.48 s | 3.23 s | — |
+| Empty the trash (those 10,000 files) | 1.37 s | 1.01 s | 365.30 s |
+| Peak memory (startup / 600-image folder open) | 148 / 159 MB | 116 / 125 MB | 123 / — MB |
+| Memory with 5 folders opened from other apps | 162 MB (72 MB as tabs) | 58 MB (36 MB as tabs) | 51 MB |
+| CPU time used in 30 s with a folder open, idle | 35 ms (0.12% of a core) | 35 ms (0.12% of a core) | 7510 ms (25.03% of a core) |
 
 Kestrel (C++) compared with Nemo:
-- startup: 1.3× faster;
-- copying: about 14× faster;
-- moving to another drive: 4.9× faster.
+- startup: 1.1× faster;
+- copying: about 20× faster;
+- moving to another drive: 5.4× faster;
+- emptying the trash: about 362× faster.
 
 **Limits of this comparison:**
 - **Opening a folder:** the two apps don't do the same amount of work.
   - Nemo wasn't timed on this (see below).
   - Kestrel makes them only for what's on screen (40 images here), and the rest as you scroll.
-  - To thumbnail a whole folder at once, Kestrel has "Generate Previews": 7.54 s for these 600 images in the C++ version (table below).
+  - To thumbnail a whole folder at once, Kestrel has "Generate Previews": 8.37 s for these 600 images in the C++ version (table below).
 - **File operations:** Nemo's D-Bus service returns straight away, so its times were measured by watching the files until the operation had finished, to within about 50 ms.
 - **Opening a folder not timed:** Nemo makes no thumbnails in this setup (a fresh home folder with its default settings), so the folder tests are skipped for it and those rows show —, as does its peak memory with the 600-image folder open.
 - **Not timed:** Nemo's D-Bus file-operations service has no way to move files to the trash, so those rows show —. For "Empty the trash", the files were put in the trash with `gio trash` first.
-- **CPU while idle:** Nemo kept about 21% of a core busy with nothing happening. That's unusual for a file manager at rest, so it probably comes from this headless setup (where it also made no thumbnails) rather than from everyday use.
-- **Didn't finish:** asked through its D-Bus service to empty the trash, Nemo didn't finish within 2 minutes (its service deletes the files one at a time, about 50 a second), so those rows show —.
+- **CPU while idle:** Nemo kept about 25% of a core busy with nothing happening. That's unusual for a file manager at rest, so it probably comes from this headless setup (where it also made no thumbnails) rather than from everyday use.
+- **Measured once:** Nemo took over 2 minutes for the trash test, so it was run once instead of 3 times. Its D-Bus service empties the trash one file at a time.
 - **Memory:** Nemo makes thumbnails in separate helper processes, whose memory isn't counted in its figures. Kestrel makes them inside the app.
 - **Search:** Nemo's search can't be timed from outside, so it isn't compared.
 
@@ -697,11 +698,11 @@ These are measured inside the app, because Nemo has no equivalent ("Generate Pre
 
 | Test | Python | C++ | C++ speed-up |
 |---|---|---|---|
-| Thumbnail all 600 images ("Generate Previews") | 8.09 s | 7.54 s | 1.1× faster |
-| Build 150 folder mosaics | 10.79 s | 10.76 s | about the same |
-| Recursive search over 50,000 files | 0.25 s | 0.41 s | 1.7× slower |
-| Read EXIF / AI metadata for 400 images | 2.40 s | 0.051 s | about 47× faster |
-| Peak memory (background jobs) | 57–64 MB | 25–30 MB | |
+| Thumbnail all 600 images ("Generate Previews") | 8.53 s | 8.37 s | about the same |
+| Build 150 folder mosaics | 11.01 s | 11.12 s | about the same |
+| Recursive search over 50,000 files | 0.21 s | 0.17 s | 1.2× faster |
+| Read EXIF / AI metadata for 400 images | 1.92 s | 0.046 s | about 42× faster |
+| Peak memory (background jobs) | 58–66 MB | 27–31 MB | |
 
 Thumbnails and mosaics take about as long in both versions, because both decode images with the same Qt C++ code, which the Python version already runs on several threads. The C++ version is much faster where the Python version does the work in Python itself, such as reading metadata, searching and copying, and it uses about half the memory.
 
