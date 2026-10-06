@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 
-from common import A, check, finish, home_path as P, setup_app, skip, wait_for
+from common import A, check, finish, home_path as P, setup_app, skip, spin, wait_for
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
@@ -284,6 +284,61 @@ for ext in ("tar.gz", "zip", "7z", "rar"):
     check(bool(os.listdir(os.path.join(base, "dest"))) and not os.listdir(os.path.join(base, "outside"))
           and not os.path.lexists(os.path.join(base, "escape.txt")) and not os.path.lexists("/tmp/kestrel-evil-abs.txt"),
           label)
+
+# -- Shred with BleachBit: `bleachbit --shred` on the chosen files and folders, and what's still there afterwards
+# reported (BleachBit reports success either way); Empty Trash with BleachBit hands it every item in the trash and its
+# record; ✕ stops it. A stand-in bleachbit here: it only touches this test's home (the trash list also has other
+# drives' trash folders), leaves anything named "locked" (as BleachBit leaves what it can't change), and takes its time
+# over anything named "slow"
+bin_dir = P("stub-bin")
+os.makedirs(bin_dir, exist_ok=True)
+with open(os.path.join(bin_dir, "bleachbit"), "w") as f:
+    f.write('#!/bin/sh\n'
+            'printf \'%s\\n\' "$@" > "$HOME/bleachbit-args"\n'
+            'shift 2\n'
+            'for p in "$@"; do\n'
+            '    case "$p" in "$HOME"/*) ;; *) continue ;; esac\n'
+            '    case "$p" in *slow*) sleep 30 ;; esac\n'
+            '    case "$p" in *locked*) ;; *) rm -rf -- "$p" ;; esac\n'
+            'done\n')
+os.chmod(os.path.join(bin_dir, "bleachbit"), 0o755)
+old_path = os.environ["PATH"]
+os.environ["PATH"] = bin_dir + ":" + old_path
+make(P("shred/a.txt"))
+make(P("shred/dir/sub/b.txt"))
+make(P("shred/locked.txt"))
+paths = [P("shred/a.txt"), P("shred/dir"), P("shred/locked.txt")]
+result = {}
+fileops.shred(w, paths, "Test", lambda left: result.update(left=left))
+wait_for(lambda: "left" in result, 10000)
+check(fileops.can_shred() and "left" in result
+      and text_of(P("bleachbit-args")).split("\n")[:-1] == ["--shred", "--"] + paths
+      and not os.path.lexists(P("shred/a.txt")) and not os.path.lexists(P("shred/dir"))
+      and result["left"] == [P("shred/locked.txt")],
+      "Shred with BleachBit runs bleachbit --shred on the chosen files and folders, and reports what's still there")
+
+make(P("shred/old.txt"))
+util.trash(P("shred/old.txt"))
+files, info = str(util.TRASH_DIR / "files"), str(util.TRASH_DIR / "info")
+mine = [p for p in fileops.trash_contents() if p.startswith(str(util.TRASH_DIR) + "/")]
+result = {}
+fileops.shred(w, mine, "Test", lambda left: result.update(left=left))
+wait_for(lambda: "left" in result, 10000)
+check(os.path.join(files, "old.txt") in mine and os.path.join(info, "old.txt.trashinfo") in mine and "left" in result
+      and not os.listdir(files) and not os.listdir(info),
+      "Empty Trash with BleachBit hands it every item in the trash and its record, and the trash ends up empty")
+
+make(P("shred/slow.txt"))
+result, ended = {}, []
+t = fileops.shred(w, [P("shred/slow.txt")], "Test", lambda left: result.update(left=left))
+t.finished.connect(lambda: ended.append(True))
+spin(500)
+t.cancel()
+started = time.monotonic()
+stopped = wait_for(lambda: bool(ended), 5000)
+check(stopped and time.monotonic() - started < 5 and os.path.lexists(P("shred/slow.txt")) and "left" not in result,
+      "✕ stops a shred: BleachBit is stopped, and nothing is reported as left")
+os.environ["PATH"] = old_path
 
 # -- KESTREL_STATS: what this test did was counted
 report = stats.summary()

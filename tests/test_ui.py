@@ -14,10 +14,11 @@ from kestrel import util
 
 
 def depends_on_computer(text):
-    """What the computer has installed decides whether these appear (an email client or Bluetooth; Samba; code
-    editors, "Open in Zed" and the like): not listed."""
+    """What the computer has installed decides whether these appear (an email client or Bluetooth; Samba; BleachBit;
+    code editors, "Open in Zed" and the like): not listed."""
     always = ("Open in Terminal", "Open in New Tab", "Open in New Window")
-    return text in ("Send To", "Network Sharing…") or (text.startswith("Open in ") and text not in always)
+    return (text in ("Send To", "Network Sharing…") or text.endswith("with BleachBit…")
+            or (text.startswith("Open in ") and text not in always))
 
 
 def label(a):
