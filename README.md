@@ -533,6 +533,7 @@ The C++ and Python versions speak the same protocol (JSON messages), so A and B 
 |---|---|
 | `kestrel/app.py` | Main window, tabs, browser pane (including the combined trash view), menus and shortcuts, context menus |
 | `kestrel/actions.py` | The main window's file actions (a class `MainWindow` inherits): clipboard, drops, new files and folders, rename, trash and delete, restore, links |
+| `kestrel/opening.py` | Opening files and folders (a class `MainWindow` inherits): what double-click and Enter do (folders, archives, images, videos, other files, as Preferences says), Quick View, the image viewer |
 | `kestrel/widgets.py` | File-system model, grid delegate, path bar, sidebar, info panel, search |
 | `kestrel/thumbs.py` | Background thumbnail and folder-mosaic generation and caching |
 | `kestrel/viewer.py` | Image viewer |
