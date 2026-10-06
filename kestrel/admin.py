@@ -27,6 +27,28 @@ class AdminError(Exception):
     pass
 
 
+# The paths in each op's request (see admin_helper.POLICY)
+_PATHS = {"delete": ["path"], "copy": ["src", "dst"], "move": ["src", "dst"], "rename": ["src", "dst"],
+          "mkdir": ["path"], "touch": ["path"], "copyfile": ["src", "dst"], "symlink": ["link"],
+          "hardlink": ["target", "link"], "write": ["path"], "chmod": ["path"]}
+
+
+def resolve_paths(op, args):
+    """The helper refuses to follow a symlink that root doesn't control (see admin_helper.py), so the folders in each
+    path are resolved here first, as the user: their own symlinked folders (~/Shared → /mnt/data) keep working. The
+    last part stays as it is (a symlink there is worked on as the link), except where the op means what a link points
+    to: chmod, and copyfile's template."""
+    args = dict(args)
+    for key in _PATHS.get(op, []):
+        p = args.get(key)
+        if not isinstance(p, str) or not p.startswith("/"):
+            continue  # the helper refuses it
+        whole = (op, key) in (("chmod", "path"), ("copyfile", "src"))
+        args[key] = os.path.realpath(p) if whole else os.path.join(os.path.realpath(os.path.dirname(p)),
+                                                                   os.path.basename(p))
+    return args
+
+
 def is_permission_error(e):
     return isinstance(e, PermissionError) or getattr(e, "errno", None) in (errno.EACCES, errno.EPERM)
 
@@ -113,7 +135,7 @@ class AdminSession(QObject):
             q = self._pending[rid] = queue.Queue()
             self._busy += 1
         try:
-            self._send({"id": rid, "op": op, **args})
+            self._send({"id": rid, "op": op, **resolve_paths(op, args)})
             cancel_sent = False
             while True:
                 # checked on every message: progress arrives ~10×/s, so waiting for a quiet moment would never cancel
