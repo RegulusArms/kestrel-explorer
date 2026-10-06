@@ -182,6 +182,7 @@ class Pane(QWidget):
         v.setDropIndicatorShown(True)
         v.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
         v.setDefaultDropAction(Qt.DropAction.MoveAction)
+        v.viewport().setAcceptDrops(True)  # the grid's Static movement turns drops off there (QListView.setMovement)
         v.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         v.customContextMenuRequested.connect(lambda pos, v=v: self.win.context_menu(self, v, pos))
         v.doubleClicked.connect(self._double_clicked)

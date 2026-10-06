@@ -5,9 +5,10 @@ KESTREL_UI_DUMP=file writes the list there instead of comparing (to update ui_ac
 import os
 
 from common import A, check, finish, home_path as P, setup_app, spin, wait_for
-from PyQt6.QtGui import QKeySequence
+from PyQt6.QtCore import QMimeData, QPointF, Qt, QUrl
+from PyQt6.QtGui import QDragEnterEvent, QDragMoveEvent, QDropEvent, QKeySequence
 from PyQt6.QtWidgets import (QAbstractButton, QAbstractItemView, QAbstractSlider, QComboBox, QHeaderView, QLineEdit,
-                             QToolButton, QWidget)
+                             QApplication, QToolButton, QWidget)
 
 from kestrel import util
 
@@ -94,6 +95,46 @@ spin(200)
 missing = list(dict.fromkeys(missing + unnamed()))
 check(not missing, "every control in the window has a name a screen reader can say (also with the search bar, "
                    "the list view and the info panel open)" + (f" (no name: {', '.join(missing)})" if missing else ""))
+
+# -- drag and drop: a file dropped onto a folder goes into it, in both views. The events go where a real drag's go: to
+# the innermost widget under the pointer that accepts drops
+w.pane().close_search()
+
+
+def drop_onto_folder(mode, name):
+    w.set_view(mode)
+    with open(P(name), "w") as f:
+        f.write("z")
+    v = w.pane().view()
+    found = []
+
+    def find():
+        found.clear()
+        m = v.model()
+        found.extend(m.index(r, 0, v.rootIndex()) for r in range(m.rowCount(v.rootIndex()))
+                     if m.index(r, 0, v.rootIndex()).data() == "folder")
+        return bool(found) and not v.visualRect(found[0]).isEmpty()
+
+    wait_for(find)
+    target = v.viewport()
+    while target is not None and not target.acceptDrops():
+        target = target.parentWidget()
+    if not found or target is None:
+        return False
+    pos = target.mapFrom(v.viewport(), v.visualRect(found[0]).center())
+    data = QMimeData()
+    data.setUrls([QUrl.fromLocalFile(P(name))])
+    actions = Qt.DropAction.CopyAction | Qt.DropAction.MoveAction
+    for event in (QDragEnterEvent(pos, actions, data, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier),
+                  QDragMoveEvent(pos, actions, data, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier),
+                  QDropEvent(QPointF(pos), actions, data, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)):
+        QApplication.sendEvent(target, event)
+    return wait_for(lambda: os.path.exists(os.path.join(P("folder"), name)) and not os.path.exists(P(name)))
+
+
+in_grid, in_list = drop_onto_folder("grid", "dropped-in-grid.txt"), drop_onto_folder("list", "dropped-in-list.txt")
+check(in_grid and in_list, "a file dropped onto a folder goes into it, in the grid and the list view"
+      + ("" if in_grid else " (not in the grid view)") + ("" if in_list else " (not in the list view)"))
 
 dump = os.environ.get("KESTREL_UI_DUMP")
 if dump:
