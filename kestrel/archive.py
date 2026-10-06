@@ -228,8 +228,22 @@ def archive_stem(path):
 
 # ---------------------------------------------------------------- running tools
 
+class _Tool(subprocess.Popen):
+    """A running tool. When nothing refers to it any more while it still runs, it's stopped, with its process group
+    (as a C++ proc::Process is when destroyed)."""
+
+    def __del__(self):
+        if self.returncode is None and self.poll() is None:
+            try:
+                os.killpg(self.pid, signal.SIGKILL)
+                self.wait()
+            except (ProcessLookupError, PermissionError):
+                pass
+        super().__del__()
+
+
 def _start(argv, cwd=None, stdin=None, stdout=subprocess.PIPE):
-    return subprocess.Popen(argv, cwd=cwd, stdin=stdin if stdin is not None else subprocess.DEVNULL,
+    return _Tool(argv, cwd=cwd, stdin=stdin if stdin is not None else subprocess.DEVNULL,
                             stdout=stdout, stderr=subprocess.STDOUT, start_new_session=True, env=_ENV)
 
 
@@ -267,15 +281,15 @@ def _run_reporting(task, argv, label, cwd=None, stdin_text=None, read_phase=None
     if tool("stdbuf"):
         argv = [tool("stdbuf"), "-o0", "-e0"] + list(argv)
     p = _start(argv, cwd=cwd, stdin=subprocess.PIPE if stdin_text is not None else None)
-    if stdin_text is not None:
-        try:
-            p.stdin.write(stdin_text.encode())
-            p.stdin.close()
-        except BrokenPipeError:
-            pass
     out = bytearray()
     start, pct, carry = time.monotonic(), None, b""
     try:
+        if stdin_text is not None:
+            try:
+                p.stdin.write(stdin_text.encode())
+                p.stdin.close()
+            except BrokenPipeError:
+                pass
         fd = p.stdout.fileno()
         while True:
             task.check()
@@ -307,7 +321,7 @@ def _run_reporting(task, argv, label, cwd=None, stdin_text=None, read_phase=None
             else:
                 task.report(0, 0, f"{label}{clock}")
         p.wait()
-    except Cancelled:
+    except BaseException:  # cancelled, or any other error: the tool mustn't carry on unseen
         _kill(p)
         raise
     return p.returncode, out.decode(errors="replace")

@@ -223,4 +223,17 @@ except subprocess.TimeoutExpired:
 check(timed_out and time.monotonic() - start < 2, "a program's timeout holds after it closes its output")
 r = subprocess.run(["sh", "-c", "echo hi"], capture_output=True, timeout=5)
 check(r.returncode == 0 and r.stdout == b"hi\n", "a program that finishes in time isn't affected")
+if os.path.exists(P("left.pid")):
+    os.unlink(P("left.pid"))
+tool = archive._start(["sh", "-c", 'echo $$ > "$0"; exec sleep 30', P("left.pid")], stdout=subprocess.DEVNULL)
+wait_for(lambda: os.path.exists(P("left.pid")) and open(P("left.pid")).read().strip() != "")
+with open(P("left.pid")) as f:
+    left = int(f.read().strip() or 0)
+del tool  # nothing refers to it any more
+try:
+    os.kill(left, 0)
+    gone = False
+except ProcessLookupError:
+    gone = True
+check(left > 0 and gone, "a tool still running when nothing refers to it any more is stopped")
 finish()
