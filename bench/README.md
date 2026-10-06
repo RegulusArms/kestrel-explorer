@@ -1,18 +1,18 @@
 # Benchmark
 
-Compares the two versions of Kestrel Explorer (Python and C++) with GNOME Files, or with Nemo on Linux Mint, on the same data and in the same conditions. The results are the "Performance" sections of the main README: `--update-readme` writes "Kestrel vs GNOME Files" and/or "Kestrel vs Nemo", depending on which of the two are installed, and leaves the other section as it is (so a run on Mint adds the Nemo results next to the GNOME ones).
+Compares the two versions of Kestrel Explorer (Python and C++) with GNOME Files, or with Nemo on Linux Mint, on the same data and in the same conditions. The results are the "Performance" sections of the main READMEs. Each run writes them to `bench/results.md`: "Kestrel vs GNOME Files" and/or "Kestrel vs Nemo", depending on which of the two are installed, ready to paste into both READMEs in place of the old section (a run on Mint gives the Nemo section; the GNOME one stays as it is). The READMEs are never changed by the benchmark itself.
 
 This folder is identical in both projects. It needs both of them side by side (`kes-c` and `kestrel-explorer` in the same parent folder), and it can be run from either.
 
 ```bash
 bench/run.sh                       # build, generate the data the first time, run everything, print the tables
-bench/run.sh --update-readme       # ...and write the tables into both projects' README.md
+                                   # and write them to bench/results.md
 bench/run.sh --runs 5              # more runs per measurement (default 3; startup gets 2 extra)
 bench/run.sh --only startup,copy   # re-run some measurements and keep the rest from the last run
-bench/run.sh --report --update-readme   # rebuild the tables from the last results without running anything
+bench/run.sh --report             # rebuild the tables (and results.md) from the last results without running anything
 ```
 
-A full run takes about 12 minutes, plus about a minute and a half the first time to generate the data. Raw results are saved in `bench/results.json`.
+A full run takes about 12 minutes (about 7 more with Nemo, whose Empty Trash is slow), plus about a minute and a half the first time to generate the data. Raw results are saved in `bench/results.json`, and the README sections in `bench/results.md`.
 
 ## Requirements
 
@@ -35,7 +35,7 @@ A full run takes about 12 minutes, plus about a minute and a half the first time
 
 ### Compared with GNOME Files or Nemo (measured from outside)
 
-Nemo is measured exactly like GNOME Files below, through its own D-Bus service (`org.Nemo.FileOperations`). Nemo is a fork of an older GNOME Files, and its service offers fewer operations: the benchmark asks the service which ones it has, and an operation it doesn't have shows "—" with a note under the table. Emptying the trash then starts from files put there with `gio trash`. Nemo's "confirm before emptying the trash" setting is turned off in the throwaway home, so Empty Trash doesn't wait for a click. Nemo makes no thumbnails in this setup, so "Open a folder" isn't measured for it: each run would only wait out the 2-minute timeout. Those rows, and its peak memory with the 600-image folder open, show "—".
+Nemo is measured exactly like GNOME Files below, through its own D-Bus service (`org.Nemo.FileOperations`). Nemo is a fork of an older GNOME Files, and its service offers fewer operations: the benchmark asks the service which ones it has, and an operation it doesn't have shows "—" with a note under the table. Emptying the trash then starts from files put there with `gio trash`. Nemo's "confirm before emptying the trash" setting is turned off in the throwaway home, so Empty Trash doesn't wait for a click. Its service empties the trash one file at a time, about 50 files a second, so that test takes several minutes with 10,000 files: it gets 10 minutes, the other operations 2. A measurement that takes over 2 minutes is run only once (a median of several wouldn't tell more), and the README section says so. Nemo makes no thumbnails in this setup, so "Open a folder" isn't measured for it: each run would only wait out the 2-minute timeout. Those rows, and its peak memory with the 600-image folder open, show "—".
 
 | Measurement | How |
 |---|---|
@@ -54,7 +54,7 @@ Nemo is measured exactly like GNOME Files below, through its own D-Bus service (
 - "Generate Previews" on the 600 images;
 - the mosaics for 150 folders;
 - a recursive search for `*_7.jpg` among 50,000 files (500 matches);
-- reading the EXIF and AI-generation info for 400 images.
+- reading the EXIF and image-generation prompts for 400 images.
 
 Each one prints its time and peak memory. GNOME Files has no equivalent of these. Its search can't be timed from outside without its file indexer.
 

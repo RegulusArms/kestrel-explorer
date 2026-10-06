@@ -1,6 +1,6 @@
 # Kestrel Explorer
 
-**Version 0.2.1-alpha3.** This is an early alpha release, so expect rough edges.
+**Version 0.3.0-alpha0.** This is an early alpha release, so expect rough edges.
 
 > **Why do Linux users still need five separate utilities and a terminal to do normal filesystem work?**
 
@@ -15,6 +15,7 @@ A file manager for Ubuntu and Linux Mint that's easy to pick up and puts many jo
 - **Metadata:** view and edit EXIF, XMP and other metadata with `exiftool`, from a searchable list of tags.
 - **Search and rename:** search subfolders with wildcards or inside files, and batch rename with templates or regular expressions.
 - **Shortcuts out:** Open in Terminal or VS Code, your Nautilus scripts, and Samba network sharing.
+- **Secure deletion:** with [BleachBit](https://www.bleachbit.org) installed, shred files and folders or empty the trash so they can't be recovered, from the right-click menu; `kes-setup --bleachbit` also adds a cleaner for Kestrel's own cache and history to BleachBit.
 
 **Improvements over GNOME Files:**
 - Undo for moves, renames, Move to Trash and new files.
@@ -34,9 +35,9 @@ A file manager for Ubuntu and Linux Mint that's easy to pick up and puts many jo
 - Admin rights for just the operation that needs them, instead of opening a whole Nemo window as root.
 - Folder icons that preview the images inside.
 - A built-in image viewer, and GIF/WebM playback in the file view.
-- Metadata viewing and editing (EXIF, XMP, AI-generation prompts) and checksums in Properties.
+- Metadata viewing and editing (EXIF, XMP, and the prompts image generators such as Stable Diffusion save in the file) and checksums in Properties.
 - Phones: thumbnails from the phone's own previews, and iPhone videos copied once so they play smoothly.
-- Faster file operations in the benchmark: copying about 14× faster and moving to another drive about 4.9× faster (see [Performance: Kestrel vs Nemo](#performance-kestrel-vs-nemo)).
+- Faster file operations in the benchmark: copying about 20× faster, moving to another drive 5.4× faster, and emptying the trash several hundred times faster (see [Performance: Kestrel vs Nemo](#performance-kestrel-vs-nemo)).
 
 **Installs alongside GNOME Files:** Kestrel installs next to GNOME Files (or Nemo on Linux Mint) instead of replacing it. The two share bookmarks, thumbnails, the clipboard, the trash and Recent files, so you can use either. `./install.sh --default` makes Kestrel open folders and "Show in folder" requests and show other apps' Open/Save dialogs, and `./install.sh --uninstall` hands them back.
 
@@ -62,11 +63,18 @@ If `~/.local/bin` isn't on your PATH yet (on Ubuntu and Mint it's only added at 
 
 It also makes Kestrel the system's **file chooser**: the Open and Save dialogs that apps get through the desktop portal (xdg-desktop-portal), such as a browser's "Save image as", Flatpak and Snap apps, and GTK 4 and Qt apps that use the portal. Those dialogs open as a Kestrel window with a bar at the bottom for the file name, the file type, Cancel and Save/Open, so you browse with the sidebar, previews and search as usual. Saving over a file asks first, and the next dialog starts where the last one picked something. The portal chooses its file chooser per desktop, not per app, so this applies to every app that uses it. The installer adds a D-Bus activation file for `kes --file-chooser`, installs the portal definition `/usr/share/xdg-desktop-portal/portals/kestrel.portal` (the portal reads these only from there, so this one file asks for your password), writes `~/.config/xdg-desktop-portal/<desktop>-portals.conf` with your desktop's current choices plus Kestrel for the file chooser (GNOME's stays as the fallback; a portals.conf you already had is kept and changed), and restarts the portal. `--uninstall` puts it all back.
 
-It also installs a small GNOME Shell extension, **Kestrel drop focus**, so that when you drag files from Kestrel into another app (a browser, an editor, a chat window) that app gets the focus, as it would on Windows. On GNOME on Wayland an app can't focus another app's window, so the extension does it when Kestrel asks; GNOME loads a newly installed extension at your next log-in, so log out and back in once. On X11 (Linux Mint, GNOME on Xorg) Kestrel needs no extension. The extension is copied to `~/.local/share/gnome-shell/extensions/` (the .deb installs it for everyone) and added to your enabled extensions; `--uninstall` takes it out again and leaves your other extensions alone.
+It also installs a small GNOME Shell extension, **Kestrel drop focus**, so that when you drag files from Kestrel into another app (a browser, an editor, a chat window) that app gets the focus, as it would on Windows. On GNOME on Wayland an app can't focus another app's window, so the extension does it when Kestrel asks; GNOME loads a newly installed extension at your next log-in, so log out and back in once. On X11 (Linux Mint, GNOME on Xorg) Kestrel needs no extension. The extension is copied to `~/.local/share/gnome-shell/extensions/` (the C++ version's .deb installs it for everyone) and added to your enabled extensions; `--uninstall` takes it out again and leaves your other extensions alone.
 
 It also makes Kestrel the app for `trash:///` (the dock's Trash icon, `gio open trash:///`), remembering which app had it so `--uninstall` can put it back. If GNOME Files is pinned in the dock, `--default` asks whether to put Kestrel in its place; `--dock` does that without asking. `--uninstall` puts GNOME Files back if the installer swapped it.
 
 The installer does all of this (everything but the PATH) by running `kes-setup`, which you can also run on its own: `kes-setup --default`, `kes-setup --dock`, and `kes-setup --undo` to put back what they changed. It sets things up for the `kes` next to it, or the one given with `--kes PATH`.
+
+**Cleaning up with BleachBit:** `kes-setup --bleachbit` adds Kestrel Explorer to [BleachBit](https://www.bleachbit.org) (as `~/.config/bleachbit/cleaners/kestrel-explorer.xml`), with four options:
+- **Cache:** folder preview mosaics, the video clips played in the file view, copies of phone videos made to play them, and exiftool's tag lists.
+- **History:** the servers you connected to recently, and the folder the last Open or Save dialog was left in. These are taken out of Kestrel's settings, and every other setting stays.
+- **Starred items** and **Folder covers and colours:** the lists of starred files and folders, and of folders given a cover, a colour or no image previews. You chose these, so BleachBit warns before cleaning them.
+
+The thumbnails Kestrel shares with GNOME Files and the desktop's Recent files are cleaned by BleachBit's own Thumbnails and Recent documents options, and undo history is never written to disk. BleachBit won't clean while Kestrel is open. `kes-setup --undo` removes the cleaner again.
 
 It uses the system Python (`/usr/bin/python3`), not a virtualenv or conda Python. `install.sh` installs the required packages and lists any recommended ones that are missing; add `--install-recommended` to install those too. The options can be combined, for example `./install.sh --install-recommended --default`.
 
@@ -101,7 +109,7 @@ Kestrel is also on [PyPI](https://pypi.org/project/kestrel-explorer/) as `kestre
 
   ```bash
   sudo apt install 7zip unrar zip unzip pigz zpaq zstd xz-utils bzip2 lzip \
-                   libimage-exiftool-perl ffmpeg pkexec gvfs gvfs-backends udisks2 \
+                   libimage-exiftool-perl ffmpeg pkexec gvfs gvfs-backends udisks2 bleachbit \
                    python3-pyqt6 python3-pil python3-gi kimageformat6-plugins
   ```
 
@@ -117,7 +125,7 @@ Kestrel is also on [PyPI](https://pypi.org/project/kestrel-explorer/) as `kestre
 
 With `--system-site-packages`, pip reuses Ubuntu's `python3-pyqt6`, `python3-pil` and `python3-gi` instead of downloading its own, so Kestrel gets the system's Qt image plugins (RAW, HEIC, AVIF, JPEG XL, PSD with `kimageformat6-plugins`) and GIO (Open With, default apps, drive and network mounting). In a plain virtual environment (without `--system-site-packages`), pip installs PyQt6 with its own Qt, which can't load those plugins, and the GIO features stay off unless you add the `[gio]` extra (`pip install "kestrel-explorer[gio]"`, which builds PyGObject and needs `libgirepository-2.0-dev` and `libcairo2-dev`).
 
-The first launch adds Kestrel to the app grid (`~/.local/share/applications/kestrel-explorer.desktop`, pointing at that `kes`).
+The first launch adds Kestrel to the app grid (`~/.local/share/applications/kestrel-explorer.desktop`, pointing at that `kes`), unless an entry is already there (from `install.sh`, or the C++ version's .deb).
 
 **Update / uninstall**
 
@@ -183,7 +191,7 @@ Package names below are Ubuntu's; Linux Mint uses the same ones. Everything else
 |---|---|
 | `python3` | Runs the app (the system `/usr/bin/python3`) |
 | `python3-pyqt6` | The whole user interface (Qt 6) |
-| `python3-pil` | Image sizes, EXIF summary, AI-prompt metadata, and a fallback image decoder |
+| `python3-pil` | Image sizes, EXIF summary, reading image-generation prompts from files, and a fallback image decoder |
 | `python3-gi` + `gir1.2-glib-2.0` | GIO: default and "Open With" apps, file type detection, drive and network mounting |
 
 **Recommended**: run `./install.sh --install-recommended` to install any of these you're missing. Ubuntu already includes most of them. The ones you'll usually need to add are `kimageformat6-plugins` (RAW and HEIC previews) and some of the archive tools, such as `unrar`, `pigz`, `zpaq` and `lzip`.
@@ -216,6 +224,7 @@ Package names below are Ubuntu's; Linux Mint uses the same ones. Everything else
 | `zfsutils-linux` | Showing a ZFS pool as one card with pool-level usage on the Overview page |
 | `pkexec` | The **admin session**: retrying operations that fail with "permission denied" as administrator (usually already installed) |
 | `rar` (non-free, multiverse; a trial version of WinRAR's command-line tool) | Creating `.rar` archives (passwords, volumes, recovery records) |
+| `bleachbit` | **Shred with BleachBit…** and **Empty Trash with BleachBit…**, and the cleaner `kes-setup --bleachbit` adds to it |
 | `pbzip2` or `lbzip2`, `plzip`, `lz4` | Multi-core `.bz2` and `.lz`, and `.lz4` archives. Kestrel offers whichever are installed |
 | [UWP](https://github.com/RegulusArms/UWP) (not an apt package; install with its `install.sh`) | "Set as Wallpaper" through UWP profiles, and "Add to Selected UWP Monitor". Found as `uwp` on your PATH or in `~/.local/bin` |
 
@@ -241,10 +250,13 @@ sudo apt install python3-pyqt6 python3-pil python3-gi gir1.2-glib-2.0 libglib2.0
 - Drag and drop:
   - Ctrl copies, Shift moves, Ctrl+Shift creates a link, and Alt asks what to do.
   - With no key held, a drop moves files on the same drive and copies them to another drive.
+  - The folder under the pointer is highlighted, so you can see where the files will go.
 - File operations run on background threads, so the window stays responsive even with tens of thousands of files. Copy, move, duplicate, move to trash, permanent delete, restore, empty trash, compress and extract show their status and a progress bar in the status bar at the bottom of the window, with ✕ to cancel. When several run at once, the bar shows the oldest with "+N more" (hover to see them all). Operations running in your other Kestrel windows are counted too ("+N in other windows"), or shown when this window has none; ✕ on one of those asks its window to cancel it, and 🛡 marks admin-session jobs. Closing a window while operations are running asks whether to stop them or keep going.
 - If a name already exists when copying or moving, you can replace, merge, skip or keep both.
 - Trash, permanent delete, and restoring or emptying the trash. The Trash shows everything you've deleted on every drive in one list: your home trash plus the trash folder each drive keeps for files deleted on it (`.Trash-<uid>`, the same as GNOME Files). The Location column shows where each item came from, and Restore, Delete Permanently and Empty Trash work across all of them.
+- **Shred with BleachBit:** with [BleachBit](https://www.bleachbit.org) installed, right-click files or folders → **Shred with BleachBit…** overwrites them and then deletes them, so they can't be recovered; **Empty Trash with BleachBit…** (in the Trash and on the sidebar's Trash) does the same to everything in the trash, on every drive. Both ask first, run in the status bar with ✕ to stop, and list anything BleachBit couldn't shred. On SSDs and some file systems, overwriting can't guarantee that every old copy of the data is gone.
 - Deleting handles read-only folders you own (common in extracted Windows archives): they're made writable and deleted.
+- Copies and deletes never follow a symbolic link inside the folders they work through, so a folder swapped for a link while they run can't send them anywhere else. A delete also stops at another drive mounted inside the folder, instead of emptying it.
 - Links and shortcuts:
   - Symbolic links (absolute or relative) and hard links.
   - Link to the Desktop.
@@ -271,7 +283,7 @@ sudo apt install python3-pyqt6 python3-pil python3-gi gir1.2-glib-2.0 libglib2.0
     - **Remove:** delete one or more selected tags.
     - **Clear All Metadata…:** strip everything, optionally keeping the orientation and colour profile so the image looks the same.
     - Greyed-out rows (file system info and values exiftool calculates) are read-only.
-    - The tag descriptions and "Accepts" types are AI-generated and may not be completely accurate. Descriptions outside the common tags are built from exiftool's tag names and categories.
+    - The tag descriptions and "Accepts" types were written with the help of an AI tool while Kestrel was being made, and may not be completely accurate. They ship as fixed text: Kestrel itself runs no AI. Descriptions outside the common tags are built from exiftool's tag names and categories.
   - **Checksums:** MD5, SHA1 and SHA256, with a field to check against a known checksum.
 
 **Archives** (details in [Archives](#archives))
@@ -316,7 +328,7 @@ sudo apt install python3-pyqt6 python3-pil python3-gi gir1.2-glib-2.0 libglib2.0
 - Built-in viewer: arrow keys or the scroll wheel to move between images, zoom and pan, fullscreen (F), slideshow (S), rotate (R/L) and flip (H), an info overlay (I), copy the image (Ctrl+C), trash (Delete), and animated GIF/WebP.
 - Images and videos open in your system's default app unless you choose otherwise. In Preferences you can pick **Open images with** (system default, Kestrel's built-in viewer, or any installed image app) and **Open videos with** (system default or any installed video app). "View Image" in the right-click menu always uses the built-in viewer.
 - The info panel (F3) shows EXIF details: camera, lens, exposure and GPS.
-- It also shows Stable Diffusion / ComfyUI prompts and settings embedded in PNG, WebP and JPEG files.
+- It also shows the prompts and settings that Stable Diffusion, ComfyUI and other image generators save in PNG, WebP and JPEG files. Kestrel only reads that text from the file.
 
 Press F1 in the app for all keyboard shortcuts. Settings are in the ☰ menu under Preferences: homepage, how many images a mosaic uses, whether it picks images by name or newest first, folder colour (the desktop's accent colour unless you pick one), the thumbnail size limit, which apps open images and videos, single-click, folder previews in list view, slideshow speed, playing GIFs and WebM videos, sharing undo between windows, and opening folders from other apps as tabs.
 
@@ -440,7 +452,7 @@ Move to Trash itself doesn't run as administrator: if an item can't be trashed, 
 - **It only accepts a fixed set of file operations,** on absolute paths. It refuses to delete, replace or change the permissions of `/`, top-level folders (`/usr`, `/etc`, `/home`, `/var`, and any other folder directly under `/`) and home folders themselves (`/home/name`). One table in the helper lists what each operation may do to each of its paths.
 - **It can't be redirected by a symlink.** Files can change while root works on them: another user, or a program, could swap a folder for a symlink to `/etc`. So the helper never trusts a path as text. It opens each folder on the way one at a time without following symlinks, then works on the name inside the folder it opened. It follows a symlink on the way only if root controls it (owned by root, in a folder only root can write to), such as `/lib` → `usr/lib`. Kestrel resolves your own symlinked folders first, so those keep working. Recursive copies and deletes go folder by folder the same way, and stop if a folder is swapped while they run.
 - **It won't hand out root by accident.** A copy it makes is root's, so it drops the set-user-ID bit from someone else's program (a move between drives keeps the owner instead). It only hard-links your own files, and never deletes a mount point (the drive mounted there would be emptied).
-- **The trade-off:** the helper runs from the Kestrel folder, which your account can edit. Anything running as you could change that file before your next admin session. That's the same level of trust as typing `sudo` in your own terminal, which is fine on a personal computer.
+- **The trade-off:** the helper runs from the Kestrel folder (or the pip install's), which your account can edit. Anything running as you could change that file before your next admin session. That's the same level of trust as typing `sudo` in your own terminal, which is fine on a personal computer.
 
 ## Tests
 
@@ -449,7 +461,7 @@ tests/run.sh                  # every test
 tests/run.sh fileops atc_undo # only some
 ```
 
-There are 298 checks in 13 tests: file operations (copy, move, merge, delete, cancel, trash, links, undo), the tower that keeps several Kestrels in sync (shared changes, the shared task list, shared undo, opening folders as tabs), phones and cameras, rearranging the sidebar, following the desktop theme, the file chooser, the admin helper that runs as root, every menu entry and shortcut and screen-reader names, parsing that must match between the versions, and `install.sh`. Each test runs with a throwaway home folder on a private D-Bus bus, so your files, settings, dock and open windows are never touched. The [C++ version](https://github.com/RegulusArms/kes-c/tree/main/tests) has the same tests, and some checks launch the other version to test the two together. Details: [tests/README.md](https://github.com/RegulusArms/kestrel-explorer/blob/main/tests/README.md).
+There are 311 checks in 13 tests: file operations (copy, move, merge, delete, cancel, trash, links, undo), the tower that keeps several Kestrels in sync (shared changes, the shared task list, shared undo, opening folders as tabs), phones and cameras, rearranging the sidebar, following the desktop theme, the file chooser, the admin helper that runs as root, every menu entry and shortcut, screen-reader names and dropping onto folders, parsing that must match between the versions, and `install.sh` and `kes-setup`, including a BleachBit dry run of Kestrel's cleaner. Each test runs with a throwaway home folder on a private D-Bus bus, so your files, settings, dock and open windows are never touched. GitHub Actions runs them on Ubuntu 24.04 on every push (`.github/workflows/tests.yml`). The [C++ version](https://github.com/RegulusArms/kes-c/tree/main/tests) has the same tests, and some checks launch the other version to test the two together. Details: [tests/README.md](https://github.com/RegulusArms/kestrel-explorer/blob/main/tests/README.md).
 
 ## Architecture
 
@@ -463,10 +475,10 @@ There are 298 checks in 13 tests: file operations (copy, move, merge, delete, ca
  File UI      File jobs          GIO        External tools    D-Bus services      Radio
  panes,       (worker threads)   mounts,    7z, tar, zpaq,    Show in folder,     its link to
  sidebar,     copy · move ·      Open With, exiftool,         file chooser        the tower
- viewer,      delete · trash ·   trash      ffmpeg                                (see below)
- search       undo · extract
-              progress, cancel
-              and errors shown
+ viewer,      delete · trash ·   trash      ffmpeg, system                        (see below)
+ search,      undo · extract                thumbnailers
+ thumbnails   progress, cancel
+ (threads)    and errors shown
               in this window
    │              │               │              │
    └──────────────┴───────┬───────┴──────────────┘
@@ -507,8 +519,9 @@ Kestrel isn't single-instance: a folder opened from another app may start a Kest
        │   covers, bookmarks, cleared caches                           │
        │ • hands folders to an open window ("open folders as tabs")    │
        │                                                               │
-       │ Checks every message (protocol version, known types and       │
-       │ fields, absolute paths, size); so does each Kestrel.          │
+       │ Checks every message (protocol version, known types, the      │
+       │ types of known fields, absolute paths, size); so does each    │
+       │ Kestrel.                                                      │
        │                                                               │
        │ Never touches files, and runs no jobs. Started by the first   │
        │ Kestrel, gone shortly after the last one leaves.              │
@@ -552,16 +565,21 @@ The C++ and Python versions speak the same protocol (JSON messages), so A and B 
 | `kestrel/admin.py` | The admin session: starts the root helper once, sends it operations, the 🛡 status-bar indicator, and "Retry as Administrator" |
 | `kestrel/admin_helper.py` | The small root helper (standard library only) that performs admin-session operations |
 | `kestrel/dialogs.py` | Properties (including the metadata editor and Add Tag picker), Open With, rename, batch rename, Edit Bookmark, preferences |
-| `kestrel/metadata.py` | EXIF, AI-generation metadata, exiftool reading/editing, and the tag catalog for the Add Tag picker (the tag descriptions and "Accepts" types are AI-generated and may not be completely accurate) |
+| `kestrel/metadata.py` | EXIF, the prompts image generators save in files, exiftool reading/editing, and the tag catalog for the Add Tag picker (the tag descriptions and "Accepts" types were written with the help of an AI tool and may not be completely accurate) |
 | `kestrel/overview.py` | Overview page: drives, phones and cameras, network locations, bookmarks |
 | `kestrel/util.py` | Shared helpers: paths, file types, icons, desktop integration (default apps, wallpaper, terminal), trash on every drive, GTK bookmarks |
 | `kestrel/archive.py` | Archive engine: tool detection, the commands for every format, progress, cancel, password handling |
 | `kestrel/archive_ui.py` | Compress and Extract dialogs, password prompts, and the archive job flows |
 | `kestrel/uwp.py` | Integration with the UWP wallpaper manager (over D-Bus and the `uwp` command) |
+| `kestrel/stats.py` | The `KESTREL_STATS=1` performance counters (see [Performance counters](#performance-counters)) |
 | `kestrel/atc.py` | The tower (`kes --atc`) and each window's link to it, which keep several running Kestrels in sync |
 | `tests/` | The test suite (see [Tests](#tests)) |
 | `bench/` | The benchmark against GNOME Files and Nemo (see Performance: [vs GNOME Files](#performance-kestrel-vs-gnome-files), [vs Nemo](#performance-kestrel-vs-nemo)) |
+| `kes` | Starts the app from this folder (`install.sh` links `~/.local/bin/kes` to it) |
+| `kes-setup` | Makes Kestrel the default file manager for the current user, and puts things back (run by `install.sh`) |
+| `data/` | The app icon (`icons/hicolor`) and the GNOME Shell drop focus extension |
 | `pyproject.toml` | PyPI packaging metadata (see [PACKAGING.md](https://github.com/RegulusArms/kestrel-explorer/blob/main/PACKAGING.md)) |
+| `.github/workflows/tests.yml` | Runs the test suite on Ubuntu 24.04 on every push and pull request |
 | `.github/workflows/pypi.yml` | Publishes to PyPI by hand, with trusted publishing (see [PACKAGING.md](https://github.com/RegulusArms/kestrel-explorer/blob/main/PACKAGING.md)) |
 
 ## Performance counters
@@ -572,7 +590,7 @@ Run Kestrel with `KESTREL_STATS=1` (for example `KESTREL_STATS=1 kes ~/Pictures`
 
 Kestrel Explorer exists in two versions with the same features: the original [Python/PyQt6 version](https://github.com/RegulusArms/kestrel-explorer) and the [C++/Qt 6 port](https://github.com/RegulusArms/kes-c). They share settings, bookmarks and caches, so you can switch between them. Both are compared here with GNOME Files 50.2.2, the file manager they replace.
 
-**Test machine:** AMD Ryzen Threadripper 2950X 16-Core Processor (32 threads), Ubuntu 26.04.1 LTS. The test data is on a RAM disk: 600 JPEGs at 1600×1200 with camera EXIF, 40 videos, 40 PDFs, 150 folders of 4 images, a tree of 50,000 files, 20,000 small files plus 250 MB, a folder of 10,000 files, and 200 PNGs with AI-generation metadata.
+**Test machine:** AMD Ryzen Threadripper 2950X 16-Core Processor (32 threads), Ubuntu 26.04.1 LTS. The test data is on a RAM disk: 600 JPEGs at 1600×1200 with camera EXIF, 40 videos, 40 PDFs, 150 folders of 4 images, a tree of 50,000 files, 20,000 small files plus 250 MB, a folder of 10,000 files, and 200 PNGs with Stable Diffusion prompts.
 
 **How it was measured:** each test ran 3 times, and the tables show medians. Every run started with a fresh home folder, so the thumbnail cache was empty. All three apps ran on a headless X server with software rendering (Qt's raster engine, GTK's cairo renderer), on a private session bus where only the desktop's settings and virtual file system (gvfs) services could start, so no file indexer ran. The benchmark is in [bench/](https://github.com/RegulusArms/kestrel-explorer/tree/main/bench) and is run with `bench/run.sh`.
 
@@ -588,33 +606,33 @@ All three apps are measured in the same way:
 
 | Test | Kestrel (Python) | Kestrel (C++) | GNOME Files |
 |---|---|---|---|
-| Startup (launch to window shown) | 0.51 s | 0.36 s | 0.44 s |
-| Open a 600-image folder (launch to the first 12 thumbnails) | 0.60 s | 0.40 s | 1.28 s |
-| Open a folder of 40 videos (launch to the first 12 thumbnails) | 2.22 s | 2.05 s | 8.39 s |
-| Open a folder of 40 PDFs (launch to the first 12 thumbnails) | 1.06 s | 0.77 s | 0.92 s |
-| Copy 20,000 small files + 5 × 50 MB | 1.72 s | 0.94 s | 2.34 s |
-| Move the same to another drive | 1.95 s | 1.16 s | 4.54 s |
-| Move 10,000 files to the trash (all selected in one folder) | 2.00 s | 1.68 s | 2.00 s |
-| Empty the trash (those 10,000 files) | 0.42 s | 0.34 s | 9.05 s |
-| Peak memory (startup / 600-image folder open) | 176 / 188 MB | 137 / 148 MB | 196 / 305 MB |
-| Memory with 5 folders opened from other apps | 214 MB (89 MB as tabs) | 79 MB (43 MB as tabs) | 96 MB |
-| CPU time used in 30 s with a folder open, idle | 15 ms (0.05% of a core) | 20 ms (0.07% of a core) | 10 ms (0.03% of a core) |
+| Startup (launch to window shown) | 0.56 s | 0.37 s | 0.40 s |
+| Open a 600-image folder (launch to the first 12 thumbnails) | 0.60 s | 0.40 s | 1.26 s |
+| Open a folder of 40 videos (launch to the first 12 thumbnails) | 1.92 s | 1.79 s | 9.00 s |
+| Open a folder of 40 PDFs (launch to the first 12 thumbnails) | 0.98 s | 0.73 s | 0.84 s |
+| Copy 20,000 small files + 5 × 50 MB | 1.28 s | 0.83 s | 2.24 s |
+| Move the same to another drive | 1.59 s | 1.04 s | 4.39 s |
+| Move 10,000 files to the trash (all selected in one folder) | 1.90 s | 1.68 s | 1.96 s |
+| Empty the trash (those 10,000 files) | 0.41 s | 0.33 s | 8.62 s |
+| Peak memory (startup / 600-image folder open) | 179 / 189 MB | 137 / 149 MB | 194 / 303 MB |
+| Memory with 5 folders opened from other apps | 238 MB (79 MB as tabs) | 85 MB (29 MB as tabs) | 95 MB |
+| CPU time used in 30 s with a folder open, idle | 20 ms (0.07% of a core) | 25 ms (0.08% of a core) | 5 ms (0.02% of a core) |
 
 Kestrel (C++) compared with GNOME Files:
-- startup: 1.2× faster;
+- startup: 1.1× faster;
 - first thumbnails in a 600-image folder: 3.2× faster;
-- first video thumbnails: 4.1× faster;
-- first PDF thumbnails: 1.2× faster;
-- copying: 2.5× faster;
-- moving to another drive: 3.9× faster;
+- first video thumbnails: 5.0× faster;
+- first PDF thumbnails: 1.1× faster;
+- copying: 2.7× faster;
+- moving to another drive: 4.2× faster;
 - moving to the trash: 1.2× faster;
-- emptying the trash: about 27× faster.
+- emptying the trash: about 26× faster.
 
 **Limits of this comparison:**
 - **Opening a folder:** the two apps don't do the same amount of work.
-  - GNOME Files makes thumbnails for the whole folder in the background. It finished all 600 images 11.72 s after launch.
+  - GNOME Files makes thumbnails for the whole folder in the background. It finished all 600 images 11.06 s after launch.
   - Kestrel makes them only for what's on screen (40 images here), and the rest as you scroll.
-  - To thumbnail a whole folder at once, Kestrel has "Generate Previews": 5.02 s for these 600 images in the C++ version (table below).
+  - To thumbnail a whole folder at once, Kestrel has "Generate Previews": 4.84 s for these 600 images in the C++ version (table below).
 - **File operations:** GNOME Files' D-Bus service returns straight away, so its times were measured by watching the files until the operation had finished, to within about 50 ms.
 - **Memory:** GNOME Files makes thumbnails in separate sandboxed helper processes, whose memory isn't counted in its figures. Kestrel makes them inside the app.
 - **Search:** GNOME Files' search can't be timed from outside without its file indexer, so it isn't compared.
@@ -625,11 +643,11 @@ These are measured inside the app, because GNOME Files has no equivalent ("Gener
 
 | Test | Python | C++ | C++ speed-up |
 |---|---|---|---|
-| Thumbnail all 600 images ("Generate Previews") | 5.24 s | 5.02 s | about the same |
-| Build 150 folder mosaics | 6.79 s | 6.50 s | about the same |
+| Thumbnail all 600 images ("Generate Previews") | 5.00 s | 4.84 s | about the same |
+| Build 150 folder mosaics | 6.56 s | 6.24 s | 1.1× faster |
 | Recursive search over 50,000 files | 0.19 s | 0.12 s | 1.6× faster |
-| Read EXIF / AI metadata for 400 images | 1.71 s | 0.043 s | about 40× faster |
-| Peak memory (background jobs) | 74–82 MB | 37–41 MB | |
+| Read EXIF / image-generation prompts for 400 images | 1.62 s | 0.042 s | about 39× faster |
+| Peak memory (background jobs) | 75–83 MB | 37–42 MB | |
 
 Thumbnails and mosaics take about as long in both versions, because both decode images with the same Qt C++ code, which the Python version already runs on several threads. The C++ version is much faster where the Python version does the work in Python itself, such as reading metadata, searching and copying, and it uses about half the memory.
 
@@ -637,7 +655,7 @@ Thumbnails and mosaics take about as long in both versions, because both decode 
 
 Kestrel Explorer exists in two versions with the same features: the original [Python/PyQt6 version](https://github.com/RegulusArms/kestrel-explorer) and the [C++/Qt 6 port](https://github.com/RegulusArms/kes-c). They share settings, bookmarks and caches, so you can switch between them. Both are compared here with Nemo, the file manager they replace.
 
-**Test machine:** a VirtualBox virtual machine running Linux Mint 22 (Cinnamon). The test data is on a RAM disk: 600 JPEGs at 1600×1200 with camera EXIF, 40 videos, 40 PDFs, 150 folders of 4 images, a tree of 50,000 files, 20,000 small files plus 250 MB, a folder of 10,000 files, and 200 PNGs with AI-generation metadata.
+**Test machine:** a VirtualBox virtual machine running Linux Mint 22 (Cinnamon). The test data is on a RAM disk: 600 JPEGs at 1600×1200 with camera EXIF, 40 videos, 40 PDFs, 150 folders of 4 images, a tree of 50,000 files, 20,000 small files plus 250 MB, a folder of 10,000 files, and 200 PNGs with Stable Diffusion prompts.
 
 **How it was measured:** each test ran 3 times, and the tables show medians. Every run started with a fresh home folder, so the thumbnail cache was empty. All three apps ran on a headless X server with software rendering (Qt's raster engine, GTK's cairo renderer), on a private session bus where only the desktop's settings and virtual file system (gvfs) services could start, so no file indexer ran. The benchmark is in [bench/](https://github.com/RegulusArms/kestrel-explorer/tree/main/bench) and is run with `bench/run.sh`.
 
@@ -653,33 +671,34 @@ All three apps are measured in the same way:
 
 | Test | Kestrel (Python) | Kestrel (C++) | Nemo |
 |---|---|---|---|
-| Startup (launch to window shown) | 0.94 s | 0.61 s | 0.81 s |
-| Open a 600-image folder (launch to the first 12 thumbnails) | 1.07 s | 0.74 s | — |
-| Open a folder of 40 videos (launch to the first 12 thumbnails) | 3.53 s | 3.36 s | — |
-| Open a folder of 40 PDFs (launch to the first 12 thumbnails) | 1.66 s | 1.10 s | — |
-| Copy 20,000 small files + 5 × 50 MB | 3.84 s | 1.89 s | 26.85 s |
-| Move the same to another drive | 3.37 s | 1.61 s | 7.80 s |
-| Move 10,000 files to the trash (all selected in one folder) | 4.33 s | 3.40 s | — |
-| Empty the trash (those 10,000 files) | 1.35 s | 0.76 s | — |
-| Peak memory (startup / 600-image folder open) | 146 / 157 MB | 114 / 123 MB | 124 / — MB |
-| Memory with 5 folders opened from other apps | 159 MB (70 MB as tabs) | 56 MB (35 MB as tabs) | 51 MB |
-| CPU time used in 30 s with a folder open, idle | 45 ms (0.15% of a core) | 35 ms (0.12% of a core) | 6375 ms (21.25% of a core) |
+| Startup (launch to window shown) | 1.02 s | 0.75 s | 0.82 s |
+| Open a 600-image folder (launch to the first 12 thumbnails) | 1.45 s | 0.88 s | — |
+| Open a folder of 40 videos (launch to the first 12 thumbnails) | 4.12 s | 4.55 s | — |
+| Open a folder of 40 PDFs (launch to the first 12 thumbnails) | 2.01 s | 1.52 s | — |
+| Copy 20,000 small files + 5 × 50 MB | 3.37 s | 1.71 s | 34.87 s |
+| Move the same to another drive | 3.81 s | 1.62 s | 8.70 s |
+| Move 10,000 files to the trash (all selected in one folder) | 4.48 s | 3.23 s | — |
+| Empty the trash (those 10,000 files) | 1.37 s | 1.01 s | 365.30 s |
+| Peak memory (startup / 600-image folder open) | 148 / 159 MB | 116 / 125 MB | 123 / — MB |
+| Memory with 5 folders opened from other apps | 162 MB (72 MB as tabs) | 58 MB (36 MB as tabs) | 51 MB |
+| CPU time used in 30 s with a folder open, idle | 35 ms (0.12% of a core) | 35 ms (0.12% of a core) | 7510 ms (25.03% of a core) |
 
 Kestrel (C++) compared with Nemo:
-- startup: 1.3× faster;
-- copying: about 14× faster;
-- moving to another drive: 4.9× faster.
+- startup: 1.1× faster;
+- copying: about 20× faster;
+- moving to another drive: 5.4× faster;
+- emptying the trash: about 362× faster.
 
 **Limits of this comparison:**
 - **Opening a folder:** the two apps don't do the same amount of work.
   - Nemo wasn't timed on this (see below).
   - Kestrel makes them only for what's on screen (40 images here), and the rest as you scroll.
-  - To thumbnail a whole folder at once, Kestrel has "Generate Previews": 7.54 s for these 600 images in the C++ version (table below).
+  - To thumbnail a whole folder at once, Kestrel has "Generate Previews": 8.37 s for these 600 images in the C++ version (table below).
 - **File operations:** Nemo's D-Bus service returns straight away, so its times were measured by watching the files until the operation had finished, to within about 50 ms.
 - **Opening a folder not timed:** Nemo makes no thumbnails in this setup (a fresh home folder with its default settings), so the folder tests are skipped for it and those rows show —, as does its peak memory with the 600-image folder open.
 - **Not timed:** Nemo's D-Bus file-operations service has no way to move files to the trash, so those rows show —. For "Empty the trash", the files were put in the trash with `gio trash` first.
-- **CPU while idle:** Nemo kept about 21% of a core busy with nothing happening. That's unusual for a file manager at rest, so it probably comes from this headless setup (where it also made no thumbnails) rather than from everyday use.
-- **Didn't finish:** asked through its D-Bus service to empty the trash, Nemo didn't finish within 2 minutes (it may have been waiting for a confirmation), so those rows show —.
+- **CPU while idle:** Nemo kept about 25% of a core busy with nothing happening. That's unusual for a file manager at rest, so it probably comes from this headless setup (where it also made no thumbnails) rather than from everyday use.
+- **Measured once:** Nemo took over 2 minutes for the trash test, so it was run once instead of 3 times. Its D-Bus service empties the trash one file at a time.
 - **Memory:** Nemo makes thumbnails in separate helper processes, whose memory isn't counted in its figures. Kestrel makes them inside the app.
 - **Search:** Nemo's search can't be timed from outside, so it isn't compared.
 
@@ -689,11 +708,11 @@ These are measured inside the app, because Nemo has no equivalent ("Generate Pre
 
 | Test | Python | C++ | C++ speed-up |
 |---|---|---|---|
-| Thumbnail all 600 images ("Generate Previews") | 8.09 s | 7.54 s | 1.1× faster |
-| Build 150 folder mosaics | 10.79 s | 10.76 s | about the same |
-| Recursive search over 50,000 files | 0.25 s | 0.41 s | 1.7× slower |
-| Read EXIF / AI metadata for 400 images | 2.40 s | 0.051 s | about 47× faster |
-| Peak memory (background jobs) | 57–64 MB | 25–30 MB | |
+| Thumbnail all 600 images ("Generate Previews") | 8.53 s | 8.37 s | about the same |
+| Build 150 folder mosaics | 11.01 s | 11.12 s | about the same |
+| Recursive search over 50,000 files | 0.21 s | 0.17 s | 1.2× faster |
+| Read EXIF / image-generation prompts for 400 images | 1.92 s | 0.046 s | about 42× faster |
+| Peak memory (background jobs) | 58–66 MB | 27–31 MB | |
 
 Thumbnails and mosaics take about as long in both versions, because both decode images with the same Qt C++ code, which the Python version already runs on several threads. The C++ version is much faster where the Python version does the work in Python itself, such as reading metadata, searching and copying, and it uses about half the memory.
 

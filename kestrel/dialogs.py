@@ -599,7 +599,7 @@ class PropertiesDialog(QDialog):
 
     def _meta_clear(self):
         box = QMessageBox(QMessageBox.Icon.Warning, "Clear All Metadata",
-                          f"Remove all metadata (EXIF, XMP, IPTC, GPS, comments, AI generation data…) "
+                          f"Remove all metadata (EXIF, XMP, IPTC, GPS, comments, image-generation prompts…) "
                           f"from “{os.path.basename(self.path)}”?\n\nThis can't be undone.",
                           QMessageBox.StandardButton.Cancel, self)
         box.addButton("Clear All", QMessageBox.ButtonRole.DestructiveRole)

@@ -889,6 +889,8 @@ class Sidebar(QListWidget):
         elif kind == "trash":
             m.addSeparator()
             m.addAction("Empty Trash", lambda: self.window().empty_trash())
+            if shutil.which("bleachbit"):  # fileops.can_shred
+                m.addAction("Empty Trash with BleachBit…", lambda: self.window().empty_trash_with_bleachbit())
         elif kind == "mount":
             m.addSeparator()
             m.addAction("Unmount", lambda: self._unmount(path))

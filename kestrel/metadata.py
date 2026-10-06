@@ -1,4 +1,4 @@
-"""Image metadata: EXIF summary, AI-generation parameters, full exiftool dump."""
+"""Image metadata: EXIF summary, image-generation prompts and settings (read from the file), full exiftool dump."""
 import json
 import os
 import re

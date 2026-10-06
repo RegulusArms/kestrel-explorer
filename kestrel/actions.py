@@ -288,9 +288,56 @@ class FileActions:
         r = QMessageBox.warning(self, "Empty Trash", "Permanently delete all items in the trash?",
                                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
         if r == QMessageBox.StandardButton.Yes:
-            jobs = [("delete", e.path, None) for root in util.trash_dirs() for sub in ("files", "info", "expunged")
-                    if os.path.isdir(os.path.join(root, sub)) for e in os.scandir(os.path.join(root, sub))]
+            jobs = [("delete", p, None) for p in fileops.trash_contents()]
             fileops.start_ops(self, jobs, "Emptying trash", self.sidebar.refresh)
+
+    # -- shredding with BleachBit (only offered when it's installed: fileops.can_shred)
+
+    SHRED_NOTE = ("BleachBit overwrites them and then deletes them, so they can't be recovered, not even from the trash. "
+                  "On SSDs and some file systems, overwriting can't guarantee that every old copy of the data is gone.")
+
+    def _confirm_shred(self, title, question, button):
+        box = QMessageBox(QMessageBox.Icon.Warning, title, question, QMessageBox.StandardButton.Cancel, self)
+        box.setInformativeText(self.SHRED_NOTE)
+        yes = box.addButton(button, QMessageBox.ButtonRole.DestructiveRole)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        return box.clickedButton() is yes
+
+    def shred_paths(self, paths):
+        """Shred with BleachBit."""
+        if not paths:
+            return
+        what = f"“{os.path.basename(paths[0])}”" if len(paths) == 1 else f"{len(paths)} items"
+        if not self._confirm_shred("Shred with BleachBit", f"Shred {what}?", "Shred"):
+            return
+        targets = list(paths)
+        for p in paths:  # an item in the trash: its record of where it came from too
+            info = util.trash_info_path(p)
+            if info and os.path.lexists(info):
+                targets.append(info)
+        self._run_shred(targets, "Shredding with BleachBit")
+
+    def empty_trash_with_bleachbit(self):
+        items = fileops.trash_contents()
+        if not items:
+            QMessageBox.information(self, "Empty Trash with BleachBit", "The trash is empty.")
+            return
+        if not self._confirm_shred("Empty Trash with BleachBit",
+                                   "Shred everything in the trash with BleachBit, on every drive?", "Empty Trash"):
+            return
+        self._run_shred(items, "Emptying trash with BleachBit")
+
+    def _run_shred(self, targets, title):
+        def done(left):
+            self.sidebar.refresh()
+            names = [p for p in left if not p.endswith(".trashinfo")]
+            if names:
+                listed = "\n".join(names[:10]) + (f"\n… and {len(names) - 10} more" if len(names) > 10 else "")
+                QMessageBox.warning(self, "Shred with BleachBit",
+                                    "BleachBit couldn't shred these, so they're still there (you may not have permission "
+                                    "to change them):\n\n" + listed)
+        fileops.shred(self, targets, title, done)
 
     def make_links(self, paths, dest, kind):
         if dest is None:

@@ -3,7 +3,9 @@ import itertools
 import math
 import os
 import shutil
+import signal
 import stat
+import subprocess
 import time
 
 from PyQt6.QtCore import QElapsedTimer, QObject, QRectF, QThread, QTimer, Qt, pyqtSignal
@@ -813,6 +815,65 @@ def make_link(plan):
 
 
 # ---------------------------------------------------------------- misc
+
+def trash_contents():
+    """What emptying the trash removes: every entry in the trash folders on every drive (files, info and expunged)."""
+    out = []
+    for root in util.trash_dirs():
+        for sub in ("files", "info", "expunged"):
+            d = os.path.join(root, sub)
+            if os.path.isdir(d):
+                try:
+                    out += [os.path.join(d, n) for n in os.listdir(d)]
+                except OSError:
+                    pass
+    return out
+
+
+def can_shred():
+    """BleachBit is installed (shred)."""
+    return shutil.which("bleachbit") is not None
+
+
+def _still_there(paths):
+    return [p for p in paths if os.path.lexists(p)]
+
+
+def shred(parent, paths, title, on_done=None):
+    """Shred with BleachBit (`bleachbit --shred`): files and folders are overwritten, then deleted, so they can't be
+    recovered. A background task; BleachBit reports success either way, so on_done(left) gets the paths still there
+    afterwards (none: all shredded). Not called after a cancel."""
+    paths = list(paths)
+
+    def work(task):
+        total = len(paths)
+        task.report(0, total, "Starting BleachBit…")
+        # it lists every file; what's left afterwards is checked instead
+        p = subprocess.Popen(["bleachbit", "--shred", "--"] + paths, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        try:
+            while True:
+                try:
+                    p.wait(0.25)
+                    break
+                except subprocess.TimeoutExpired:
+                    task.check()
+                    n = total - len(_still_there(paths))
+                    task.report(n, total, f"{n:,} of {total:,} shredded")
+        except Cancelled:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)   # with anything it started
+            except ProcessLookupError:
+                pass
+            p.wait()
+            raise
+        return _still_there(paths)
+
+    def done(left):
+        if left is not None and on_done:
+            on_done(left)
+    return run_job(parent, title, work, done)
+
 
 def dir_stats(path, cancel=lambda: False):
     """(total bytes, file count, dir count) recursively, not following symlinks."""

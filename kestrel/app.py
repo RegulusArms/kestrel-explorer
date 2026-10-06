@@ -651,6 +651,9 @@ class MainWindow(FileActions, Opening, QMainWindow):
             m.addAction(icon("view-refresh"), "Generate Previews Recursively", lambda: self.build_previews(cur))
             if util.in_trash(os.path.join(cur, "x")):
                 m.addAction(icon("user-trash"), "Empty Trash", self.empty_trash)
+                if fileops.can_shred():
+                    m.addAction(icon("edit-shred", "edit-delete"), "Empty Trash with BleachBit…",
+                                self.empty_trash_with_bleachbit)
             sharing.add_scripts_menu(m, [], cur, self.navigate)
             m.addSeparator()
             m.addAction(icon("document-properties"), "Properties", lambda: self.properties([cur]))
@@ -662,6 +665,8 @@ class MainWindow(FileActions, Opening, QMainWindow):
         if in_trash:
             m.addAction(icon("edit-undo"), "Restore", lambda: self.restore(paths))
             m.addAction(icon("edit-delete"), "Delete Permanently", lambda: self.delete_paths(paths))
+            if fileops.can_shred():
+                m.addAction(icon("edit-shred", "edit-delete"), "Shred with BleachBit…", lambda: self.shred_paths(paths))
             m.addSeparator()
             m.addAction(icon("document-properties"), "Properties", lambda: self.properties(paths))
             return m
@@ -774,6 +779,8 @@ class MainWindow(FileActions, Opening, QMainWindow):
         m.addSeparator()
         m.addAction(icon("user-trash"), "Move to Trash", lambda: self.trash_paths(paths))
         m.addAction(icon("edit-delete"), "Delete Permanently…", lambda: self.delete_paths(paths))
+        if fileops.can_shred():
+            m.addAction(icon("edit-shred", "edit-delete"), "Shred with BleachBit…", lambda: self.shred_paths(paths))
         m.addSeparator()
         m.addAction(icon("document-properties"), "Properties", lambda: self.properties(paths))
         return m

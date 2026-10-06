@@ -3,9 +3,9 @@
 
   bench/run.sh                      build, generate the data (first time), run everything, print the tables
   bench/run.sh --runs 5             more runs per measurement (medians are reported)
-  bench/run.sh --update-readme      ...and write the results into both projects' README.md
   bench/run.sh --only startup,copy  re-run only some measurements (the rest are kept from the last run)
   bench/run.sh --report             rebuild the tables from the last results without running anything
+The tables are printed and written to bench/results.md, as Performance sections ready to paste into the READMEs.
 
 Every run happens on a headless X server (Xvfb) with a fresh home folder and a private D-Bus session bus on which
 only the desktop's settings (dconf) and virtual file system (gvfs) services can start, so caches are empty and no
@@ -65,6 +65,8 @@ FOLDER_TESTS = ("open_gallery", "videos", "pdfs")   # "open a folder": timed by 
 FIRST = 12          # "open a folder": time until the first FIRST files (by name) have thumbnails
 WINDOWS = 5         # "several windows": folders opened from outside, one after another
 IDLE_SECONDS = 30   # "idle": CPU used in this long with a folder open and nothing happening
+EMPTY_TIMEOUT = 600 # emptying the trash through a D-Bus service: Nemo's deletes about 50 files a second (3+ min)
+SLOW = 120          # a measurement that takes longer than this is run once: its median wouldn't tell more
 THUMB_FLAVORS = ("normal", "large", "x-large", "xx-large")
 
 
@@ -384,7 +386,7 @@ def measure_trash(app):
         t0 = time.monotonic()
         n.call("EmptyTrash")
         try:
-            n.wait(lambda: not listing(f"{trash}/files") and not listing(f"{trash}/info"))
+            n.wait(lambda: not listing(f"{trash}/files") and not listing(f"{trash}/info"), EMPTY_TIMEOUT)
         except Stuck as e:
             return {"s": s, "rss_mb": n.peak(), "stuck_empty": str(e)}
         return {"s": s, "empty_s": time.monotonic() - t0, "rss_mb": n.peak()}
@@ -622,7 +624,7 @@ def tables(res, other):
           row2("Thumbnail all 600 images (\"Generate Previews\")", "bulk_thumbs"),
           row2("Build 150 folder mosaics", "mosaics"),
           row2("Recursive search over 50,000 files", "search"),
-          row2("Read EXIF / AI metadata for 400 images", "metadata"),
+          row2("Read EXIF / image-generation prompts for 400 images", "metadata"),
           f"| Peak memory (background jobs) | {bg('python')} | {bg('cxx')} | |"]
 
     vs = []
@@ -645,7 +647,11 @@ def tables(res, other):
                if runs_of(test) and med(other, test) is None and phrase not in stuck]
     kinds = {"open_gallery": "images", "videos": "videos", "pdfs": "PDFs"}
     no_thumbs = [kinds[t] for t in kinds if res.get((other, t)) and all(r.get("no_thumbs") for r in res[(other, t)])]
-    summary = {"vs": "\n".join(vs), "no_thumbs": no_thumbs,
+    # measured once (over SLOW): say so, since the others are medians of several runs
+    most = max((len(v) for (_a, t), v in res.items() if t not in ("startup", "idle")), default=0)
+    once = [{"copy": "copying", "move_xdev": "moving to another drive", "trash": "the trash test"}[t]
+            for t in ("copy", "move_xdev", "trash") if len(runs_of(t)) == 1 < most]
+    summary = {"vs": "\n".join(vs), "no_thumbs": no_thumbs, "once": once,
                "files_n": round(gallery_n) if gallery_n else None,
                "files_all": secs(med(other, "open_gallery", "all_s")),
                "kestrel_n": round(kes_n) if kes_n else None,
@@ -679,9 +685,12 @@ def machine(other):
     return cpu, os.cpu_count(), version or OTHERS[other]["label"], distro
 
 
-def section(t1, t2, summary, runs, py_link, cxx_link, other):
+def section(t1, t2, summary, runs, other):
     cpu, threads, version, distro = machine(other)
     label = OTHERS[other]["label"]
+    # absolute links, so the section reads the same pasted into either README (the Python one is also PyPI's page)
+    gh = "https://github.com/RegulusArms"
+    py_link, cxx_link, bench_link = f"{gh}/kestrel-explorer", f"{gh}/kes-c", f"{gh}/kes-c/tree/main/bench"
     owns = label + ("'" if label.endswith("s") else "'s")   # GNOME Files', Nemo's
     if not OTHERS[other]["thumbnails"]:
         thumbs = f"{label} wasn't timed on this (see below)."
@@ -710,17 +719,20 @@ def section(t1, t2, summary, runs, py_link, cxx_link, other):
         untimed += (f"\n- **CPU while idle:** {label} kept about {summary['busy_idle']:.0f}% of a core busy with nothing "
                     f"happening. That's unusual for a file manager at rest, so it probably comes from this headless "
                     f"setup{headless} rather than from everyday use.")
+    if summary["once"]:
+        untimed += (f"\n- **Measured once:** {label} took over {SLOW // 60} minutes for {' and '.join(summary['once'])}, "
+                    f"so it was run once instead of {runs} times.")
     if summary["stuck"]:
         untimed += (f"\n- **Didn't finish:** asked through its D-Bus service to {' or '.join(summary['stuck'])}, "
-                    f"{label} didn't finish within 2 minutes (it may have been waiting for a confirmation), so those "
+                    f"{label} didn't finish within the time limit (2 minutes; {EMPTY_TIMEOUT // 60} for emptying the trash), so those "
                     f"rows show —.")
     return f"""{OTHERS[other]["heading"]}
 
 Kestrel Explorer exists in two versions with the same features: the original [Python/PyQt6 version]({py_link}) and the [C++/Qt 6 port]({cxx_link}). They share settings, bookmarks and caches, so you can switch between them. Both are compared here with {version}, the file manager they replace.
 
-**Test machine:** {cpu} ({threads} threads), {distro}. The test data is on a RAM disk: 600 JPEGs at 1600×1200 with camera EXIF, 40 videos, 40 PDFs, 150 folders of 4 images, a tree of 50,000 files, 20,000 small files plus 250 MB, a folder of 10,000 files, and 200 PNGs with AI-generation metadata.
+**Test machine:** {cpu} ({threads} threads), {distro}. The test data is on a RAM disk: 600 JPEGs at 1600×1200 with camera EXIF, 40 videos, 40 PDFs, 150 folders of 4 images, a tree of 50,000 files, 20,000 small files plus 250 MB, a folder of 10,000 files, and 200 PNGs with Stable Diffusion prompts.
 
-**How it was measured:** each test ran {runs} times, and the tables show medians. Every run started with a fresh home folder, so the thumbnail cache was empty. All three apps ran on a headless X server with software rendering (Qt's raster engine, GTK's cairo renderer), on a private session bus where only the desktop's settings and virtual file system (gvfs) services could start, so no file indexer ran. The benchmark is in [bench/](bench) and is run with `bench/run.sh`.
+**How it was measured:** each test ran {runs} times, and the tables show medians. Every run started with a fresh home folder, so the thumbnail cache was empty. All three apps ran on a headless X server with software rendering (Qt's raster engine, GTK's cairo renderer), on a private session bus where only the desktop's settings and virtual file system (gvfs) services could start, so no file indexer ran. The benchmark is in [bench/]({bench_link}) and is run with `bench/run.sh`.
 
 ### Compared with {label}
 
@@ -756,25 +768,13 @@ Thumbnails and mosaics take about as long in both versions, because both decode 
 """
 
 
-def update_readmes(t1, t2, summary, runs, other):
-    """Write the section for `other` into both READMEs: in place of its old one, or after the other Performance
-    sections (a run on Linux Mint adds "vs Nemo" and leaves "vs GNOME Files" as it was)."""
-    heading = OTHERS[other]["heading"]
-    for root, py_link, cxx_link in ((CXX_ROOT, "../kestrel-explorer", "."), (PY_ROOT, ".", "../kes-c")):
-        path = os.path.join(root, "README.md")
-        with open(path) as f:
-            s = f.read()
-        text = section(t1, t2, summary, runs, py_link, cxx_link, other) + "\n"
-        if heading + "\n" in s:
-            start = s.index(heading + "\n")
-            end = s.index("\n## ", start + 1) + 1
-        else:
-            last = max(s.rfind("\n" + o["heading"] + "\n") for o in OTHERS.values())
-            start = end = s.index("\n## ", last + 1) + 1 if last >= 0 else len(s)
-        s = s[:start] + text + s[end:]
-        with open(path, "w") as f:
-            f.write(s)
-        print(f"Updated {path}")
+def write_results(sections):
+    """bench/results.md: a README Performance section for each app compared with ("Kestrel vs GNOME Files", and/or
+    "Kestrel vs Nemo" from a run on Linux Mint), to paste into both READMEs."""
+    path = os.path.join(HERE, "results.md")
+    with open(path, "w") as f:
+        f.write("\n".join(sections))
+    print(f"\nWrote {path}")
 
 
 # ---------------------------------------------------------------- main
@@ -801,22 +801,23 @@ def runs_for(test, runs):
 def report(res, args):
     runs = max((len(v) for (a, t), v in res.items() if t not in ("startup", "idle")), default=args.runs)
     others = [o for o in OTHERS if any(a == o for a, _t in res)]
-    t2 = None
+    t2, sections = None, []
     for other in others or [next(iter(OTHERS))]:
         t1, t2, summary = tables(res, other)
         print()
         print("\n".join(t1))
-        if args.update_readme and others:
-            update_readmes(t1, t2, summary, runs, other)
+        if others:
+            sections.append(section(t1, t2, summary, runs, other))
     print()
     print("\n".join(t2))
+    if sections:
+        write_results(sections)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--runs", type=int, default=3)
     ap.add_argument("--only", default="")
-    ap.add_argument("--update-readme", action="store_true")
     ap.add_argument("--report", action="store_true", help="rebuild the tables from results.json without running")
     ap.add_argument("--measure", nargs=2, metavar=("APP", "TEST"), help=argparse.SUPPRESS)
     args = ap.parse_args()
@@ -875,6 +876,9 @@ def main():
                     took = (f"{r['s']:.3f} s" if r["s"] is not None else "didn't finish" if r.get("stuck")
                             else "no thumbnails" if r.get("no_thumbs") else "not offered")
                     print(f"  {test:13} {app:9} run {i + 1}/{n}: {took}{detail}", flush=True)
+                    if max(r.get("s") or 0, r.get("empty_s") or 0) > SLOW and i + 1 < n:
+                        print(f"  {test:13} {app:9} over {SLOW // 60} minutes: measured once", flush=True)
+                        break
                 with open(results_file, "w") as f:   # saved as it goes, so an interrupted run isn't lost
                     json.dump({f"{a} {t}": v for (a, t), v in res.items()}, f, indent=1)
     finally:
