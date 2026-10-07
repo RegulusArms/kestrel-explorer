@@ -51,7 +51,7 @@ def ask_password(parent, path, wrong=False):
     edit = QLineEdit()
     row, _ = _password_row(edit)
     lay.addLayout(row)
-    if archive.extract_tool(path) in ("unrar", "zpaq", "unzip"):
+    if archive.extract_tool(path) == "zpaq":  # the only one given the password on its command line
         lay.addWidget(_small(_ARGV_NOTE.format(tool=archive.extract_tool(path))))
     bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
     bb.button(QDialogButtonBox.StandardButton.Ok).setText("Extract")
@@ -433,7 +433,7 @@ class ExtractDialog(QDialog):
         form.addRow("Password:" if encrypted else "Password (if any):", row)
         if encrypted:
             form.addRow(_small("This archive is encrypted."))
-        if archive.extract_tool(path) in ("unrar", "zpaq", "unzip"):
+        if archive.extract_tool(path) == "zpaq":  # the only one given the password on its command line
             form.addRow(_small(_ARGV_NOTE.format(tool=archive.extract_tool(path))))
         self.trash_after = QCheckBox("Move the archive to the trash afterwards")
         self.trash_after.setChecked(settings.value("archive/x_trash", False, type=bool))

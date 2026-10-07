@@ -8,6 +8,8 @@ That's the question Kestrel sets out to answer, and why I'm building it.
 
 A file manager for Ubuntu and Linux Mint that's easy to pick up and puts many jobs you'd normally do in a terminal into the window. It also adds quality-of-life improvements over GNOME Files. It's written in Python with PyQt6.
 
+![Kestrel Explorer's Overview page: drives with usage bars, phones and cameras, network locations and bookmarks](https://raw.githubusercontent.com/RegulusArms/kestrel-explorer/main/docs/screenshot-overview.png)
+
 **Terminal jobs, in the window:**
 - **Archives:** create and extract 7z, zip, rar, zpaq and every tar format, with the options the command-line tools offer (level, method, threads, passwords, split volumes), and a preview of the exact command that will run. Double-click an archive to extract it.
 - **Admin rights only when needed:** when something fails with "permission denied", choose **Retry as Administrator** and enter your password once per session, instead of running `sudo` or a file manager as root.
@@ -238,6 +240,8 @@ sudo apt install python3-pyqt6 python3-pil python3-gi gir1.2-glib-2.0 libglib2.0
 
 ## Features
 
+![The right-click menu on a file: Open, Open With, Cut, Copy, Move To, Copy To, Duplicate, Rename, Copy Path / Name, Star, Links & Shortcuts, Compress, Send To, Move to Trash, Delete Permanently and Properties](https://raw.githubusercontent.com/RegulusArms/kestrel-explorer/main/docs/screenshot-context-menu.png)
+
 **File management**
 - Tabs, back/forward history, a clickable path bar (Ctrl+L to type a path), and a sidebar.
 - Follows the desktop's theme: light or dark, accent colour, fonts and icons, including switching while Kestrel is open. On GTK desktops this needs `qt6-gtk-platformtheme` (see [Dependencies](#dependencies)).
@@ -337,6 +341,8 @@ Press F1 in the app for all keyboard shortcuts. Settings are in the ☰ menu und
 Double-clicking an archive opens Kestrel's Extract dialog instead of another app (packages, disk images and apps such as `.deb`, `.iso` and `.apk` still open with the system's app). Kestrel doesn't contain its own compression code. It drives the command-line tools installed on your system, and offers the formats those tools support. Anything whose tool is missing is shown greyed out with the package to install. `./install.sh --install-recommended` installs the common ones (see [Dependencies](#dependencies)).
 
 ### Extracting
+
+![The right-click menu on a RAR archive, with Extract Here, Extract To… and Compress…](https://raw.githubusercontent.com/RegulusArms/kestrel-explorer/main/docs/screenshot-archive-menu.png)
 
 Right-click an archive:
 
