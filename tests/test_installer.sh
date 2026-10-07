@@ -254,5 +254,25 @@ printf '<?xml version="1.0"?>\n<cleaner id="mine"><label>Mine</label></cleaner>\
 check '[[ ! -e "$CLEANER" && -f "$(dirname "$CLEANER")/mine.xml" ]]' \
     "kes-setup --undo: removes Kestrel's cleaner from BleachBit and leaves the user's own"
 
+# kes-setup --install-optional: installs the optional packages that are missing and that apt has, through sudo apt-get.
+# Stubs: dpkg says exiftool is installed (or, with ALL_INSTALLED, everything), apt-cache has no rar, no ZFS is mounted,
+# and sudo only records what it was asked to run.
+mkdir -p "$WORK/apt-stubs"
+printf '#!/bin/sh\n[ -n "$ALL_INSTALLED" ] || [ "$2" = libimage-exiftool-perl ]\n' > "$WORK/apt-stubs/dpkg"
+printf '#!/bin/sh\ncase "$2" in rar) echo "  Candidate: (none)" ;; *) echo "  Candidate: 1.0" ;; esac\n' \
+    > "$WORK/apt-stubs/apt-cache"
+printf '#!/bin/sh\nexit 1\n' > "$WORK/apt-stubs/findmnt"
+printf '#!/bin/sh\necho "$@" >> "%s/sudo.log"\n' "$WORK" > "$WORK/apt-stubs/sudo"
+chmod +x "$WORK/apt-stubs"/*
+rm -f "$WORK/sudo.log"
+PATH="$WORK/apt-stubs:$PATH" "$SETUP" --install-optional </dev/null >"$WORK/out9" 2>&1
+check '[[ "$(cat "$WORK/sudo.log")" == "apt-get install -y ffmpeg bleachbit pbzip2 lbzip2 plzip lz4" ]] &&
+       grep -q "Not available on this system (skipped): rar" "$WORK/out9" && grep -q "multiverse" "$WORK/out9"' \
+    "kes-setup --install-optional: installs the missing optional packages apt has, and names the ones it hasn't"
+rm -f "$WORK/sudo.log"
+ALL_INSTALLED=1 PATH="$WORK/apt-stubs:$PATH" "$SETUP" --install-optional </dev/null >"$WORK/out10" 2>&1
+check '[[ ! -e "$WORK/sudo.log" ]] && grep -q "already installed" "$WORK/out10"' \
+    "kes-setup --install-optional: installs nothing when they're all there"
+
 if (( fails )); then echo "FAILED ($fails failed)"; exit 1; fi
 echo "ALL PASSED (0 failed)"

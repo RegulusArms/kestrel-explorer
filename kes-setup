@@ -6,9 +6,10 @@
 #                                (and offer to put it in the dock in place of GNOME Files)
 #   kes-setup --dock             put it in the dock in place of GNOME Files (without asking)
 #   kes-setup --bleachbit        add a cleaner for Kestrel's cache, history and lists of folders to BleachBit
+#   kes-setup --install-optional install the optional packages (exiftool, ffmpeg, BleachBit, rar, more archivers)
 #   kes-setup --undo             put back everything --default, --dock and --bleachbit changed
 #   --kes PATH                   the kes to start (default: the kes next to this script, else the one on PATH)
-# --default, --dock and --bleachbit can be combined.
+# --default, --dock, --bleachbit and --install-optional can be combined.
 set -euo pipefail
 HERE="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # D-Bus activation file for org.freedesktop.FileManager1 ("Show in folder" in browsers and other apps).
@@ -38,24 +39,29 @@ STATE="$HOME/.config/kestrel-explorer/install-state"
 # BleachBit's cleaner for Kestrel (--bleachbit): BleachBit reads a user's own cleaners from ~/.config/bleachbit/cleaners
 BLEACHBIT_CLEANER="$HOME/.config/bleachbit/cleaners/kestrel-explorer.xml"
 BLEACHBIT_MARK="Kestrel Explorer's cleaner, written by kes-setup"   # in an XML comment: no "--"
+# --install-optional: the packages the .deb suggests, and the extra archive tools; Kestrel hides or works around what's
+# missing (exiftool: the Metadata tab and editing; ffmpeg: video thumbnails; bleachbit: shredding; rar: making .rar;
+# pbzip2, lbzip2, plzip, lz4: multi-core .bz2 and .lz, and .lz4). zfsutils-linux too when a ZFS file system is mounted.
+OPTIONAL_PACKAGES=(libimage-exiftool-perl ffmpeg bleachbit rar pbzip2 lbzip2 plzip lz4)
 # The system's gsettings (an Anaconda copy earlier on PATH can't see the desktop's settings)
 GSETTINGS=/usr/bin/gsettings
 
-DEFAULT=0 DOCK=0 BLEACHBIT=0 UNDO=0 KES=""
+DEFAULT=0 DOCK=0 BLEACHBIT=0 OPTIONAL=0 UNDO=0 KES=""
 while (( $# )); do
     case "$1" in
         --default) DEFAULT=1 ;;
         --dock) DOCK=1 ;;
         --bleachbit) BLEACHBIT=1 ;;
+        --install-optional) OPTIONAL=1 ;;
         --undo) UNDO=1 ;;
         --kes) KES="${2:?--kes needs a path}"; shift ;;
-        -h|--help) sed -n '2,11s/^# \{0,1\}//p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,12s/^# \{0,1\}//p' "$0"; exit 0 ;;
         *) echo "Unknown option: $1 (see kes-setup --help)" >&2; exit 2 ;;
     esac
     shift
 done
-if (( ! DEFAULT && ! DOCK && ! BLEACHBIT && ! UNDO )); then
-    sed -n '2,11s/^# \{0,1\}//p' "$0"
+if (( ! DEFAULT && ! DOCK && ! BLEACHBIT && ! OPTIONAL && ! UNDO )); then
+    sed -n '2,12s/^# \{0,1\}//p' "$0"
     exit 2
 fi
 if [[ -z "$KES" ]]; then
@@ -141,6 +147,31 @@ portal_base() {   # the portals.conf this desktop uses now (before ours): the fi
     done
     printf '[preferred]\ndefault=gnome;gtk;\n'
 }
+
+if (( OPTIONAL )); then
+    want=("${OPTIONAL_PACKAGES[@]}")
+    findmnt -t zfs >/dev/null 2>&1 && want+=(zfsutils-linux)
+    missing=() unavailable=()
+    for p in "${want[@]}"; do
+        dpkg -s "$p" >/dev/null 2>&1 && continue
+        if apt-cache policy "$p" 2>/dev/null | grep -q 'Candidate: [^(]'; then   # in the system's package lists
+            missing+=("$p")
+        else
+            unavailable+=("$p")
+        fi
+    done
+    if (( ${#unavailable[@]} )); then
+        echo "Not available on this system (skipped): ${unavailable[*]}"
+        [[ " ${unavailable[*]} " == *" rar "* ]] &&
+            echo "     rar is in Ubuntu's multiverse section: sudo add-apt-repository multiverse, then run this again."
+    fi
+    if (( ${#missing[@]} )); then
+        echo "Installing: ${missing[*]}"
+        sudo apt-get install -y "${missing[@]}" || { echo "Installing the optional packages failed." >&2; exit 1; }
+    elif (( ! ${#unavailable[@]} )); then
+        echo "The optional packages are already installed."
+    fi
+fi
 
 if (( UNDO )); then
     prev="$(state_get folder_handler)"   # GNOME Files, Nemo on Linux Mint, …
