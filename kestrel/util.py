@@ -318,6 +318,12 @@ def error_color():
     return QColor("#ff7b63" if dark_theme() else "#c01c28")
 
 
+def ok_color():
+    """Green text that is readable on the window background (GNOME's success colours)."""
+    from PyQt6.QtGui import QColor
+    return QColor("#8ff0a4" if dark_theme() else "#26a269")
+
+
 def accent_color():
     """The desktop's accent (the theme's selection colour)."""
     from PyQt6.QtGui import QGuiApplication, QPalette
