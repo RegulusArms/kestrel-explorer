@@ -483,19 +483,49 @@ def ok_color():
     return QColor("#8ff0a4" if dark_theme() else "#26a269")
 
 
+# libadwaita's accent colours (what GNOME's own apps draw)
+_ACCENTS = {"blue": "#3584e4", "teal": "#2190a4", "green": "#3a944a", "yellow": "#c88800", "orange": "#ed5b00",
+            "red": "#e62d42", "pink": "#d56199", "purple": "#9141ac", "slate": "#6f8396"}
+
+
+def named_accent(name):
+    """GNOME's accent colour setting's colour for one of its names (blue, teal, …); invalid if unknown."""
+    from PyQt6.QtGui import QColor
+    return QColor(_ACCENTS[name]) if name in _ACCENTS else QColor()
+
+
+_accent_settings = False  # the GSettings once looked up (None: no such setting), kept for the life of the app
+
+
+def _desktop_accent():
+    """GNOME 47+'s accent colour setting, once the user has chosen one; invalid otherwise."""
+    global _accent_settings
+    from PyQt6.QtGui import QColor
+    if _accent_settings is False:
+        _accent_settings = None
+        schema = "org.gnome.desktop.interface"  # not Cinnamon's, which has none and ignores GNOME's
+        if Gio and desktop_schema(schema) == schema and has_schema_key(schema, "accent-color"):
+            _accent_settings = Gio.Settings.new(schema)
+            _accent_settings.connect("changed::accent-color", lambda *_a: _palette_changed())
+    settings = _accent_settings
+    if settings is None or settings.get_user_value("accent-color") is None:
+        return QColor()
+    return named_accent(settings.get_string("accent-color"))
+
+
 def accent_color():
-    """The desktop's accent (the theme's selection colour)."""
+    """The desktop's accent: GNOME's accent colour setting once the user has chosen one (GNOME 47+), else the theme's
+    selection colour."""
     from PyQt6.QtGui import QGuiApplication, QPalette
-    return QGuiApplication.palette().color(QPalette.ColorRole.Highlight)
+    # GTK 3 themes (and so Qt's palette) don't follow GNOME's accent colour setting, so a chosen one comes first
+    c = _desktop_accent()
+    return c if c.isValid() else QGuiApplication.palette().color(QPalette.ColorRole.Highlight)
 
 
 _palette_watcher = None
 
 
-def on_palette_change(owner, fn):
-    """Call fn whenever the desktop's colours change (a light/dark switch, another theme). Qt updates its palette, but
-    a stylesheet resolves palette(...) once and colours read earlier stay as they were: stylesheets that use
-    palette(...) are reapplied first, then fn runs. Stops when owner is deleted."""
+def _watcher():
     global _palette_watcher
     if _palette_watcher is None:
         from PyQt6 import sip
@@ -511,10 +541,14 @@ def on_palette_change(owner, fn):
                 self.fns = []
                 self.queued = False
 
-            def event(self, ev):
-                if ev.type() == QEvent.Type.ApplicationPaletteChange and not self.queued:
+            def apply_soon(self):
+                if not self.queued:
                     self.queued = True  # a theme switch can change the palette several times in a row
                     QTimer.singleShot(0, self.apply)
+
+            def event(self, ev):
+                if ev.type() == QEvent.Type.ApplicationPaletteChange:
+                    self.apply_soon()
                 return super().event(ev)
 
             def apply(self):
@@ -529,7 +563,19 @@ def on_palette_change(owner, fn):
                     if not sip.isdeleted(o):
                         f()
         _palette_watcher = PaletteWatcher()
-    _palette_watcher.fns.append((owner, fn))
+    return _palette_watcher
+
+
+def _palette_changed():
+    """The accent colour setting changed."""
+    _watcher().apply_soon()
+
+
+def on_palette_change(owner, fn):
+    """Call fn whenever the desktop's colours change (a light/dark switch, another theme, the accent colour setting).
+    Qt updates its palette, but a stylesheet resolves palette(...) once and colours read earlier stay as they were:
+    stylesheets that use palette(...) are reapplied first, then fn runs. Stops when owner is deleted."""
+    _watcher().fns.append((owner, fn))
 
 
 # ---------------------------------------------------------------- the GTK theme's colours (Qt < 6.5)
