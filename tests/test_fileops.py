@@ -11,8 +11,9 @@ from common import A, check, finish, home_path as P, setup_app, skip, spin, wait
 from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
-from kestrel import archive, fileops, places, stats, undo, util
+from kestrel import archive, fileops, hashcheck, places, stats, undo, util
 from kestrel.archive_ui import ExtractDialog
+from kestrel.dialogs import PropertiesDialog
 
 boxes = []   # texts of message boxes that popped up (closed automatically)
 
@@ -200,6 +201,80 @@ extract_closer.start()
 w.open_paths(w.pane(), [P("arc.tar.gz")])
 check(wait_for(lambda: bool(extract_shown)), "double-clicking an archive opens Kestrel's Extract dialog")
 extract_closer.stop()
+
+# ---- checksum files
+check(hashcheck.is_hash_file(P("x.sfv")) and hashcheck.is_hash_file(P("x.MD5"))
+      and hashcheck.is_hash_file(P("x.sha256")) and hashcheck.is_hash_file(P("SHA256SUMS"))
+      and hashcheck.is_hash_file(P("Fedora-41-x86_64-CHECKSUM")) and hashcheck.is_hash_file(P("x.b2"))
+      and not hashcheck.is_hash_file(P("x.txt")) and not hashcheck.is_hash_file(P("md5.txt"))
+      and not hashcheck.is_hash_file(P("summary")),
+      "checksum files are recognised by name (.sfv, .md5, .sha256, SHA256SUMS, …-CHECKSUM), other files aren't")
+MD5, SHA1 = "b1946ac92492d2347c6235b4d2611184", "f572d396fae9206628714fb2ce00f72e94f2258f"
+SHA256 = "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03"
+SHA512 = ("e7c22b994c59d9cf2b48e549b1e24666636045930d3da7c1acb299d1c3b7f931f94aae41edda2c2b207a36e10f8bcb8d"
+          "45223e54878f5b316e7ce3b6bc019629")
+B2 = ("f60ce482e5cc1229f39d71313171a8d9f4ca3a87d066bf4b205effb528192a75f14f3271e2c1a90e1de53f275b4d4793ee"
+      "f2f5e31ea90d2ce29d2e481c36435f")
+make(P("sums/hello.txt"), b"hello\n")
+make(P("sums/back\\slash.txt"), b"hello\n")
+make(P("sums/changed.txt"), b"changed\n")
+make(P("sums/MD5SUMS"), (f"# made by md5sum\n{MD5}  hello.txt\n{MD5} *changed.txt\n{MD5}  missing.txt\n"
+                         f"\\{MD5}  back\\\\slash.txt\n").encode())
+make(P("sums/CHECKSUM"), (f"-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\nSHA256 (hello.txt) = {SHA256}\n"
+                          f"SHA1 (hello.txt) = {SHA1}\nSHA512 (hello.txt) = {SHA512}\nBLAKE2b (hello.txt) = {B2}\n"
+                          "-----BEGIN PGP SIGNATURE-----\niQIzBAEBCAAdFiEE\n-----END PGP SIGNATURE-----\n").encode())
+make(P("sums/files.sfv"), b"; made by an SFV tool\r\nhello.txt 363A3020\r\nchanged.txt 363a3020\r\n")
+make(P("sums/hello.txt.sha256"), (SHA256 + "\n").encode())
+make(P("sums/notes.md5"), b"just some notes\n")
+md5s, bsd = hashcheck.parse(P("sums/MD5SUMS")), hashcheck.parse(P("sums/CHECKSUM"))
+sfv, lone = hashcheck.parse(P("sums/files.sfv")), hashcheck.parse(P("sums/hello.txt.sha256"))
+
+
+def names(es):
+    return ",".join(f"{e.name}:{e.algo}" for e in es)
+
+
+check(names(md5s) == "hello.txt:md5,changed.txt:md5,missing.txt:md5,back\\slash.txt:md5"
+      and md5s[0].path == P("sums/hello.txt")
+      and names(bsd) == "hello.txt:sha256,hello.txt:sha1,hello.txt:sha512,hello.txt:blake2b"
+      and names(sfv) == "hello.txt:crc32,changed.txt:crc32" and sfv[0].expected == "363a3020"
+      and names(lone) == "hello.txt:sha256" and lone[0].path == P("sums/hello.txt")
+      and not hashcheck.parse(P("sums/notes.md5")),
+      "GNU, BSD-tag, SFV and lone-hash checksum files are read (escaped names, comments and a PGP signature skipped)")
+
+
+def statuses(es):
+    return ",".join(hashcheck.verify(e).status for e in es)
+
+
+check(statuses(md5s) == "ok,failed,missing,ok" and statuses(bsd) == "ok,ok,ok,ok" and statuses(sfv) == "ok,failed"
+      and statuses(lone) == "ok",
+      "verifying finds matching, changed and missing files (MD5, SHA-1, SHA-256, SHA-512, BLAKE2b, CRC32)")
+w.open_paths(w.pane(), [P("sums/MD5SUMS")])
+found = []
+
+
+def verify_done():
+    found[:] = [x for x in QApplication.topLevelWidgets()
+                if isinstance(x, hashcheck.VerifyDialog) and x.isVisible()]
+    return bool(found) and found[-1].complete()
+
+
+wait_for(verify_done)
+vd = found[-1] if found else None
+check(vd is not None and ",".join(r.status for r in vd.results) == "ok,failed,missing,ok",
+      "double-clicking a checksum file opens Verify Checksums, which checks every file it lists")
+if vd is not None:
+    vd.close()
+said = []
+for file, sums in (("hello.txt", "CHECKSUM"), ("changed.txt", "MD5SUMS"), ("hello.txt", "notes.md5")):
+    d = PropertiesDialog(w, [P("sums/" + file)])
+    d.verify_against(P("sums/" + sums))
+    wait_for(lambda: not d.hash_result.text().endswith("…"))
+    said.append(d.hash_result.text())
+    d.deleteLater()
+check(said[0] == "✔ Matches (SHA256)." and said[1] == "✘ Doesn't match (MD5)." and "isn't a checksum file" in said[2],
+      f"Properties' Checksums tab checks a file against a chosen checksum file ({' | '.join(said)})")
 
 # -- symlinks inside a tree: never followed, even when one is swapped in while a job runs
 victim = P("victim")  # stands for files elsewhere that a job mustn't touch

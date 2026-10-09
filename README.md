@@ -1,6 +1,6 @@
 # Kestrel Explorer
 
-**Version 0.3.0-alpha0.** This is an early alpha release, so expect rough edges.
+**Version 0.3.0-alpha2.** This is an early alpha release, so expect rough edges.
 
 > **Why do Linux users still need five separate utilities and a terminal to do normal filesystem work?**
 
@@ -8,10 +8,12 @@ That's the question Kestrel sets out to answer, and why I'm building it.
 
 A file manager for Ubuntu and Linux Mint that's easy to pick up and puts many jobs you'd normally do in a terminal into the window. It also adds quality-of-life improvements over GNOME Files. It's written in Python with PyQt6.
 
+![Kestrel Explorer's Overview page: drives with usage bars, phones and cameras, network locations and bookmarks](https://raw.githubusercontent.com/RegulusArms/kestrel-explorer/main/docs/screenshot-overview.png)
+
 **Terminal jobs, in the window:**
 - **Archives:** create and extract 7z, zip, rar, zpaq and every tar format, with the options the command-line tools offer (level, method, threads, passwords, split volumes), and a preview of the exact command that will run. Double-click an archive to extract it.
 - **Admin rights only when needed:** when something fails with "permission denied", choose **Retry as Administrator** and enter your password once per session, instead of running `sudo` or a file manager as root.
-- **Permissions and links:** permissions, including setuid, setgid and the sticky bit; symbolic, relative and hard links; and MD5/SHA checksums with verification.
+- **Permissions and links:** permissions, including setuid, setgid and the sticky bit; symbolic, relative and hard links; and MD5/SHA checksums with verification. Double-click a checksum file (`.sfv`, `.md5`, `.sha256`, `SHA256SUMS`…) to check every file it lists.
 - **Metadata:** view and edit EXIF, XMP and other metadata with `exiftool`, from a searchable list of tags.
 - **Search and rename:** search subfolders with wildcards or inside files, and batch rename with templates or regular expressions.
 - **Shortcuts out:** Open in Terminal or VS Code, your Nautilus scripts, and Samba network sharing.
@@ -217,6 +219,8 @@ Package names below are Ubuntu's; Linux Mint uses the same ones. Everything else
 
 **Optional** (features are hidden or fall back when missing)
 
+`./kes-setup --install-optional` (from this folder) installs the ones apt has that are missing (`zfsutils-linux` only when a ZFS file system is mounted; `rar` needs Ubuntu's multiverse section). UWP isn't an apt package.
+
 | Package | Used for |
 |---|---|
 | `libimage-exiftool-perl` | The full Metadata tab, plus editing, adding and clearing metadata |
@@ -237,6 +241,8 @@ sudo apt install python3-pyqt6 python3-pil python3-gi gir1.2-glib-2.0 libglib2.0
 ```
 
 ## Features
+
+![The right-click menu on a file: Open, Open With, Cut, Copy, Move To, Copy To, Duplicate, Rename, Copy Path / Name, Star, Links & Shortcuts, Compress, Send To, Move to Trash, Delete Permanently and Properties](https://raw.githubusercontent.com/RegulusArms/kestrel-explorer/main/docs/screenshot-context-menu.png)
 
 **File management**
 - Tabs, back/forward history, a clickable path bar (Ctrl+L to type a path), and a sidebar.
@@ -284,7 +290,7 @@ sudo apt install python3-pyqt6 python3-pil python3-gi gir1.2-glib-2.0 libglib2.0
     - **Clear All Metadata…:** strip everything, optionally keeping the orientation and colour profile so the image looks the same.
     - Greyed-out rows (file system info and values exiftool calculates) are read-only.
     - The tag descriptions and "Accepts" types were written with the help of an AI tool while Kestrel was being made, and may not be completely accurate. They ship as fixed text: Kestrel itself runs no AI. Descriptions outside the common tags are built from exiftool's tag names and categories.
-  - **Checksums:** MD5, SHA1 and SHA256, with a field to check against a known checksum.
+  - **Checksums:** MD5, SHA1 and SHA256, with a field to check against a known checksum, or **Browse…** for a checksum file that lists the file (see [Checksum files](#checksum-files)).
 
 **Archives** (details in [Archives](#archives))
 - **Extract Here** and **Extract To…** for 7z, zip, rar (including split `.part1.rar` sets), zpaq, tar with any compression, single `.gz`/`.xz`/`.zst`/… files, and iso, cab, deb, rpm and more.
@@ -337,6 +343,8 @@ Press F1 in the app for all keyboard shortcuts. Settings are in the ☰ menu und
 Double-clicking an archive opens Kestrel's Extract dialog instead of another app (packages, disk images and apps such as `.deb`, `.iso` and `.apk` still open with the system's app). Kestrel doesn't contain its own compression code. It drives the command-line tools installed on your system, and offers the formats those tools support. Anything whose tool is missing is shown greyed out with the package to install. `./install.sh --install-recommended` installs the common ones (see [Dependencies](#dependencies)).
 
 ### Extracting
+
+![The right-click menu on a RAR archive, with Extract Here, Extract To… and Compress…](https://raw.githubusercontent.com/RegulusArms/kestrel-explorer/main/docs/screenshot-archive-menu.png)
 
 Right-click an archive:
 
@@ -420,6 +428,17 @@ Not every tool can report real progress, so the bar shows what each one can:
 - **zip volumes** made with 7-Zip are plain `.zip.001` parts, not the "spanned" zip format some Windows tools expect.
 - **Tools only report progress as described above.** A single large file in zip, or zpaq's compression phase, shows the clock rather than a percentage.
 
+## Checksum files
+
+Double-clicking a checksum file opens **Verify Checksums** instead of a text editor. It checks every file the checksum file lists, one after another, with a progress bar: each row shows ✔ OK, ✘ Doesn't match (hover for the expected and actual hash), ✘ Missing, or why the file couldn't be read, and the summary says how many passed. **Stop** stops part-way and **Verify Again** starts over. A file that only looks like a checksum file (a `.md5` with no checksums in it) opens as usual.
+
+- Files: `.sfv`, `.md5`, `.sha1`, `.sha224`, `.sha256`, `.sha384`, `.sha512`, `.b2` (and `.md5sum`, `.sha256sum`, …), `MD5SUMS`, `SHA256SUMS`, `B2SUMS` and the like, and `CHECKSUM` files such as Fedora's.
+- Formats: `md5sum`/`sha256sum` output (`hash  name`, `hash *name`, and their escaped names), BSD tags (`SHA256 (name) = hash`, as `--tag` and Fedora write them, inside a PGP-signed file too), SFV (`name CRC32`, `;` comments), and a file holding only a hash, which is for the file of the same name without the extension (`disk.iso.sha256` → `disk.iso`).
+- Algorithms: CRC32, MD5, SHA1, SHA224, SHA256, SHA384, SHA512 and BLAKE2b, from the BSD tag, else from the file's name, else from the hash's length.
+- Names are relative to the checksum file's folder.
+
+In **Properties → Checksums**, **Browse…** checks one file against a checksum file: it finds the file's line (by path, else by name) and says whether it matches.
+
 ## Admin session
 
 Running a whole file manager as root (`sudo kes`) is risky and mostly doesn't work on a modern desktop. Kestrel instead keeps running as you, and does only the operations that need admin rights as root.
@@ -461,7 +480,7 @@ tests/run.sh                  # every test
 tests/run.sh fileops atc_undo # only some
 ```
 
-There are 311 checks in 13 tests: file operations (copy, move, merge, delete, cancel, trash, links, undo), the tower that keeps several Kestrels in sync (shared changes, the shared task list, shared undo, opening folders as tabs), phones and cameras, rearranging the sidebar, following the desktop theme, the file chooser, the admin helper that runs as root, every menu entry and shortcut, screen-reader names and dropping onto folders, parsing that must match between the versions, and `install.sh` and `kes-setup`, including a BleachBit dry run of Kestrel's cleaner. Each test runs with a throwaway home folder on a private D-Bus bus, so your files, settings, dock and open windows are never touched. GitHub Actions runs them on Ubuntu 24.04 on every push (`.github/workflows/tests.yml`). The [C++ version](https://github.com/RegulusArms/kes-c/tree/main/tests) has the same tests, and some checks launch the other version to test the two together. Details: [tests/README.md](https://github.com/RegulusArms/kestrel-explorer/blob/main/tests/README.md).
+There are 313 checks in 13 tests: file operations (copy, move, merge, delete, cancel, trash, links, undo), the tower that keeps several Kestrels in sync (shared changes, the shared task list, shared undo, opening folders as tabs), phones and cameras, rearranging the sidebar, following the desktop theme, the file chooser, the admin helper that runs as root, every menu entry and shortcut, screen-reader names and dropping onto folders, parsing that must match between the versions, and `install.sh` and `kes-setup`, including a BleachBit dry run of Kestrel's cleaner. Each test runs with a throwaway home folder on a private D-Bus bus, so your files, settings, dock and open windows are never touched. GitHub Actions runs them on Ubuntu 24.04 on every push (`.github/workflows/tests.yml`). The [C++ version](https://github.com/RegulusArms/kes-c/tree/main/tests) has the same tests, and some checks launch the other version to test the two together. Details: [tests/README.md](https://github.com/RegulusArms/kestrel-explorer/blob/main/tests/README.md).
 
 ## Architecture
 

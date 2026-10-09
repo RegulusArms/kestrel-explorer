@@ -1,12 +1,13 @@
-"""MainWindow's opening of files and folders: activating items (folders navigate, archives offer Extract, images open
-in the viewer, videos and everything else in their apps, as Preferences says), Quick View, and the image viewer.
+"""MainWindow's opening of files and folders: activating items (folders navigate, archives offer Extract, checksum
+files check the files they list, images open in the viewer, videos and everything else in their apps, as Preferences
+says), Quick View, and the image viewer.
 MainWindow (app.py) inherits it; the window itself (tabs, menus, context menus) is there."""
 import os
 import shutil
 
 from PyQt6.QtWidgets import QMessageBox
 
-from . import archive, archive_ui, dialogs, fileops, places, util
+from . import archive, archive_ui, dialogs, fileops, hashcheck, places, util
 from .viewer import ImageViewer
 
 
@@ -36,6 +37,8 @@ class Opening:
         for f in archives:
             archive_ui.extract_dialog(self, f)  # Kestrel's own extraction, not the system's archive app
         files = [f for f in files if f not in archives]
+        # Verify Checksums (one that lists nothing opens as text)
+        files = [f for f in files if not (hashcheck.is_hash_file(f) and hashcheck.open_dialog(self, f))]
         images = [f for f in files if util.is_image(f)]
         videos = [f for f in files if util.is_video(f)]
         others = [f for f in files if f not in images and f not in videos]

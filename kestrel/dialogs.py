@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (QAbstractItemView, QButtonGroup, QCheckBox, QColorD
                              QTableWidgetItem, QTabWidget, QTreeView, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
                              QWidget)
 
-from . import fileops, metadata, thumbs, util, uwp
+from . import fileops, hashcheck, metadata, thumbs, util, uwp
 
 
 def _sel_label(text=""):
@@ -705,7 +705,58 @@ class PropertiesDialog(QDialog):
         verify.textChanged.connect(check)
         form.addRow("Verify:", verify)
         form.addRow("", result)
+        # or against a checksum file that lists it (SHA256SUMS, .md5, .sfv…)
+        hrow = QHBoxLayout()
+        self.hash_edit = QLineEdit()
+        self.hash_edit.setReadOnly(True)
+        self.hash_edit.setPlaceholderText("Verify against a checksum file…")
+        browse = QPushButton("Browse…")
+        hrow.addWidget(self.hash_edit, 1)
+        hrow.addWidget(browse)
+        form.addRow("Checksum file:", hrow)
+        self.hash_result = QLabel()
+        self.hash_result.setWordWrap(True)
+        form.addRow("", self.hash_result)
+
+        def choose():
+            start = os.path.dirname(self.hash_edit.text() or self.path)
+            f, _ = QFileDialog.getOpenFileName(self, "Choose Checksum File", start, hashcheck.FILTER)
+            if f:
+                self.verify_against(f)
+        browse.clicked.connect(choose)
         return w
+
+    def verify_against(self, hash_path):
+        """The Checksums tab's checksum file (Browse…); self.hash_result says what it found."""
+        self.hash_edit.setText(hash_path)
+        self.hash_result.setToolTip("")
+        label = self.hash_result
+
+        def said(text, good):
+            label.setText(text)
+            label.setStyleSheet(f"color: {(util.ok_color() if good else util.error_color()).name()}")
+        entries = hashcheck.parse(hash_path)
+        e = hashcheck.find(entries, self.path)
+        if not entries:
+            return said(f"✘ “{os.path.basename(hash_path)}” isn't a checksum file.", False)
+        if e is None:
+            return said(f"✘ “{os.path.basename(self.path)}” isn't listed in it.", False)
+        algo = hashcheck.algo_label(e.algo)
+        label.setStyleSheet("")
+        label.setText(f"Checking ({algo})…")
+
+        def done(res):
+            if res is None:
+                return said("Stopped.", False)
+            status, actual, error = res
+            if status == "ok":
+                return said(f"✔ Matches ({algo}).", True)
+            if status == "failed":
+                label.setToolTip(f"Expected: {e.expected}\nActual: {actual}")
+                return said(f"✘ Doesn't match ({algo}).", False)
+            said("✘ " + ("Not found." if status == "missing" else error), False)
+        self.threads.append(fileops.run_job(self, f"Verifying {os.path.basename(self.path)}",
+                                            lambda t: tuple(hashcheck.verify(e, t)), done))
 
     def _apply(self):
         if self.single:
