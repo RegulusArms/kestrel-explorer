@@ -260,12 +260,20 @@ class VerifyDialog(QDialog):
         self.status.setStyleSheet("")
         self.status.setText(f"Checking {i + 1} of {len(self.entries)}: {self.entries[i].name}")
         e = self.entries[i]
-        # no parent: closing the dialog mustn't destroy a thread that is still reading
-        self.task = fileops.run_job(None, f"Verifying {e.name}", lambda t: tuple(verify(e, t)), None,
-                                    cancellable=True, quiet=True)
+
+        def job(t):
+            try:
+                return tuple(verify(e, t))
+            except fileops.Cancelled:
+                raise
+            except Exception as err:   # as a result: run_job connects on_done before the thread starts
+                return ("error", "", str(err))
+
+        # no parent: closing the dialog mustn't destroy a thread that is still reading. The result comes through
+        # on_done, not a connection made afterwards, which a quick file could finish before.
+        self.task = fileops.run_job(None, f"Verifying {e.name}", job,
+                                    lambda res: g == self.gen and self._on_result(res), cancellable=True, quiet=True)
         self.task.progress.connect(lambda f, _text: g == self.gen and self._progress(i, f))
-        self.task.result.connect(lambda res: g == self.gen and self._on_result(res))
-        self.task.error.connect(lambda msg: g == self.gen and self._on_result(("error", "", msg)))
 
     def _progress(self, i, f):
         here = self.before + int(max(f, 0.0) * self.sizes[i])
