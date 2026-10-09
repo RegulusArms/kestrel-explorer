@@ -5,7 +5,6 @@ Formats: GNU coreutils' "hash  name", BSD tags "SHA256 (name) = hash", SFV's "na
 import hashlib
 import os
 import re
-import secrets
 import zlib
 from collections import namedtuple
 
@@ -378,13 +377,7 @@ _OUT_EXT = {"crc32": ".sfv", "md5": ".md5", "sha1": ".sha1", "sha256": ".sha256"
 
 def _write_replacing(path, data):
     """Write `data` to a new file beside `path`, then rename it over `path` (never through a symlink there)."""
-    while True:
-        part = os.path.join(os.path.dirname(path), f".{os.path.basename(path)}.kes-{secrets.randbits(32):x}.part")
-        try:
-            fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o666)
-            break
-        except FileExistsError:
-            continue
+    fd, part = util.open_part(os.path.dirname(path).rstrip("/") + "/")
     try:
         with open(fd, "wb") as f:
             f.write(data)

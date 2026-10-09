@@ -2,6 +2,7 @@
 import itertools
 import math
 import os
+import re
 import shutil
 import signal
 import stat
@@ -573,42 +574,41 @@ class _Ops:
             finally:
                 os.close(in_fd)
         elif stat.S_ISREG(st.st_mode):
-            self._copy_file_at(sdir, sname, st, src, ddir, dname, dst,
-                               dst_st is not None and stat.S_ISLNK(dst_st.st_mode))
+            self._copy_file_at(sdir, sname, st, src, ddir, dname, dst)
         else:
             raise RuntimeError(f"{src} isn't a regular file, folder or link")
 
-    def _copy_file_at(self, sdir, sname, st, src, ddir, dname, dst, dst_is_link):
+    def _copy_file_at(self, sdir, sname, st, src, ddir, dname, dst):
         name = os.path.basename(src)
         in_fd = _call(os.open, src, sname, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=sdir)
         try:
             now = os.fstat(in_fd)
             if (now.st_dev, now.st_ino) != (st.st_dev, st.st_ino):
                 raise RuntimeError(f"{src} changed while it was being copied")
-            # a symlink in the way is replaced, never written through; an existing file is overwritten in place
-            if dst_is_link:
-                _call(os.unlink, dst, dname, dir_fd=ddir)
-            out_fd = _call(os.open, dst, dname, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC,
-                           0o666, dir_fd=ddir)
+            # Written to a new file beside the destination and renamed over it once complete: until then an existing
+            # file keeps its contents (a cancel or an error removes only the new file), a symlink in the way is
+            # replaced (never written through), and another hard link of the old file keeps the old contents.
+            out_fd, part = _call(util.open_part, dst, "", dir_fd=ddir)   # (permission denied there → admin session)
             try:
-                while True:
-                    if self.task.cancelled:
-                        os.close(out_fd)
-                        out_fd = -1
-                        os.unlink(dname, dir_fd=ddir)
-                        raise Cancelled()
-                    buf = os.read(in_fd, CHUNK)
-                    if not buf:
-                        break
-                    view = memoryview(buf)
-                    while view:
-                        view = view[os.write(out_fd, view):]
-                    self.done += len(buf)
-                    self._report(name)
-                _copy_times_mode(out_fd, st)
-            finally:
-                if out_fd >= 0:
+                try:
+                    while True:
+                        if self.task.cancelled:
+                            raise Cancelled()
+                        buf = _call(os.read, src, in_fd, CHUNK)
+                        if not buf:
+                            break
+                        view = memoryview(buf)
+                        while view:
+                            view = view[_call(os.write, dst, out_fd, view):]
+                        self.done += len(buf)
+                        self._report(name)
+                    _copy_times_mode(out_fd, st)
+                finally:
                     os.close(out_fd)
+                _call(os.rename, dst, part, dname, src_dir_fd=ddir, dst_dir_fd=ddir)
+            except BaseException:
+                os.unlink(part, dir_fd=ddir)
+                raise
         finally:
             os.close(in_fd)
 
@@ -772,6 +772,23 @@ def transfer(parent, sources, dest_dir, op, on_done=None):
 
 # ---------------------------------------------------------------- links & shortcuts
 
+_CONTROL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _desktop_value(s):
+    """A string value in a .desktop file (the Desktop Entry spec's escapes): a line break can't end the value and
+    start a key of its own."""
+    esc = {"\\": "\\\\", "\n": "\\n", "\t": "\\t", "\r": "\\r"}
+    return "".join("\\s" if c == " " and i == 0 else esc.get(c, c) for i, c in enumerate(s))
+
+
+def _exec_arg(arg):
+    """One argument of a .desktop file's Exec: in double quotes, with ", `, $ and \\ escaped inside them and %
+    doubled (a field code otherwise); _desktop_value() is applied to the whole line on top."""
+    q = "".join("\\" + c if c in '"`$\\' else c for c in arg)
+    return '"' + q.replace("%", "%%") + '"'
+
+
 def link_plan(kind, target, dest_dir):
     """What creating a link of `kind` ("sym", "rel", "hard" or "desktop") to target in dest_dir means, as an
     admin-helper request: {"op": "symlink" | "hardlink" | "write", ...}. The name is made unique."""
@@ -784,14 +801,21 @@ def link_plan(kind, target, dest_dir):
     if kind == "hard":
         link = util.unique_path(dest_dir, f"{name} (hard link)" if same_dir else name, "num")
         return {"op": "hardlink", "target": os.path.abspath(target), "link": link}
-    # a freedesktop .desktop launcher pointing to target
+    # a freedesktop .desktop launcher pointing to target. Every value is escaped (_desktop_value), so a name can't add
+    # keys of its own; control characters the format has no escape for are refused.
+    if _CONTROL.search(target):
+        raise RuntimeError(f"A shortcut can't point to “{name}”: its name or folder holds control characters.")
     is_dir = os.path.isdir(target)
     if os.path.isfile(target) and os.access(target, os.X_OK):
-        body = (f"[Desktop Entry]\nType=Application\nName={name}\nExec=\"{target}\"\n"
-                f"Path={os.path.dirname(target)}\nIcon=application-x-executable\nTerminal=false\n")
+        # GLib checks that the program exists before it turns %% back into %, so it won't load a launcher whose
+        # program's path holds a "%": sh starts that one (the path is its $0, never parsed as a command)
+        exec_ = "sh -c " + _exec_arg('exec "$0"') + " " + _exec_arg(target) if "%" in target else _exec_arg(target)
+        body = (f"[Desktop Entry]\nType=Application\nName={_desktop_value(name)}\nExec={_desktop_value(exec_)}\n"
+                f"Path={_desktop_value(os.path.dirname(target))}\nIcon=application-x-executable\nTerminal=false\n")
     else:
         icon = "folder" if is_dir else util.mime_for(target, is_dir).iconName()
-        body = f"[Desktop Entry]\nType=Link\nName={name}\nURL={util.file_uri(target)}\nIcon={icon}\n"
+        body = (f"[Desktop Entry]\nType=Link\nName={_desktop_value(name)}\n"
+                f"URL={_desktop_value(util.file_uri(target))}\nIcon={_desktop_value(icon)}\n")
     path = util.unique_path(dest_dir, util.split_ext(name)[0] + ".desktop", "num")
     return {"op": "write", "path": path, "text": body, "mode": 0o755}
 

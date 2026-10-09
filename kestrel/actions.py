@@ -351,13 +351,16 @@ class FileActions:
             QMessageBox.warning(self, "Create Link", str(e))
             return
         for p in paths:
-            plan = fileops.link_plan(kind, p, dest)
+            plan = None
             try:
+                plan = fileops.link_plan(kind, p, dest)
                 made.append(fileops.make_link(plan))
             except PermissionError:
                 denied.append(plan)
             except OSError as e:
                 errors.append(f"{os.path.basename(p)}: {e}")
+            except RuntimeError as e:   # a name a shortcut can't hold
+                errors.append(str(e))
         if errors:
             QMessageBox.warning(self, "Create Link", "\n".join(errors))
 

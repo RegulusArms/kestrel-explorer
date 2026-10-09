@@ -1,19 +1,22 @@
 """File operations: copy, move, merge, replace, delete, cancel, trash, links, unique names, and undoing them."""
 import ctypes
 import os
+import resource
 import shutil
+import signal
 import stat
 import subprocess
 import threading
 import time
 
 from common import A, check, finish, home_path as P, setup_app, skip, spin, wait_for
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from kestrel import archive, fileops, hashcheck, places, stats, undo, util
 from kestrel.archive_ui import ExtractDialog
 from kestrel.dialogs import PropertiesDialog
+from gi.repository import Gio, GLib  # after kestrel, whose util picks the GLib versions
 
 boxes = []   # texts of message boxes that popped up (closed automatically)
 
@@ -25,8 +28,12 @@ def make(path, data=b"x"):
 
 
 def text_of(path):
-    with open(path, encoding="utf-8") as f:
-        return f.read()
+    """The file's text; "" if it's missing (as in the C++ tests)."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
 
 
 def run_ops(w, jobs, undo_label=None, task_out=None):
@@ -129,6 +136,56 @@ copied = os.listdir(P("big2")) if os.path.isdir(P("big2")) else []
 check(len(copied) < 24, f"cancel: stops part-way ({len(copied)} of 24 copied)")
 check(all(os.path.getsize(os.path.join(P("big2"), f)) == BIG for f in copied), "cancel: no half-copied file is left behind")
 
+# -- replacing a file: the old one stays until the new one is complete (a cancel or an error keeps it); a symlink in the
+# way is replaced, not written through; another hard link of the old file keeps its contents
+os.makedirs(P("rep"), exist_ok=True)
+
+
+def leftovers():
+    """Temporary files left in rep/."""
+    return [n for n in os.listdir(P("rep")) if n.startswith(".kes-")]
+
+
+make(P("rep/new.bin"), b"new")
+os.truncate(P("rep/new.bin"), 1 << 30)   # 1 GB (sparse): long enough to cancel
+make(P("rep/report.txt"), b"precious")
+rep_state = {}
+rt = fileops.start_ops(w, [("copy", P("rep/new.bin"), P("rep/report.txt"))], "Test", lambda: None)
+# on the copying thread itself, as soon as the copy reports progress on this file: a cancel half-way through
+rt.progress.connect(lambda _f, text: text.endswith("new.bin") and rt.cancel(), Qt.ConnectionType.DirectConnection)
+rt.finished.connect(lambda: rep_state.__setitem__("gone", True))
+wait_for(lambda: rep_state.get("gone"), 20000)
+check(text_of(P("rep/report.txt")) == "precious" and not leftovers(),
+      "replacing a file and cancelling part-way keeps the original, and leaves no temporary file")
+
+make(P("rep/big.bin"), b"b" * BIG)
+make(P("rep/keep.txt"), b"precious")
+old_lim = resource.getrlimit(resource.RLIMIT_FSIZE)
+old_handler = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+resource.setrlimit(resource.RLIMIT_FSIZE, (1 << 20, old_lim[1]))   # writes past 1 MB fail (EFBIG)
+try:
+    run_ops(w, [("copy", P("rep/big.bin"), P("rep/keep.txt"))])
+finally:
+    resource.setrlimit(resource.RLIMIT_FSIZE, old_lim)
+    signal.signal(signal.SIGXFSZ, old_handler)
+check(text_of(P("rep/keep.txt")) == "precious" and not leftovers(),
+      "a copy that fails part-way (a write error) keeps the file it would have replaced, and leaves nothing "
+      "half-written")
+
+make(P("rep/outside.txt"), b"outside")
+os.symlink(P("rep/outside.txt"), P("rep/to-outside"))
+make(P("rep/linked.txt"), b"old")
+os.link(P("rep/linked.txt"), P("rep/other-link.txt"))
+make(P("rep/small.txt"), b"new")
+run_ops(w, [("copy", P("rep/small.txt"), P("rep/to-outside")), ("copy", P("rep/small.txt"), P("rep/linked.txt"))])
+check(not os.path.islink(P("rep/to-outside")) and text_of(P("rep/to-outside")) == "new"
+      and text_of(P("rep/outside.txt")) == "outside" and text_of(P("rep/linked.txt")) == "new"
+      and text_of(P("rep/other-link.txt")) == "old" and not leftovers(),
+      "replacing a symlink replaces the link, not its target; another hard link of a replaced file keeps its "
+      "contents")
+shutil.rmtree(P("rep"))
+boxes.clear()
+
 # ---- trash
 make(P("t/gone.txt"), b"trash me")
 util.trash(P("t/gone.txt"))
@@ -172,6 +229,73 @@ hard = fileops.make_link(fileops.link_plan("hard", P("n/a.txt"), P("dst")))
 check(os.stat(hard).st_ino == os.stat(P("n/a.txt")).st_ino, "hard link")
 same = fileops.make_link(fileops.link_plan("sym", P("n/a.txt"), P("n")))
 check(os.path.basename(same).startswith("Link to a"), "a link in the same folder is named \"Link to …\"")
+
+# -- desktop shortcuts to items whose names hold quotes, $, `, \, % and line breaks that try to add keys of their own
+# (GLib keeps the last of a repeated key): the shortcut must still name and open exactly that item
+evil = "\"q\" $HOME `id` \\b %f %%\nExec=touch PWNED\nType=Application\n"
+sc, sc_out = P("sc"), P("sc/out")
+sc_dir, marker = os.path.join(sc, "d " + evil), P("sc-ran")
+os.makedirs(sc_out, exist_ok=True)
+os.makedirs(sc_dir, exist_ok=True)
+script, doc = os.path.join(sc_dir, "run " + evil + ".sh"), os.path.join(sc_dir, "doc " + evil + ".txt")
+make(script, f"#!/bin/sh\nprintf '%s\\n' \"$#\" \"$0\" > '{marker}'\n".encode())
+os.chmod(script, 0o755)
+make(doc, b"doc")
+
+
+def read_shortcut(path):
+    """The shortcut as GLib reads it, and the keys written (each once)."""
+    keys = [line.split("=", 1)[0] for line in text_of(path).split("\n") if "=" in line]
+    kf = GLib.KeyFile()
+    values = {}
+    try:
+        kf.load_from_file(path, GLib.KeyFileFlags.NONE)
+        names, _n = kf.get_keys("Desktop Entry")
+        values = {k: kf.get_string("Desktop Entry", k) for k in names}
+    except GLib.Error:
+        pass
+    return values, keys
+
+
+made = [fileops.make_link(fileops.link_plan("desktop", t, sc_out)) for t in (script, doc, sc_dir)]
+(appv, app_keys), (docv, doc_keys), (dirv, dir_keys) = (read_shortcut(m) for m in made)
+check(app_keys == ["Type", "Name", "Exec", "Path", "Icon", "Terminal"] and appv.get("Type") == "Application"
+      and appv.get("Name") == os.path.basename(script) and appv.get("Path") == sc_dir
+      and doc_keys == ["Type", "Name", "URL", "Icon"] and docv.get("Type") == "Link"
+      and docv.get("Name") == os.path.basename(doc) and util.uri_to_path(docv.get("URL", "")) == doc
+      and dir_keys == doc_keys and dirv.get("Type") == "Link" and util.uri_to_path(dirv.get("URL", "")) == sc_dir,
+      "a desktop shortcut keeps an item's name and path whole, whatever they hold (quotes, $, `, \\, %, line "
+      "breaks), and adds no keys")
+if not shutil.which("desktop-file-validate"):
+    skip("desktop-file-validate accepts the shortcuts (it isn't installed)")
+else:
+    complaints = ""
+    for m in made:
+        r = subprocess.run(["desktop-file-validate", m], capture_output=True, text=True)
+        if r.returncode != 0:
+            complaints += r.stdout + r.stderr
+    check(not complaints,
+          "desktop-file-validate accepts the shortcuts" + (" " + complaints.strip() if complaints else ""))
+ctl = os.path.join(sc, "bell\x07.txt")
+make(ctl, b"x")
+try:
+    fileops.link_plan("desktop", ctl, sc_out)
+    refused = False
+except RuntimeError:
+    refused = True
+check(refused, "a shortcut to an item whose name holds other control characters is refused")
+cwd = os.getcwd()
+os.chdir(sc)   # where an injected relative command would land
+try:
+    info = Gio.DesktopAppInfo.new_from_filename(made[0])
+    launched = bool(info and info.launch([], None))
+except (GLib.Error, TypeError):   # TypeError: GLib couldn't read the file
+    launched = False
+wait_for(lambda: os.path.exists(marker), 5000)
+os.chdir(cwd)
+pwned = any("PWNED" in files for _root, _dirs, files in os.walk(util.HOME))
+check(launched and text_of(marker) == "0\n" + script + "\n" and not pwned,
+      "opening the program's shortcut runs that program alone, with no arguments, and nothing else")
 check(A.location_arg("trash:///") == str(util.TRASH_DIR / "files") and A.location_arg("recent:///") == places.RECENT,
       "trash:/// and recent:/// from other apps open the right places")
 check(len(boxes) == 1, f"no error boxes besides that one ({' | '.join(boxes)})")

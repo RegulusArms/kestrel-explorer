@@ -2,6 +2,7 @@
 import hashlib
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -139,6 +140,19 @@ def human_size(n):
 
 def natural_key(s):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
+
+
+def open_part(prefix, dir_fd=None):
+    """A new, empty file to write something into before it is renamed over a name in the same folder (so that name
+    keeps its old contents until the new ones are complete): prefix + ".kes-<random>.part", relative to dir_fd (or a
+    path, with prefix "dir/"), created exclusively and never through a symlink. Returns (fd, name)."""
+    while True:
+        name = f"{prefix}.kes-{secrets.randbits(32):08x}.part"
+        try:
+            return os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o666,
+                           dir_fd=dir_fd), name
+        except FileExistsError:
+            continue
 
 
 def unique_path(directory, name, style="copy"):

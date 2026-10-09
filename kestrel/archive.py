@@ -13,7 +13,6 @@ local users could read from the process list while the job runs.
 import functools
 import os
 import re
-import secrets
 import select
 import shlex
 import shutil
@@ -674,13 +673,7 @@ def _extract_stream(task, path, dest, k, suf, overwrite, label):
                     return dest
                 if overwrite == "rename":
                     out = util.unique_path(dest, os.path.basename(out), "num")
-            while True:
-                part = os.path.join(dest, f".{os.path.basename(out)}.kes-{secrets.randbits(32):x}.part")
-                try:
-                    fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o666)
-                    break
-                except FileExistsError:
-                    continue
+            fd, part = util.open_part(dest.rstrip("/") + "/")
             with open(fd, "wb") as fo:
                 try:
                     dec = subprocess.Popen(dec_argv, stdin=subprocess.PIPE, stdout=fo, stderr=subprocess.PIPE,
