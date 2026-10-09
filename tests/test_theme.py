@@ -90,7 +90,7 @@ check(gp is not None and gp.color(R.Window) == QColor("#2b2b2b") and gp.color(R.
       "a GTK theme's colours become the palette (window, text, selection, disabled text)")
 check(util.gtk_palette_from({"theme_fg_color": "#dadada"}) is None, "a theme without the basic colours changes nothing")
 
-LIGHT, DARK = palette_of("#fafafa", "#e95420"), palette_of("#2a2a2a", "#3584e4")
+LIGHT, DARK = palette_of("#fafafa", "#e95420"), palette_of("#2a2a2a", "#2a7fd4")
 QApplication.setPalette(LIGHT)
 w = A.open_window([util.HOME])
 w.navigate(OVERVIEW)
@@ -116,12 +116,12 @@ label.setStyleSheet("QLabel { color: palette(highlight); }")
 label.show()
 spin(100)
 dark2 = QPalette(DARK)  # a theme switch can change the palette more than once
-dark2.setColor(QPalette.ColorRole.Link, QColor("#3584e4"))
+dark2.setColor(QPalette.ColorRole.Link, QColor("#2a7fd4"))
 QApplication.setPalette(DARK)
 QApplication.setPalette(dark2)
 spin(300)
 check(calls[0] == 1, "a palette change runs the registered callbacks once")
-check(label.palette().color(QPalette.ColorRole.WindowText) == QColor("#3584e4"),
+check(label.palette().color(QPalette.ColorRole.WindowText) == QColor("#2a7fd4"),
       "stylesheets that use palette() take the new colours")
 header = None
 for i in range(w.sidebar.count()):
@@ -130,7 +130,7 @@ for i in range(w.sidebar.count()):
 check(header == DARK.color(QPalette.ColorRole.PlaceholderText), "the sidebar's headers take the new colours")
 cards = w.findChildren(Card)
 check(bool(cards) and util.card_color().name() in cards[0].styleSheet(), "the Overview's cards take the new colours")
-check(A._thumbs.folder_color == "#3584e4" and A._thumbs.color_for(P("any")) == "#3584e4",
+check(A._thumbs.folder_color == "#2a7fd4" and A._thumbs.color_for(P("any")) == "#2a7fd4",
       "the default folder colour follows the accent, also in folder previews")
 check(thumbs.follows_accent("accent") and thumbs.follows_accent("") and thumbs.follows_accent("#D9652F")
       and not thumbs.follows_accent("#33d17a"),
@@ -147,7 +147,7 @@ if util.desktop_schema(iface) == iface and util.has_schema_key(iface, "accent-co
           "a chosen GNOME accent colour comes before the theme's, and folders follow it when it changes")
     gs.reset("accent-color")
     Gio.Settings.sync()
-    check(wait_for(lambda: A._thumbs.folder_color == "#3584e4", 3000),
+    check(wait_for(lambda: A._thumbs.folder_color == "#2a7fd4", 3000),
           "with no GNOME accent colour chosen, folders take the theme's")
 else:
     skip("GNOME's accent colour setting (GNOME 47+)")

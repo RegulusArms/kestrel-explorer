@@ -162,7 +162,9 @@ wait_for(lambda: w is not None and len(w.pane().all_paths()) == 4)
 if w:
     w.pane().select_paths([J(d, "a.png"), J(d, "c.txt")])
     w.chooser.accept()
-check(wait_for(lambda: r["got"]) and len(r["uris"]) == 2, "with multiple, every selected file is chosen")
+check(wait_for(lambda: r["got"]) and r["response"] == 0
+      and sorted(r["uris"]) == [util.file_uri(J(d, "a.png")), util.file_uri(J(d, "c.txt"))],
+      "with multiple, every selected file is chosen")
 
 r = call("OpenFile", {"current_folder": folder(d), "directory": GLib.Variant("b", True)})
 w = wait_window()

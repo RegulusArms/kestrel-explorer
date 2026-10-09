@@ -1,6 +1,6 @@
 """The window's actions, as a list: every menu entry, submenu and separator, with its shortcuts, in the main menu, the
-toolbar's menus and the context menus. Compared with tests/ui_actions.txt, which is the same in the C++ version, so a
-menu entry or shortcut lost when code moves (or added in one version only) shows up as a difference.
+toolbar's menus and the context menus. Compared with tests/ui_actions.txt, so a menu entry or shortcut lost when code
+moves shows up as a difference.
 KESTREL_UI_DUMP=file writes the list there instead of comparing (to update ui_actions.txt after a deliberate change)."""
 import os
 

@@ -6,8 +6,9 @@ radio checks in with it, reports changes to shared state (Preferences, stars, fo
 cleared caches) and hears what the other flights report. The first Kestrel that finds no tower starts one, and the
 tower lands itself shortly after the last flight leaves. If the tower goes down, the flights start a new one.
 
-The Python and C++ versions speak the same protocol (JSON messages), so they share one tower. Admin sessions are
-never shared: each window keeps its own.
+Up to 0.3.0-alpha9 the C++ version spoke the same protocol (JSON messages) and shared the tower; the two are developed
+separately since, and a flight that speaks another PROTOCOL is ignored. Admin sessions are never shared: each window
+keeps its own.
 """
 import json
 import os
@@ -39,7 +40,7 @@ XML = """
 LAND_MS = 10_000   # the tower lands this long after the last flight has left (or if none checks in)
 UNDO_MAX = 50
 
-# The protocol (the same in the C++ version). A flight checks in with {"pid", "impl", "version", "protocol"}; one
+# The protocol (bump PROTOCOL when a message changes). A flight checks in with {"pid", "impl", "version", "protocol"}; one
 # speaking another protocol is ignored (one that names none predates the version and speaks 1). Messages from other
 # programs on the session bus are checked by the tower and again by each radio: a JSON object of at most MAX_MESSAGE
 # bytes, a known "type", each known field of the right type, absolute paths. Unknown fields are allowed (and ignored),

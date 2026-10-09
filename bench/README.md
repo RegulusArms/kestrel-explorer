@@ -1,11 +1,9 @@
 # Benchmark
 
-Compares the two versions of Kestrel Explorer (Python and C++) with GNOME Files, or with Nemo on Linux Mint, on the same data and in the same conditions. The results are the "Performance" sections of the main READMEs. Each run writes them to `bench/results.md`: "Kestrel vs GNOME Files" and/or "Kestrel vs Nemo", depending on which of the two are installed, ready to paste into both READMEs in place of the old section (a run on Mint gives the Nemo section; the GNOME one stays as it is). The READMEs are never changed by the benchmark itself.
-
-This folder is identical in both projects. It needs both of them side by side (`kes-c` and `kestrel-explorer` in the same parent folder), and it can be run from either.
+Compares Kestrel Explorer (this Python version) with GNOME Files, or with Nemo on Linux Mint, on the same data and in the same conditions. The results are the "Performance" sections of the main README. Each run writes them to `bench/results.md`: "Kestrel vs GNOME Files" and/or "Kestrel vs Nemo", depending on which of the two are installed, ready to paste into the README in place of the old section (a run on Mint gives the Nemo section; the GNOME one stays as it is). The README is never changed by the benchmark itself.
 
 ```bash
-bench/run.sh                       # build, generate the data the first time, run everything, print the tables
+bench/run.sh                       # generate the data the first time, run everything, print the tables
                                    # and write them to bench/results.md
 bench/run.sh --runs 5              # more runs per measurement (default 3; startup gets 2 extra)
 bench/run.sh --only startup,copy   # re-run some measurements and keep the rest from the last run
@@ -19,18 +17,17 @@ A full run takes about 12 minutes (about 7 more with Nemo, whose Empty Trash is 
 - `xvfb` and `xdotool` (`sudo apt install xvfb xdotool`);
 - `ffmpeg`, for the video test data;
 - `dbus-run-session`;
-- the C++ version's build tools, since its app and benchmark harness are built Release;
-- the Python version's packages;
+- Kestrel's Python packages;
 - `nautilus` and/or `nemo`: each one installed is measured and gets its own table. Without either, only Kestrel's own tables are made.
 
 ## How it's measured
 
 ### Same conditions for every run
 
-- **Headless display:** all three apps run on an Xvfb X server with software rendering: Qt's raster engine, and GTK with `GSK_RENDERER=cairo`. No windows appear on your screen.
+- **Headless display:** every app runs on an Xvfb X server with software rendering: Qt's raster engine, and GTK with `GSK_RENDERER=cairo`. No windows appear on your screen.
 - **Fresh home folder:** each run gets a new one, so the thumbnail cache is empty and settings are defaults.
 - **Private session bus:** only the services every GNOME desktop runs can be started on it: settings (dconf) and the virtual file system (gvfs, which provides `trash:///`, the drive list and file metadata). Both are started before each measurement, because on a desktop they are already running when an app starts. No file indexer, portal or online-accounts service runs in the background, and your own running apps never see the benchmark.
-- **RAM disk:** the data is in `/tmp/kestrel-bench-data`, so disk speed doesn't count. Set `KESTREL_BENCH_DATA` to use another place. `KESTREL_BUILD_DIR` builds the C++ version and the harness into another folder name than `build` (for a machine that shares these folders with another).
+- **RAM disk:** the data is in `/tmp/kestrel-bench-data`, so disk speed doesn't count. Set `KESTREL_BENCH_DATA` to use another place. 
 - **Medians:** each measurement runs several times, and the tables show the median.
 
 ### Compared with GNOME Files or Nemo (measured from outside)
@@ -40,7 +37,7 @@ Nemo is measured exactly like GNOME Files below, through its own D-Bus service (
 | Measurement | How |
 |---|---|
 | Startup | Launch the app on a small folder, and time it until its window is on screen (`xdotool`, checked every 10 ms). |
-| Open a folder of 600 images, 40 videos or 40 PDFs | Launch the app on the folder, and time it until the first 12 files by name have thumbnails in the shared freedesktop thumbnail cache (`~/.cache/thumbnails`), which all three apps write to. The benchmark then waits until no new thumbnails appear for 2 s and records how many were made and when the last one appeared: Kestrel makes them only for what's on screen, GNOME Files for the whole folder. |
+| Open a folder of 600 images, 40 videos or 40 PDFs | Launch the app on the folder, and time it until the first 12 files by name have thumbnails in the shared freedesktop thumbnail cache (`~/.cache/thumbnails`), which every app here writes to. The benchmark then waits until no new thumbnails appear for 2 s and records how many were made and when the last one appeared: Kestrel makes them only for what's on screen, GNOME Files for the whole folder. |
 | Copy 20,000 small files + 5 × 50 MB | **Kestrel:** its own copy engine (`fileops.start_ops`, as used by paste and drag and drop), timed to completion. **GNOME Files:** its `org.gnome.Nautilus.FileOperations2.CopyURIs` D-Bus call, which other apps use to ask it to copy. That call returns at once, so the copy is timed by watching the destination, every 50 ms, until every file and byte has arrived. |
 | Move the same to another drive | From the home folder (`/tmp`) to `/dev/shm`, a different filesystem, so the files are copied and then deleted, as with a USB stick. **Kestrel:** `start_ops` with a move. **GNOME Files:** `MoveURIs`, timed until everything has arrived and the source is gone. |
 | Move 10,000 files to the trash, then empty it | All the files in one folder are selected and trashed. **Kestrel:** the window's own Move to Trash and Empty Trash actions, with the confirmation answered at once (the clock starts at the answer). **GNOME Files:** `TrashURIs`, then `EmptyTrash` without confirmation, each timed until the trash folders have filled or emptied. |
@@ -50,7 +47,7 @@ Nemo is measured exactly like GNOME Files below, through its own D-Bus service (
 
 ### Kestrel's own features (measured inside the app)
 
-`kestrel_py.py` and `kestrel_cpp.cpp` run the same code the app runs for:
+`kestrel_py.py` runs the same code the app runs for:
 - "Generate Previews" on the 600 images;
 - the mosaics for 150 folders;
 - a recursive search for `*_7.jpg` among 50,000 files (500 matches);
@@ -80,7 +77,6 @@ Each one prints its time and peak memory. GNOME Files has no equivalent of these
 | File | Purpose |
 |---|---|
 | `run.sh` | Entry point |
-| `bench.py` | Builds what's needed, runs every measurement in the sandbox, prints the tables, updates the READMEs |
+| `bench.py` | Runs every measurement in the sandbox, prints the tables, writes `results.md` |
 | `make_data.py` | Generates the test data |
-| `kestrel_py.py` | In-process measurements of the Python version |
-| `kestrel_cpp.cpp`, `CMakeLists.txt` | In-process measurements of the C++ version (built from `kes-c/src` into `bench/build/`) |
+| `kestrel_py.py` | In-process measurements |

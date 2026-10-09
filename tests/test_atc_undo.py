@@ -67,7 +67,7 @@ check(wait_for(lambda: os.path.exists(P("x")) and not os.path.exists(P("m1/x")))
 touch("t")
 undo.record("trash", "Move to Trash", [P("t")])
 check(json.loads(fake.call("UndoPop"))["items"] == [[P("t"), ""]],
-      "trash/create items are sent as [path, \"\"] (as the C++ version expects)")
+      "trash/create items are sent as [path, \"\"]")
 os.makedirs(P("newdir"))
 push("create", "New Folder", [[P("newdir"), ""]])
 spin(300)

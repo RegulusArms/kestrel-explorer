@@ -319,7 +319,7 @@ check(ok(h.call({"op": "rename", "src": J(W, "r1"), "dst": J(W, "r2")})) and os.
       "rename renames, and won't replace an existing name")
 check(ok(h.call({"op": "symlink", "target": "w.txt", "link": J(W, "sl")})) and os.readlink(J(W, "sl")) == "w.txt"
       and ok(h.call({"op": "hardlink", "target": J(W, "w.txt"), "link": J(W, "hl")}))
-      and read_file(J(W, "hl")) == b"hello",
+      and os.lstat(J(W, "hl")).st_ino == os.lstat(J(W, "w.txt")).st_ino and read_file(J(W, "hl")) == b"hello",
       "symlink and hardlink make links")
 other = h.call({"op": "hardlink", "target": "/etc/hostname", "link": J(W, "not-mine")})
 check(not ok(other) and "isn't yours" in other.get("error", "") and not os.path.exists(J(W, "not-mine")),

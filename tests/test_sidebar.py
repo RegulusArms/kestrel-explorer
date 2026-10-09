@@ -44,7 +44,8 @@ check(wait_for(lambda: s.entry_keys("bookmarks") == [P("c"), P("a"), P("b")])
       and util.read_bookmarks()[0][0] == P("c"),
       "moving a bookmark rewrites the bookmarks file in the new order")
 s.move_entry("places", trash, 99)
-check(wait_for(lambda: s.entry_keys("places")[-1:] == [trash]), "an entry stays in its own section")
+check(wait_for(lambda: s.entry_keys("places")[-1:] == [trash]) and trash not in s.entry_keys("bookmarks")
+      and trash not in s.entry_keys("devices"), "an entry stays in its own section")
 s.move_section("devices", 0)
 check(wait_for(lambda: s.shown_sections() == ["devices", "places", "bookmarks"]),
       "Devices can be moved above Places and Bookmarks")

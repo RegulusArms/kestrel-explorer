@@ -123,18 +123,32 @@ check(run_ops(w, [("delete", P("link-to-tree"), None)]) and not os.path.lexists(
 
 # ---- cancel
 BIG = 6 * 1024 * 1024   # more than one 4 MB chunk, so a file can be cancelled half-way
+LONG = 48 << 20   # the cancel test's files (sparse): long enough to be cut off part-way
 for i in range(24):
-    make(P(f"big/f{i:02d}.bin"), bytes([97 + i]) * BIG)
+    make(P(f"big/f{i:02d}.bin"), bytes([97 + i]))
+    os.truncate(P(f"big/f{i:02d}.bin"), LONG)
 state = {"gone": False}
 t = fileops.start_ops(w, [("copy", P("big"), P("big2"))], "Test")
 t.finished.connect(lambda: state.__setitem__("gone", True))
-# at once: on a fast disk (the test's home is in /tmp, often in memory) the whole copy can finish before the first
-# progress report arrives
-t.cancel()
-check(wait_for(lambda: state["gone"], 10000), "a cancelled copy stops")
-copied = os.listdir(P("big2")) if os.path.isdir(P("big2")) else []
-check(len(copied) < 24, f"cancel: stops part-way ({len(copied)} of 24 copied)")
-check(all(os.path.getsize(os.path.join(P("big2"), f)) == BIG for f in copied), "cancel: no half-copied file is left behind")
+# on the copying thread itself, at its first report on a file (reports come at most every 80 ms): a cancel in the
+# middle of copying, never before it starts or after it's done
+cut = threading.Event()
+
+
+def cut_once(_f, text):
+    if text.endswith(".bin") and not cut.is_set():
+        cut.set()
+        t.cancel()
+
+
+t.progress.connect(cut_once, Qt.ConnectionType.DirectConnection)
+check(wait_for(lambda: state["gone"], 20000), "a cancelled copy stops")
+copied = os.listdir(P("big2")) if os.path.isdir(P("big2")) else []  # hidden part files too
+check(cut.is_set() and len(copied) < 24, f"cancel: stops part-way ({len(copied)} of 24 copied)")
+check(cut.is_set() and all(os.path.getsize(os.path.join(P("big2"), f)) == LONG for f in copied)
+      and not any(n.startswith(".kes-") for n in os.listdir(P(""))),  # the folder being built beside it
+      "cancel: no half-copied file is left behind")
+shutil.rmtree(P("big2"), ignore_errors=True)
 
 # -- replacing a file: the old one stays until the new one is complete (a cancel or an error keeps it); a symlink in the
 # way is replaced, not written through; another hard link of the old file keeps its contents

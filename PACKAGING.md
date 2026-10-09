@@ -45,7 +45,7 @@
 - [ ] **Drop focus extension.** `data/gnome-shell/` isn't in the wheel, so pip users on GNOME on Wayland don't get
   drag-drop focus (documented in the README).
 - [ ] **kes-setup for pip users.** It isn't in the wheel either; the README has them run it from a clone.
-- [ ] **Bump the version** in `kestrel/__init__.py` (and `KES_VERSION` in kes-c) before every upload: PyPI never
+- [ ] **Bump the version** in `kestrel/__init__.py` before every upload: PyPI never
   takes the same version twice.
 - [x] **Remove `Private :: Do Not Upload`** from the classifiers.
 
@@ -89,7 +89,7 @@ Then, with the changes pushed to `main`:
 2. Try it in a clean environment: `python3 -m venv /tmp/kes-venv && /tmp/kes-venv/bin/pip install kestrel-explorer`
 
 PyPI never accepts the same version twice, even after deleting it, so bump `__version__` in `kestrel/__init__.py`
-(and `KES_VERSION` in kes-c) before each new upload.
+before each new upload.
 
 ## pip install vs install.sh
 
