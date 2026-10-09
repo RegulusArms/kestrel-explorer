@@ -1,6 +1,6 @@
 # Kestrel Explorer
 
-**Version 0.3.0-alpha5.** This is an early alpha release, so expect rough edges.
+**Version 0.3.0-alpha6.** This is an early alpha release, so expect rough edges.
 
 > **Why do Linux users still need five separate utilities and a terminal to do normal filesystem work?**
 
@@ -261,6 +261,7 @@ sudo apt install python3-pyqt6 python3-pil python3-gi gir1.2-glib-2.0 libglib2.0
 - If a name already exists when copying or moving, you can replace, merge, skip or keep both.
 - Trash, permanent delete, and restoring or emptying the trash. The Trash shows everything you've deleted on every drive in one list: your home trash plus the trash folder each drive keeps for files deleted on it (`.Trash-<uid>`, the same as GNOME Files). The Location column shows where each item came from, and Restore, Delete Permanently and Empty Trash work across all of them.
 - **Shred with BleachBit:** with [BleachBit](https://www.bleachbit.org) installed, right-click files or folders → **Shred with BleachBit…** overwrites them and then deletes them, so they can't be recovered; **Empty Trash with BleachBit…** (in the Trash and on the sidebar's Trash) does the same to everything in the trash, on every drive. Both ask first, run in the status bar with ✕ to stop, and list anything BleachBit couldn't shred. On SSDs and some file systems, overwriting can't guarantee that every old copy of the data is gone.
+- Nothing is replaced until its replacement is complete. Copies, moves, extracting, compressing over an older archive, checksum files, shortcuts, pasted images and Kestrel's own settings files are written under a hidden name (`.kes-….part`) beside their destination and renamed into place at the end. A full disk, a cancel or a crash leaves the old version as it was, never a half-written one. Merges, deletes and moves between drives can't be all-or-nothing, so each file in them is still handled whole and nothing is lost.
 - Deleting handles read-only folders you own (common in extracted Windows archives): they're made writable and deleted.
 - Copies and deletes never follow a symbolic link inside the folders they work through, so a folder swapped for a link while they run can't send them anywhere else. A delete also stops at another drive mounted inside the folder, instead of emptying it.
 - Links and shortcuts:
@@ -472,6 +473,7 @@ Move to Trash itself doesn't run as administrator: if an item can't be trashed, 
 - **Only the Kestrel window that started the helper can talk to it.** It reads requests from a private pipe and exits as soon as that pipe closes, including if Kestrel crashes.
 - **It only accepts a fixed set of file operations,** on absolute paths. It refuses to delete, replace or change the permissions of `/`, top-level folders (`/usr`, `/etc`, `/home`, `/var`, and any other folder directly under `/`) and home folders themselves (`/home/name`). One table in the helper lists what each operation may do to each of its paths.
 - **It can't be redirected by a symlink.** Files can change while root works on them: another user, or a program, could swap a folder for a symlink to `/etc`. So the helper never trusts a path as text. It opens each folder on the way one at a time without following symlinks, then works on the name inside the folder it opened. It follows a symlink on the way only if root controls it (owned by root, in a folder only root can write to), such as `/lib` → `usr/lib`. Kestrel resolves your own symlinked folders first, so those keep working. Recursive copies and deletes go folder by folder the same way, and stop if a folder is swapped while they run.
+- **A replacement never leaves you with half of something.** A file, link or folder it copies or moves over another is built under a hidden name (`.kes-….part`) beside it and swapped in only when complete: if the disk fills up, you cancel, or the session ends part-way, the old one is still there as it was and the half-made copy is removed. Cancelling stops even in the middle of one large file, and progress counts the bytes copied. (Kestrel's own copies and moves, without the admin session, work the same way.)
 - **It won't hand out root by accident.** A copy it makes is root's, so it drops the set-user-ID bit from someone else's program (a move between drives keeps the owner instead). It only hard-links your own files, and never deletes a mount point (the drive mounted there would be emptied).
 - **The trade-off:** the helper runs from the Kestrel folder (or the pip install's), which your account can edit. Anything running as you could change that file before your next admin session. That's the same level of trust as typing `sudo` in your own terminal, which is fine on a personal computer.
 

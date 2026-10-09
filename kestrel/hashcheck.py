@@ -376,15 +376,8 @@ _OUT_EXT = {"crc32": ".sfv", "md5": ".md5", "sha1": ".sha1", "sha256": ".sha256"
 
 
 def _write_replacing(path, data):
-    """Write `data` to a new file beside `path`, then rename it over `path` (never through a symlink there)."""
-    fd, part = util.open_part(os.path.dirname(path).rstrip("/") + "/")
-    try:
-        with open(fd, "wb") as f:
-            f.write(data)
-        os.rename(part, path)
-    except BaseException:
-        os.unlink(part)
-        raise
+    """`data` to path in one step (util.write_parts; fsynced, since it may replace an older checksum file)."""
+    util.write_parts(path, lambda fd: util.write_all(fd, data), sync=True)
 
 
 def files_in(paths, check=None):

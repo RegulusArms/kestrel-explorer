@@ -33,6 +33,7 @@ import errno
 import json
 import os
 import queue
+import secrets
 import stat
 import sys
 import threading
@@ -61,11 +62,13 @@ POLICY = {
     "chmod": [("path", CHANGE)],
 }
 
-AT_FDCWD, RENAME_NOREPLACE = -100, 1
+AT_FDCWD, RENAME_NOREPLACE, RENAME_EXCHANGE = -100, 1, 2
 _libc = ctypes.CDLL(None, use_errno=True)
 
 _out_lock = threading.Lock()
 _cancelled = set()
+_closing = threading.Event()   # the session has ended: everything counts as cancelled
+_busy = threading.Event()      # a job is running
 
 
 class Cancelled(Exception):
@@ -197,15 +200,40 @@ def check(w, kind):
         raise PermissionError(f"refusing to delete, replace or change {w.path}")
 
 
-def _copy_data(src, dst):
+def _part_name():
+    """A hidden name for building something beside the name it will replace (see Job.install)."""
+    return f".kes-{secrets.randbits(32):08x}.part"
+
+
+def _open_part(dirfd):
+    """A new, empty file under a fresh _part_name() in dirfd (created exclusively, never through a symlink).
+    Returns (fd, name)."""
     while True:
-        chunk = os.read(src, 1 << 20)
-        if not chunk:
-            return
-        view = memoryview(chunk)
-        while view:
-            n = os.write(dst, view)
-            view = view[n:]
+        name = _part_name()
+        try:
+            return os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                           dir_fd=dirfd), name
+        except FileExistsError:
+            continue
+
+
+def _renameat2(src_dir, src, dst_dir, dst, flags):
+    """renameat2(); 0 or the errno."""
+    if _libc.renameat2(src_dir, os.fsencode(src), dst_dir, os.fsencode(dst), flags) == 0:
+        return 0
+    return ctypes.get_errno()
+
+
+def _put_new(w, part):
+    """A finished part file (in w's folder) given w's name, which must still be free: never replaces anything."""
+    e = _renameat2(w.dir, part, w.dir, w.name, RENAME_NOREPLACE)
+    if e == errno.EEXIST:
+        raise FileExistsError(f"{w.name} already exists")
+    if e == errno.EINVAL:   # a filesystem without RENAME_NOREPLACE: a hard link fails if the name is taken
+        os.link(part, w.name, src_dir_fd=w.dir, dst_dir_fd=w.dir)
+        os.unlink(part, dir_fd=w.dir)
+    elif e:
+        raise OSError(e, os.strerror(e))
 
 
 def _copy_stat_fd(fd, st, keep_owner):
@@ -235,7 +263,7 @@ class Job:
         self.id, self.done, self.total, self._last = rid, 0, 0, 0.0
 
     def check(self):
-        if self.id in _cancelled:
+        if _closing.is_set() or self.id in _cancelled:
             raise Cancelled()
 
     def report(self, text, force=False):
@@ -244,10 +272,11 @@ class Job:
             self._last = now
             send({"id": self.id, "progress": [self.done, self.total, text]})
 
-    def count(self, dirfd, name):
-        """How many items a tree has, for progress (only reads; never follows a symlink)."""
+    def count(self, dirfd, name, nbytes=False):
+        """How many items a tree has, for progress, and with nbytes its files' sizes too (only reads; never follows
+        a symlink)."""
         st = _stat_at(dirfd, name)
-        n = 1
+        n = 1 + (st.st_size if nbytes and st is not None and stat.S_ISREG(st.st_mode) else 0)
         if st is not None and stat.S_ISDIR(st.st_mode):
             self.check()
             try:
@@ -256,7 +285,7 @@ class Job:
                 return n
             try:
                 for e in os.listdir(d):
-                    n += self.count(d, e)
+                    n += self.count(d, e, nbytes)
             finally:
                 os.close(d)
         return n
@@ -269,50 +298,40 @@ class Job:
         self._remove_tree(dirfd, name, st, st.st_dev)
         self.done += 1
 
-    def _remove_tree(self, dirfd, name, st, dev):
+    def _remove_tree(self, dirfd, name, st, dev, counted=True):
         if stat.S_ISDIR(st.st_mode):
             if st.st_dev != dev:
                 raise Failure(f"{name} is on another drive (a mount point); not deleting it")
             d = _open_dir_at(dirfd, name, st)
             try:
                 for e in os.listdir(d):
-                    self.check()
-                    self._remove_tree(d, e, os.stat(e, dir_fd=d, follow_symlinks=False), dev)
-                    self.done += 1
-                    self.report(e)
+                    if counted:
+                        self.check()
+                    self._remove_tree(d, e, os.stat(e, dir_fd=d, follow_symlinks=False), dev, counted)
+                    if counted:
+                        self.done += 1
+                        self.report(e)
             finally:
                 os.close(d)
             os.rmdir(name, dir_fd=dirfd)
         else:  # a file or a symlink: the name itself
             os.unlink(name, dir_fd=dirfd)
 
-    def copy(self, src_dir, src, dst_dir, dst, merge, keep_owner=False):
+    def copy(self, src_dir, src, dst_dir, dst, merge, keep_owner=False, staged=False):
+        """Copy src (in src_dir) to dst (in dst_dir). Whatever is made is built under a hidden _part_name() beside
+        dst and put in its place only when complete (install), so a failure, a cancel or the session ending leaves
+        dst as it was and no half-made copy. Only a merge writes into an existing folder (each file in it still
+        replaced whole). staged: dst is inside a folder being built, where nothing exists yet."""
         st = os.stat(src, dir_fd=src_dir, follow_symlinks=False)
-        dst_st = _stat_at(dst_dir, dst)
+        dst_st = None if staged else _stat_at(dst_dir, dst)
         if dst_st is not None and stat.S_ISDIR(dst_st.st_mode) and not stat.S_ISDIR(st.st_mode):
             raise Failure(f"{dst} is a folder")  # a file or link never replaces a whole folder
-        if stat.S_ISLNK(st.st_mode):
-            target = os.readlink(src, dir_fd=src_dir)
-            if dst_st is not None:
-                self.remove(dst_dir, dst)
-            os.symlink(target, dst, dir_fd=dst_dir)
-            try:
-                os.utime(dst, ns=(st.st_atime_ns, st.st_mtime_ns), dir_fd=dst_dir, follow_symlinks=False)
-                if keep_owner:
-                    os.chown(dst, st.st_uid, st.st_gid, dir_fd=dst_dir, follow_symlinks=False)
-            except OSError:
-                pass
-        elif stat.S_ISDIR(st.st_mode):
+        if stat.S_ISDIR(st.st_mode) and merge and dst_st is not None:
+            if not stat.S_ISDIR(dst_st.st_mode):
+                raise Failure(f"{dst} exists and isn't a folder")
             src_fd = _open_dir_at(src_dir, src, st)
             try:
-                if dst_st is not None and (not merge or not stat.S_ISDIR(dst_st.st_mode)):
-                    if merge:
-                        raise Failure(f"{dst} exists and isn't a folder")
-                    self.remove(dst_dir, dst)
-                    dst_st = None
-                if dst_st is None:
-                    os.mkdir(dst, 0o700, dir_fd=dst_dir)
-                dst_fd = _open_dir_at(dst_dir, dst, os.stat(dst, dir_fd=dst_dir, follow_symlinks=False))
+                dst_fd = _open_dir_at(dst_dir, dst, dst_st)
                 try:
                     for e in os.listdir(src_fd):
                         self.copy(src_fd, e, dst_fd, e, merge, keep_owner)
@@ -321,43 +340,154 @@ class Job:
                     os.close(dst_fd)
             finally:
                 os.close(src_fd)
-        elif stat.S_ISREG(st.st_mode):
-            self.check()
-            in_fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=src_dir)
-            try:
-                if not _same_file(os.fstat(in_fd), st):
-                    raise Failure(f"{src} changed while it was being worked on")
-                if dst_st is not None:
-                    self.remove(dst_dir, dst)  # a new file: never writes through a link to another one
-                out_fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
-                                 dir_fd=dst_dir)
+            self.done += 1
+            self.report(src)
+            return
+        part, made = (dst if staged else _part_name()), False
+        try:
+            if stat.S_ISLNK(st.st_mode):
+                target = os.readlink(src, dir_fd=src_dir)
+                os.symlink(target, part, dir_fd=dst_dir)
+                made = True
                 try:
-                    _copy_data(in_fd, out_fd)
-                    _copy_stat_fd(out_fd, st, keep_owner)
+                    os.utime(part, ns=(st.st_atime_ns, st.st_mtime_ns), dir_fd=dst_dir, follow_symlinks=False)
+                    if keep_owner:
+                        os.chown(part, st.st_uid, st.st_gid, dir_fd=dst_dir, follow_symlinks=False)
+                except OSError:
+                    pass
+            elif stat.S_ISDIR(st.st_mode):
+                src_fd = _open_dir_at(src_dir, src, st)
+                try:
+                    os.mkdir(part, 0o700, dir_fd=dst_dir)
+                    made = True
+                    dst_fd = _open_dir_at(dst_dir, part, os.stat(part, dir_fd=dst_dir, follow_symlinks=False))
+                    try:
+                        for e in os.listdir(src_fd):
+                            self.copy(src_fd, e, dst_fd, e, False, keep_owner, staged=True)
+                        _copy_stat_fd(dst_fd, st, keep_owner)
+                    finally:
+                        os.close(dst_fd)
                 finally:
-                    os.close(out_fd)
-            finally:
-                os.close(in_fd)
-        else:
-            raise Failure(f"{src} isn't a regular file, folder or link")
+                    os.close(src_fd)
+            elif stat.S_ISREG(st.st_mode):
+                self.check()
+                in_fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=src_dir)
+                try:
+                    if not _same_file(os.fstat(in_fd), st):
+                        raise Failure(f"{src} changed while it was being worked on")
+                    if staged:
+                        out_fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                         0o600, dir_fd=dst_dir)
+                    else:
+                        out_fd, part = _open_part(dst_dir)
+                    made = True
+                    try:
+                        self.copy_bytes(in_fd, out_fd, src)
+                        _copy_stat_fd(out_fd, st, keep_owner)
+                        if dst_st is not None:   # replacing something: on disk before the rename
+                            os.fsync(out_fd)
+                    finally:
+                        os.close(out_fd)
+                finally:
+                    os.close(in_fd)
+            else:
+                raise Failure(f"{src} isn't a regular file, folder or link")
+            if not staged:
+                self.install(dst_dir, part, dst)
+        except BaseException:
+            if made and not staged:
+                self.discard(dst_dir, part)
+            raise
         self.done += 1
         self.report(src)
+
+    def copy_bytes(self, in_fd, out_fd, label):
+        """in_fd → out_fd, checking for a cancel and reporting the bytes as it goes."""
+        while True:
+            self.check()
+            chunk = os.read(in_fd, 1 << 20)
+            if not chunk:
+                return
+            view = memoryview(chunk)
+            while view:
+                view = view[os.write(out_fd, view):]
+            self.done += len(chunk)
+            self.report(label)
+
+    def install(self, dirfd, part, name):
+        """Put the finished `part` in place of `name` (both in dirfd). A non-folder over a non-folder (or nothing)
+        is one rename. Where a folder is involved, the two are swapped in one step (RENAME_EXCHANGE; on a filesystem
+        without it, the old one is renamed aside first and put back if the second rename fails), and then the old
+        one, now under the part name, is deleted."""
+        self.swap_in(dirfd, part, dirfd, name, lambda d, old: self.remove_old(d, old, name))
+
+    def swap_in(self, src_dir, src, dst_dir, dst, dispose):
+        """src (in src_dir) to dst (in dst_dir) on the same filesystem, replacing what's at dst as install() does;
+        the old one is passed to dispose (as a name in src_dir) once it's out of the way."""
+        old = _stat_at(dst_dir, dst)
+        new = os.stat(src, dir_fd=src_dir, follow_symlinks=False)
+        if old is None or (not stat.S_ISDIR(old.st_mode) and not stat.S_ISDIR(new.st_mode)):
+            os.rename(src, dst, src_dir_fd=src_dir, dst_dir_fd=dst_dir)
+            return
+        e = _renameat2(src_dir, src, dst_dir, dst, RENAME_EXCHANGE)
+        if e == 0:
+            dispose(src_dir, src)   # the old one, now where the new one was
+            return
+        if e != errno.EINVAL:
+            raise OSError(e, os.strerror(e))
+        aside = _part_name()
+        os.rename(dst, aside, src_dir_fd=dst_dir, dst_dir_fd=src_dir)
+        try:
+            os.rename(src, dst, src_dir_fd=src_dir, dst_dir_fd=dst_dir)
+        except OSError:
+            try:
+                os.rename(aside, dst, src_dir_fd=src_dir, dst_dir_fd=dst_dir)
+            except OSError:
+                pass
+            raise
+        dispose(src_dir, aside)
+
+    def remove_old(self, dirfd, old, shown):
+        """The replaced one, once the new one is in place: deleted whole (a cancel now would only leave it
+        half-deleted)."""
+        st = _stat_at(dirfd, old)
+        if st is None:
+            return
+        try:
+            self._remove_tree(dirfd, old, st, st.st_dev, counted=False)
+        except (OSError, Failure) as e:
+            raise Failure(f"{shown} was replaced, but the old one couldn't be deleted (it's left as {old}): "
+                          f"{getattr(e, 'strerror', None) or e}") from None
+
+    def discard(self, dirfd, part):
+        """A half-made part after a failure or cancel: deleted, without letting a second failure hide the first."""
+        try:
+            st = _stat_at(dirfd, part)
+            if st is not None:
+                self._remove_tree(dirfd, part, st, st.st_dev, counted=False)
+        except (OSError, Failure):
+            pass
 
     def move(self, src, dst, merge):
         st = _stat_at(src.dir, src.name)
         if not merge and st is not None and st.st_dev == os.fstat(dst.dir).st_dev:
-            if _stat_at(dst.dir, dst.name) is not None:
-                self.remove(dst.dir, dst.name)
+            existing = _stat_at(dst.dir, dst.name)
+            if existing is not None:
+                # replaced in one step (see swap_in); the old one is deleted once the moved one is in place
+                if stat.S_ISDIR(existing.st_mode) and not stat.S_ISDIR(st.st_mode):
+                    raise Failure(f"{dst.name} is a folder")
+                self.swap_in(src.dir, src.name, dst.dir, dst.name, lambda d, old: self.remove_old(d, old, dst.name))
+                self.done = self.total
+                return
             # no-replace: something that appeared there since isn't silently replaced
-            r = _libc.renameat2(src.dir, os.fsencode(src.name), dst.dir, os.fsencode(dst.name), RENAME_NOREPLACE)
-            e = ctypes.get_errno() if r != 0 else 0
-            if r != 0 and e == errno.EINVAL:  # a filesystem without RENAME_NOREPLACE
+            e = _renameat2(src.dir, src.name, dst.dir, dst.name, RENAME_NOREPLACE)
+            if e == errno.EINVAL:  # a filesystem without RENAME_NOREPLACE
                 try:
                     os.rename(src.name, dst.name, src_dir_fd=src.dir, dst_dir_fd=dst.dir)
-                    r = 0
+                    e = 0
                 except OSError:
                     pass
-            if r == 0:
+            if e == 0:
                 self.done = self.total
                 return
             if e == errno.EEXIST:
@@ -403,7 +533,8 @@ def _run(op, req, w):
             return
         if src_st is not None and stat.S_ISDIR(src_st.st_mode) and dst.path.startswith(src.path + "/"):
             raise Failure(f"can't {op} {src.path} into itself")
-        job.total = job.count(src.dir, src.name) * (2 if op == "move" else 1)
+        # progress: every item, and the bytes copied; a move then deletes the items
+        job.total = job.count(src.dir, src.name, True) + (job.count(src.dir, src.name) if op == "move" else 0)
         if op == "copy":
             job.copy(src.dir, src.name, dst.dir, dst.name, merge)
         else:
@@ -429,11 +560,17 @@ def _run(op, req, w):
             raise FileExistsError(f"{dst.name} already exists")
         in_fd = os.open(src.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=src.dir)
         try:
-            out_fd = _open_new_file(dst)
+            out_fd, part = _open_part(dst.dir)
             try:
-                _copy_data(in_fd, out_fd)
-            finally:
-                os.close(out_fd)
+                try:
+                    job.copy_bytes(in_fd, out_fd, src.path)
+                    os.fchmod(out_fd, 0o644)
+                finally:
+                    os.close(out_fd)
+                _put_new(dst, part)
+            except BaseException:
+                os.unlink(part, dir_fd=dst.dir)
+                raise
         finally:
             os.close(in_fd)
     elif op == "symlink":
@@ -450,15 +587,22 @@ def _run(op, req, w):
         finally:
             os.close(fd)
     elif op == "write":
-        fd = _open_new_file(w["path"])
+        p = w["path"]
+        if _stat_at(p.dir, p.name) is not None:
+            raise FileExistsError(f"{p.name} already exists")
+        fd, part = _open_part(p.dir)
         try:
-            data = req["text"].encode()
-            view = memoryview(data)
-            while view:
-                view = view[os.write(fd, view):]
-            os.fchmod(fd, stat.S_IMODE(int(req.get("mode", 0o644))))
-        finally:
-            os.close(fd)
+            try:
+                view = memoryview(req["text"].encode())
+                while view:
+                    view = view[os.write(fd, view):]
+                os.fchmod(fd, stat.S_IMODE(int(req.get("mode", 0o644))))
+            finally:
+                os.close(fd)
+            _put_new(p, part)
+        except BaseException:
+            os.unlink(part, dir_fd=p.dir)
+            raise
     elif op == "chmod":
         # the file itself, opened without following a symlink; chmod through /proc/self/fd changes that inode
         p = w["path"]
@@ -476,6 +620,9 @@ def worker(jobs):
         req = jobs.get()
         if req is None:
             return
+        if _closing.is_set():
+            continue
+        _busy.set()
         try:
             handle(req)
             send({"id": req["id"], "ok": True})
@@ -487,6 +634,7 @@ def worker(jobs):
             send({"id": req["id"], "ok": False, "error": str(e)})
         finally:
             _cancelled.discard(req["id"])
+            _busy.clear()
 
 
 def main():
@@ -503,7 +651,14 @@ def main():
             _cancelled.add(req.get("id"))
         elif "id" in req and "op" in req:
             jobs.put(req)
-    os._exit(0)  # stdin closed: the session is over; stop whatever is running
+    # stdin closed: the session is over. A running job is cancelled, and given time to remove what it had half-made
+    # (its part files) before the helper exits.
+    _closing.set()
+    for _ in range(300):
+        if not _busy.is_set():
+            break
+        time.sleep(0.1)
+    os._exit(0)
 
 
 if __name__ == "__main__":

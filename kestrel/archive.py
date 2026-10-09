@@ -480,10 +480,19 @@ def _job_clock(fn):
 
 
 @_job_clock
-def compress(task, spec):
-    """Create the archive described by spec (see archive_ui.CompressDialog.spec()). Returns the output path."""
-    fmt, out = spec["format"], spec["out"]
-    label = f"Compressing {os.path.basename(out)}"
+def compress(task, spec_in):
+    """Create the archive described by spec (see archive_ui.CompressDialog.spec()). Returns the output path.
+
+    The archive is made under a hidden name beside spec["out"] that keeps the format's extension (some tools go by
+    it), and its file (or volumes) renamed into place only when the tool has succeeded: a failure or a cancel leaves
+    an older archive of that name as it was, and no half-made one. zip, which adds to an archive that already exists,
+    starts from nothing this way too."""
+    final_out = spec_in["out"]
+    fmt, d = spec_in["format"], os.path.dirname(final_out)
+    ext = fmt["ext"] if final_out.endswith(fmt["ext"]) else ""
+    out = os.path.join(d, util.part_name() + ext)
+    spec = dict(spec_in, out=out)
+    label = f"Compressing {os.path.basename(final_out)}"
     try:
         if fmt.get("stream"):
             _compress_stream(task, spec, label)
@@ -498,6 +507,7 @@ def compress(task, spec):
                 ok = rc == 0 or (spec["tool"] in ("7z", "rar") and rc == 1)  # 1 = warnings (e.g. a locked file)
                 if not ok:
                     raise RuntimeError(_tail(text) or f"{os.path.basename(argv[0])} failed (exit code {rc})")
+        task.check()
     except BaseException:
         for f in [out] + _volume_files(out):
             try:
@@ -505,10 +515,39 @@ def compress(task, spec):
             except OSError:
                 pass
         raise
-    if not os.path.exists(out):
-        vols = sorted(_volume_files(out))
-        return vols[0] if vols else out
-    return out
+    # into place: each file renamed over the name it's for ("<hidden>.7z.002" → "<name>.7z.002"); then the parts of
+    # an older archive of that name that the new one doesn't have are deleted
+    cut = len(ext)
+    hidden_stem = os.path.basename(out)[:len(os.path.basename(out)) - cut]
+    final_stem = os.path.basename(final_out)[:len(os.path.basename(final_out)) - cut]
+    made = sorted([out] if os.path.exists(out) else _volume_files(out))
+    old = _volume_files(final_out) + ([final_out] if os.path.lexists(final_out) else [])
+    placed = []
+    try:
+        for m in made:
+            target = os.path.join(d, final_stem + os.path.basename(m)[len(hidden_stem):])
+            if old:   # replacing an older archive: on disk before the rename
+                fd = os.open(m, os.O_RDONLY | os.O_CLOEXEC)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            os.rename(m, target)
+            placed.append(target)
+    except BaseException:
+        for m in made:
+            try:
+                os.unlink(m)
+            except OSError:
+                pass
+        raise
+    for o in old:
+        if o not in placed:
+            try:
+                os.unlink(o)
+            except OSError:
+                pass
+    return placed[0] if placed else final_out
 
 
 def _compress_tar_plain(task, argv, cwd, out, total, label):
@@ -693,6 +732,12 @@ def _extract_stream(task, path, dest, k, suf, overwrite, label):
                 os.unlink(part)
                 raise RuntimeError(_tail(dec.stderr.read().decode(errors="replace")) or "decompression failed")
             try:
+                if os.path.lexists(out):   # replacing something: on disk before the rename (the decompressor wrote it)
+                    sfd = os.open(part, os.O_RDONLY | os.O_CLOEXEC)
+                    try:
+                        os.fsync(sfd)
+                    finally:
+                        os.close(sfd)
                 os.rename(part, out)
             except BaseException:
                 os.unlink(part)

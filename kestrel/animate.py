@@ -40,7 +40,7 @@ def make_preview(path, out, size):
     """Encode a looping, silent, thumbnail-sized animated WebP of the start of a video. True on success."""
     try:
         os.makedirs(os.path.dirname(out), exist_ok=True)
-        tmp = out + ".part.webp"
+        tmp = os.path.join(os.path.dirname(out), util.part_name() + ".webp")   # unique: two Kestrels may make it
         r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-t", str(PREVIEW_SECONDS), "-i", path, "-an",
                             "-vf", f"fps={PREVIEW_FPS},scale={size}:{size}:force_original_aspect_ratio=decrease",
                             "-c:v", "libwebp_anim", "-loop", "0", "-q:v", "70", "-compression_level", "3", tmp],

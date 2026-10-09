@@ -162,8 +162,7 @@ def undo(win):
                 try:
                     os.makedirs(os.path.dirname(orig), exist_ok=True)
                     info = util.trash_info_path(trashed)
-                    import shutil
-                    shutil.move(trashed, orig)
+                    util.move(trashed, orig)
                     if info and os.path.exists(info):
                         os.unlink(info)
                 except OSError as e:

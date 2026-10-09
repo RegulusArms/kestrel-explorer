@@ -6,8 +6,10 @@ must stay unchanged."""
 import ctypes
 import json
 import os
+import resource
 import select
 import shutil
+import signal
 import stat
 import subprocess
 import threading
@@ -27,9 +29,9 @@ def renameat2_exchange(a, b):
 
 
 class Helper:
-    def __init__(self):
+    def __init__(self, preexec_fn=None):
         self.p = subprocess.Popen(["/usr/bin/python3", J(ROOT, "kestrel", "admin_helper.py")],
-                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, preexec_fn=preexec_fn)
         self.buf = b""
         self.next_id = 1
 
@@ -57,9 +59,19 @@ class Helper:
     def call(self, req, timeout=20):
         return self.reply(self.send(req), timeout)
 
-    def stop(self):
+    def next(self, rid, timeout=20):
+        """The next message for a request: a progress report ({"progress": [done, total, text]}) or its final
+        reply."""
+        return self._next_reply(rid, timeout)
+
+    def stop(self, timeout=5):
+        """Close its input, as when the session ends; True if it then exits."""
         self.p.stdin.close()
-        self.p.wait(5)
+        try:
+            self.p.wait(timeout)
+            return True
+        except subprocess.TimeoutExpired:
+            return False
 
     def _next_reply(self, rid, timeout):
         while True:
@@ -210,6 +222,72 @@ write_file(J(W, "hl-a"), b"linked")
 os.link(J(W, "hl-a"), J(W, "hl-b"))
 h.call({"op": "move", "src": J(W, "hl-a"), "dst": J(W, "hl-b")})
 check(read_file(J(W, "hl-b")) == b"linked", "moving a file onto a hard link to it keeps the file")
+
+
+# -- replacing: what's replaced stays as it was until the new one is complete (a failure, a cancel or the session
+# ending leaves it, and no half-made copy); a folder is swapped in whole
+def leftovers():
+    """Half-made copies (".kes-….part") anywhere in W."""
+    return [J(d, n) for d, dirs, files in os.walk(W) for n in dirs + files if n.startswith(".kes-")]
+
+
+write_file(J(W, "big6"), b"b" * (6 << 20))
+write_file(J(W, "conf.txt"), b"original")
+os.makedirs(J(W, "newdir"))
+write_file(J(W, "newdir/a.txt"), b"a")
+write_file(J(W, "newdir/big"), b"n" * (6 << 20))
+os.makedirs(J(W, "olddir"))
+write_file(J(W, "olddir/keep.txt"), b"keep")
+old_before = contents(J(W, "olddir"))
+
+
+def small_disk():
+    """In the helper: writes past 1 MB fail (EFBIG), as on a full disk."""
+    signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (1 << 20, resource.getrlimit(resource.RLIMIT_FSIZE)[1]))
+
+
+small = Helper(small_disk)
+started = small.started()
+file_r = small.call({"op": "copy", "src": J(W, "big6"), "dst": J(W, "conf.txt")})
+dir_r = small.call({"op": "copy", "src": J(W, "newdir"), "dst": J(W, "olddir")})
+small.stop()
+check(started and file_r and not ok(file_r) and read_file(J(W, "conf.txt")) == b"original" and not leftovers(),
+      "replacing a file: a write that fails part-way (a full disk) keeps the old file, and leaves no "
+      "half-made copy")
+check(dir_r and not ok(dir_r) and contents(J(W, "olddir")) == old_before and not leftovers(),
+      "replacing a folder: a failure part-way keeps the old folder as it was, and leaves no half-made copy")
+write_file(J(W, "huge"), b"x")
+os.truncate(J(W, "huge"), 2 << 30)   # 2 GB (sparse): long enough to stop part-way
+rid = h.send({"op": "copy", "src": J(W, "huge"), "dst": J(W, "conf.txt")})
+pr = h.next(rid).get("progress") or []
+partway = bool(pr) and 0 < pr[0] < pr[1] / 2
+clock = time.monotonic()
+h.cancel(rid)
+r = h.reply(rid)
+check(partway and r.get("cancelled") and time.monotonic() - clock < 2 and read_file(J(W, "conf.txt")) == b"original"
+      and not leftovers(),
+      "a large file's copy reports its bytes as it goes, and a cancel stops it part-way at once, keeping "
+      "the file it was replacing and no half-made copy")
+ending = Helper()
+started = ending.started()
+rid = ending.send({"op": "copy", "src": J(W, "huge"), "dst": J(W, "conf.txt")})
+partway = bool(ending.next(rid).get("progress"))
+exited = ending.stop()
+check(started and partway and exited and read_file(J(W, "conf.txt")) == b"original" and not leftovers(),
+      "ending the admin session part-way through a copy stops it, keeping the file it was replacing and no "
+      "half-made copy")
+os.unlink(J(W, "huge"))
+os.makedirs(J(W, "mvsrc"))
+write_file(J(W, "mvsrc/moved.txt"), b"moved")
+os.makedirs(J(W, "mvdst"))
+write_file(J(W, "mvdst/old.txt"), b"old")
+copied_over = ok(h.call({"op": "copy", "src": J(W, "newdir"), "dst": J(W, "olddir")}))
+moved_over = ok(h.call({"op": "move", "src": J(W, "mvsrc"), "dst": J(W, "mvdst")}))
+check(copied_over and contents(J(W, "olddir")) == contents(J(W, "newdir")) and moved_over
+      and not os.path.exists(J(W, "mvsrc")) and contents(J(W, "mvdst")) == ["moved.txt=moved"] and not leftovers(),
+      "copying or moving a folder onto another replaces it whole: the old contents are gone, nothing is left "
+      "behind")
 write_file(J(W, "r1"))
 check(ok(h.call({"op": "rename", "src": J(W, "r1"), "dst": J(W, "r2")})) and os.path.exists(J(W, "r2"))
       and not ok(h.call({"op": "rename", "src": J(W, "r2"), "dst": J(W, "c.txt")}))

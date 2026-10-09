@@ -1,4 +1,5 @@
 """File operations: threaded copy/move/delete with progress, links, shortcuts, archives."""
+import errno
 import itertools
 import math
 import os
@@ -483,8 +484,17 @@ class _Ops:
     def _move(self, src, dst, merge=False):
         if not merge and self._same_dev(src, dst):
             if os.path.lexists(dst):
-                self._remove(dst)
-            os.rename(src, dst)
+                # replaced in one step (_swap_in); the old one is deleted once the moved one is in place
+                if stat.S_ISDIR(os.lstat(dst).st_mode) and not stat.S_ISDIR(os.lstat(src).st_mode):
+                    raise RuntimeError(f"{dst} is a folder")
+                sp, dp = _open_parent(src), _open_parent(dst)
+                try:
+                    self._swap_in(sp, os.path.basename(src), dp, os.path.basename(dst), dst)
+                finally:
+                    os.close(sp)
+                    os.close(dp)
+            else:
+                os.rename(src, dst)
             self._report(os.path.basename(src))
             return
         self._copy(src, dst, merge=merge)
@@ -513,17 +523,21 @@ class _Ops:
             os.unlink(path)
         self._count(os.path.basename(path))
 
-    def _remove_at(self, dirfd, name, st, shown, dev):
+    def _remove_at(self, dirfd, name, st, shown, dev, counted=True):
+        """counted: reports progress and stops at a cancel (not when deleting what was just replaced, or a
+        half-made part)."""
         if stat.S_ISDIR(st.st_mode):
             if st.st_dev != dev:
                 raise RuntimeError(f"{shown} is on another drive (a mount point); not deleting it")
             d = _open_dir_at(dirfd, name, st, shown)
             try:
                 for e in _names_in(d, shown):
-                    self.task.check()
+                    if counted:
+                        self.task.check()
                     p = os.path.join(shown, e)
-                    self._remove_at(d, e, _lstat_at(d, e, p), p, dev)
-                    self._count(e)
+                    self._remove_at(d, e, _lstat_at(d, e, p), p, dev, counted)
+                    if counted:
+                        self._count(e)
             finally:
                 os.close(d)
             _call(os.rmdir, shown, name, dir_fd=dirfd)
@@ -550,27 +564,60 @@ class _Ops:
             raise RuntimeError(f"{dst} is a folder")
         if stat.S_ISLNK(st.st_mode):
             target = _call(os.readlink, src, sname, dir_fd=sdir)
-            if dst_st is not None:
-                _call(os.unlink, dst, dname, dir_fd=ddir)
-            _call(os.symlink, dst, target, dname, dir_fd=ddir)
+            # made under a hidden name, then renamed over dst: replaced in one step, never written through
+            while True:
+                part = util.part_name()
+                try:
+                    os.symlink(target, part, dir_fd=ddir)
+                    break
+                except FileExistsError:
+                    continue
+                except OSError as e:
+                    raise type(e)(e.errno, e.strerror, dst) from None
+            try:
+                _call(os.rename, dst, part, dname, src_dir_fd=ddir, dst_dir_fd=ddir)
+            except OSError:
+                os.unlink(part, dir_fd=ddir)
+                raise
         elif stat.S_ISDIR(st.st_mode):
             in_fd = _open_dir_at(sdir, sname, st, src)
+
+            def copy_into(out_fd):
+                for e in _names_in(in_fd, src):
+                    self._copy_at(in_fd, e, _lstat_at(in_fd, e, os.path.join(src, e)), os.path.join(src, e),
+                                  out_fd, e, os.path.join(dst, e), merge)
+                _copy_times_mode(out_fd, st)
             try:
-                if dst_st is not None and not merge:
-                    self._remove_at_or_retry(ddir, dname, dst_st, dst)
-                    dst_st = None
-                elif dst_st is not None and not stat.S_ISDIR(dst_st.st_mode):
-                    raise RuntimeError(f"{dst} exists and isn't a folder")
-                if dst_st is None:
-                    _call(os.mkdir, dst, dname, 0o700, dir_fd=ddir)
-                out_fd = _open_dir_at(ddir, dname, _lstat_at(ddir, dname, dst), dst)
-                try:
-                    for e in _names_in(in_fd, src):
-                        self._copy_at(in_fd, e, _lstat_at(in_fd, e, os.path.join(src, e)), os.path.join(src, e),
-                                      out_fd, e, os.path.join(dst, e), merge)
-                    _copy_times_mode(out_fd, st)
-                finally:
-                    os.close(out_fd)
+                if dst_st is not None and merge:   # into the existing folder (each file in it still replaced whole)
+                    if not stat.S_ISDIR(dst_st.st_mode):
+                        raise RuntimeError(f"{dst} exists and isn't a folder")
+                    out_fd = _open_dir_at(ddir, dname, dst_st, dst)
+                    try:
+                        copy_into(out_fd)
+                    finally:
+                        os.close(out_fd)
+                else:
+                    # built under a hidden name beside dst and put in its place only when complete (_swap_in): a
+                    # cancel or an error leaves dst as it was, and no half-made copy
+                    while True:
+                        part = util.part_name()
+                        try:
+                            os.mkdir(part, 0o700, dir_fd=ddir)
+                            break
+                        except FileExistsError:
+                            continue
+                        except OSError as e:
+                            raise type(e)(e.errno, e.strerror, dst) from None
+                    try:
+                        out_fd = _open_dir_at(ddir, part, _lstat_at(ddir, part, dst), dst)
+                        try:
+                            copy_into(out_fd)
+                        finally:
+                            os.close(out_fd)
+                        self._swap_in(ddir, part, ddir, dname, dst)
+                    except BaseException:
+                        self._discard(ddir, part, os.path.join(os.path.dirname(dst), part))
+                        raise
             finally:
                 os.close(in_fd)
         elif stat.S_ISREG(st.st_mode):
@@ -603,6 +650,9 @@ class _Ops:
                         self.done += len(buf)
                         self._report(name)
                     _copy_times_mode(out_fd, st)
+                    # replacing something: on disk before the rename (a crash leaves the old or the new)
+                    if _lstat_at(ddir, dname, dst, missing_ok=True) is not None:
+                        _call(os.fsync, dst, out_fd)
                 finally:
                     os.close(out_fd)
                 _call(os.rename, dst, part, dname, src_dir_fd=ddir, dst_dir_fd=ddir)
@@ -612,14 +662,61 @@ class _Ops:
         finally:
             os.close(in_fd)
 
-    def _remove_at_or_retry(self, dirfd, name, st, shown):
-        """A folder in the way of a copy: deleted, with the same retry for read-only folders as _remove()."""
+    def _swap_in(self, src_dir, src, dst_dir, dst, shown):
+        """src (in src_dir) to dst (in dst_dir) on one filesystem, replacing what's at dst (shown) in one step. A
+        non-folder over a non-folder (or nothing) is one rename. Where a folder is involved, the two are swapped
+        (RENAME_EXCHANGE; on a filesystem without it, the old one is renamed aside first and put back if the second
+        rename fails), and the old one, now out of the way under a hidden name, is then deleted."""
+        old = _lstat_at(dst_dir, dst, shown, missing_ok=True)
+        new = _lstat_at(src_dir, src, shown)
+        if old is None or (not stat.S_ISDIR(old.st_mode) and not stat.S_ISDIR(new.st_mode)):
+            _call(os.rename, shown, src, dst, src_dir_fd=src_dir, dst_dir_fd=dst_dir)
+            return
         try:
-            self._remove_at(dirfd, name, st, shown, st.st_dev)
+            util.renameat2(src_dir, src, dst_dir, dst, util.RENAME_EXCHANGE)
+            self._remove_old(src_dir, src, shown)   # the old one, now where the new one was
+            return
+        except OSError as e:
+            if e.errno != errno.EINVAL:
+                raise type(e)(e.errno, e.strerror, shown) from None
+        aside = util.part_name()
+        _call(os.rename, shown, dst, aside, src_dir_fd=dst_dir, dst_dir_fd=src_dir)
+        try:
+            _call(os.rename, shown, src, dst, src_dir_fd=src_dir, dst_dir_fd=dst_dir)
         except OSError:
-            if not _make_writable(shown):
-                raise
-            self._remove_at(dirfd, name, st, shown, st.st_dev)
+            try:
+                os.rename(aside, dst, src_dir_fd=src_dir, dst_dir_fd=dst_dir)
+            except OSError:
+                pass
+            raise
+        self._remove_old(src_dir, aside, shown)
+
+    def _remove_old(self, dirfd, name, shown):
+        """What was just replaced: deleted whole (a cancel now would only leave it half-deleted), with the retry for
+        read-only folders."""
+        st = _lstat_at(dirfd, name, shown, missing_ok=True)
+        if st is None:
+            return
+        path = os.path.join(os.path.dirname(shown), name)
+        try:
+            try:
+                self._remove_at(dirfd, name, st, path, st.st_dev, counted=False)
+            except OSError:
+                if not _make_writable(path):
+                    raise
+                self._remove_at(dirfd, name, st, path, st.st_dev, counted=False)
+        except (OSError, RuntimeError) as e:
+            raise RuntimeError(f"{shown} was replaced, but the old one couldn't be deleted (it's left as {name}): "
+                               f"{getattr(e, 'strerror', None) or e}") from None
+
+    def _discard(self, dirfd, name, path):
+        """A half-made part after a failure or cancel: deleted, without letting a second failure hide the first."""
+        try:
+            st = _lstat_at(dirfd, name, path, missing_ok=True)
+            if st is not None:
+                self._remove_at(dirfd, name, st, path, st.st_dev, counted=False)
+        except (OSError, RuntimeError):
+            pass
 
 
 def _make_writable(path):
@@ -831,8 +928,7 @@ def make_link(plan):
     elif plan["op"] == "hardlink":
         os.link(plan["target"], plan["link"])
     else:
-        with open(plan["path"], "x") as f:
-            f.write(plan["text"])
+        util.write_new(plan["path"], plan["text"])
         os.chmod(plan["path"], plan["mode"])
         util.mark_trusted(plan["path"])
     return plan_path(plan)

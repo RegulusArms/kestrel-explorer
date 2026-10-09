@@ -606,8 +606,7 @@ def run_compress(win, spec):
             else:
                 total += os.path.getsize(p) if os.path.exists(p) else 0
         task.check()
-        if os.path.exists(spec["out"]):
-            os.unlink(spec["out"])
+        # an older archive of that name is replaced only once the new one is made
         out = archive.compress(task, dict(spec, total=max(total, 1)))
         if spec.get("trash_originals"):
             for p in paths:

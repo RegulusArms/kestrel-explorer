@@ -183,6 +183,44 @@ check(not os.path.islink(P("rep/to-outside")) and text_of(P("rep/to-outside")) =
       and text_of(P("rep/other-link.txt")) == "old" and not leftovers(),
       "replacing a symlink replaces the link, not its target; another hard link of a replaced file keeps its "
       "contents")
+# folders: the new one is built beside the old one and swapped in whole
+make(P("rep/newdir/a.txt"), b"a")
+make(P("rep/newdir/huge"), b"x")
+os.truncate(P("rep/newdir/huge"), 1 << 30)
+make(P("rep/olddir/keep.txt"), b"keep")
+
+
+def old_intact():
+    return os.listdir(P("rep/olddir")) == ["keep.txt"] and text_of(P("rep/olddir/keep.txt")) == "keep"
+
+
+dir_state = {}
+dt = fileops.start_ops(w, [("copy", P("rep/newdir"), P("rep/olddir"))], "Test", lambda: None)
+dt.progress.connect(lambda _f, text: text.endswith("huge") and dt.cancel(), Qt.ConnectionType.DirectConnection)
+dt.finished.connect(lambda: dir_state.__setitem__("gone", True))
+wait_for(lambda: dir_state.get("gone"), 20000)
+check(old_intact() and not leftovers(),
+      "replacing a folder and cancelling part-way keeps the old folder as it was, and leaves no half-made copy")
+os.truncate(P("rep/newdir/huge"), BIG)
+old_lim = resource.getrlimit(resource.RLIMIT_FSIZE)
+old_handler = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+resource.setrlimit(resource.RLIMIT_FSIZE, (1 << 20, old_lim[1]))
+try:
+    run_ops(w, [("copy", P("rep/newdir"), P("rep/olddir"))])
+finally:
+    resource.setrlimit(resource.RLIMIT_FSIZE, old_lim)
+    signal.signal(signal.SIGXFSZ, old_handler)
+check(old_intact() and not leftovers(),
+      "a folder copy that fails part-way (a write error) keeps the folder it would have replaced")
+os.truncate(P("rep/newdir/huge"), 10)
+make(P("rep/mvsrc/moved.txt"), b"moved")
+make(P("rep/mvdst/old.txt"), b"old")
+replaced = run_ops(w, [("copy", P("rep/newdir"), P("rep/olddir")), ("move", P("rep/mvsrc"), P("rep/mvdst"))])
+check(replaced and len(os.listdir(P("rep/olddir"))) == 2 and os.path.lexists(P("rep/olddir/huge"))
+      and not os.path.lexists(P("rep/olddir/keep.txt")) and not os.path.lexists(P("rep/mvsrc"))
+      and os.listdir(P("rep/mvdst")) == ["moved.txt"] and not leftovers(),
+      "copying or moving a folder onto another replaces it whole: the old contents are gone, nothing is left "
+      "behind")
 shutil.rmtree(P("rep"))
 boxes.clear()
 
@@ -573,6 +611,91 @@ failed = not run_extract(os.path.join(gz_base, "bad.txt.gz"), "overwrite")
 bad = os.path.join(gz_dest, "bad.txt")
 check(failed and os.path.isfile(bad) and text_of(bad) == "old\n" and os.listdir(gz_dest) == ["bad.txt"],
       "a failed decompress leaves the file it would have replaced, and no temporary file")
+
+# -- failure-atomic everywhere else Kestrel writes (CLAUDE.md): compressing over an archive, its own files, new files,
+# moves between drives. A file-size limit stands for a full disk.
+def small_disk(fn):
+    old_lim = resource.getrlimit(resource.RLIMIT_FSIZE)
+    old_handler = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (1 << 20, old_lim[1]))   # writes past 1 MB fail (EFBIG)
+    try:
+        fn()
+    except Exception:
+        pass
+    finally:
+        resource.setrlimit(resource.RLIMIT_FSIZE, old_lim)
+        signal.signal(signal.SIGXFSZ, old_handler)
+
+
+def fa_leftovers(d):
+    return [n for n in os.listdir(d) if n.startswith(".kes-")]
+
+
+make(P("fa/src/big.bin"), b"b" * BIG)
+make(P("fa/src/small.txt"), b"small")
+make(P("fa/arc.tar"), b"the old archive")
+tar_fmt = next(f for f in archive.formats() if f["id"] == "tar")
+
+
+def fa_compress(rel):
+    archive.compress(fileops.Task("test", lambda _t: None),
+                     {"format": tar_fmt, "tool": "tar", "base": P("fa/src"), "rels": [rel], "out": P("fa/arc.tar"),
+                      "total": BIG})
+
+
+small_disk(lambda: fa_compress("big.bin"))
+kept = text_of(P("fa/arc.tar")) == "the old archive" and not fa_leftovers(P("fa"))
+fa_compress("small.txt")
+listing = subprocess.run(["tar", "tf", P("fa/arc.tar")], capture_output=True, text=True).stdout.strip()
+check(kept and listing == "small.txt" and not fa_leftovers(P("fa")),
+      "compressing over an archive that fails part-way keeps the old archive and no half-made one; one that "
+      "succeeds replaces it")
+
+make(P("fa/state.json"), b"old")
+os.chmod(P("fa/state.json"), 0o600)
+small_disk(lambda: util.write_atomic(P("fa/state.json"), b"n" * (2 << 20)))
+state_kept = text_of(P("fa/state.json")) == "old" and not fa_leftovers(P("fa"))
+util.write_atomic(P("fa/state.json"), "new")
+make(P("fa/dotfiles/bookmarks"), b"old")
+os.symlink(P("fa/dotfiles/bookmarks"), P("fa/bookmarks"))
+util.write_atomic(P("fa/bookmarks"), "new")
+check(state_kept and text_of(P("fa/state.json")) == "new" and stat.S_IMODE(os.stat(P("fa/state.json")).st_mode) == 0o600
+      and os.path.islink(P("fa/bookmarks")) and text_of(P("fa/dotfiles/bookmarks")) == "new"
+      and not fa_leftovers(P("fa")),
+      "Kestrel's own files are written in one step: a write that fails part-way keeps the old contents; they "
+      "keep their permissions, and a symlinked one stays a symlink")
+
+make(P("fa/taken.txt"), b"mine")
+refused_copy = refused_new = False
+try:
+    util.copyfile(P("fa/src/small.txt"), P("fa/taken.txt"), new_only=True)
+except OSError:
+    refused_copy = True
+try:
+    util.write_new(P("fa/taken.txt"), b"")
+except OSError:
+    refused_new = True
+small_disk(lambda: util.copyfile(P("fa/src/big.bin"), P("fa/new-from-template.bin"), new_only=True))
+check(refused_copy and refused_new and text_of(P("fa/taken.txt")) == "mine"
+      and not os.path.lexists(P("fa/new-from-template.bin")) and not fa_leftovers(P("fa")),
+      "a new file (from a template, or pasted) never replaces one that's there, and one that fails part-way "
+      "leaves nothing")
+
+# moves between drives (undo, restoring from the trash): /dev/shm is another filesystem
+other = f"/dev/shm/kestrel-test-{os.getpid()}"
+if not os.path.isdir("/dev/shm") or os.stat("/dev/shm").st_dev == os.stat(P("fa")).st_dev:
+    skip("moving between drives copies whole before deleting (no second filesystem here)")
+else:
+    os.makedirs(other, exist_ok=True)
+    small_disk(lambda: util.move(P("fa/src/big.bin"), os.path.join(other, "big.bin")))
+    src_kept = (os.path.getsize(P("fa/src/big.bin")) == BIG and not os.path.lexists(os.path.join(other, "big.bin"))
+                and not fa_leftovers(other))
+    util.move(P("fa/src"), os.path.join(other, "src"))
+    check(src_kept and not os.path.lexists(P("fa/src")) and os.path.getsize(os.path.join(other, "src/big.bin")) == BIG
+          and not fa_leftovers(other),
+          "moving between drives copies whole before deleting: a failure part-way keeps the original and no "
+          "half-made copy")
+    shutil.rmtree(other)
 
 # -- Shred with BleachBit: `bleachbit --shred` on the chosen files and folders, and what's still there afterwards
 # reported (BleachBit reports success either way); Empty Trash with BleachBit hands it every item in the trash and its

@@ -1,9 +1,11 @@
 """Shared helpers: paths, mime types, icons, desktop integration."""
+import errno
 import hashlib
 import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -142,17 +144,160 @@ def natural_key(s):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
 
 
+def part_name():
+    """A fresh ".kes-<random>.part", for building something beside the name it will replace."""
+    return f".kes-{secrets.randbits(32):08x}.part"
+
+
+RENAME_EXCHANGE = 2
+_libc_rename = None
+
+
+def renameat2(src_dir, src, dst_dir, dst, flags):
+    """renameat2() (os.rename has no flags); raises OSError."""
+    global _libc_rename
+    if _libc_rename is None:
+        import ctypes
+        _libc_rename = ctypes.CDLL(None, use_errno=True)
+    if _libc_rename.renameat2(src_dir, os.fsencode(src), dst_dir, os.fsencode(dst), flags) != 0:
+        import ctypes
+        e = ctypes.get_errno()
+        raise OSError(e, os.strerror(e))
+
+
 def open_part(prefix, dir_fd=None):
     """A new, empty file to write something into before it is renamed over a name in the same folder (so that name
     keeps its old contents until the new ones are complete): prefix + ".kes-<random>.part", relative to dir_fd (or a
     path, with prefix "dir/"), created exclusively and never through a symlink. Returns (fd, name)."""
     while True:
-        name = f"{prefix}.kes-{secrets.randbits(32):08x}.part"
+        name = prefix + part_name()
         try:
             return os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o666,
                            dir_fd=dir_fd), name
         except FileExistsError:
             continue
+
+
+def write_parts(path, fill, new_only=False, sync=False):
+    """fill(fd) writes a part file beside path, which then replaces path (keeping its permissions, and a symlink
+    there as a symlink: its target is replaced) or, with new_only, takes the name only if it's still free (failure-
+    atomic, see CLAUDE.md). sync: fsync before the rename (a crash then leaves the old contents or the new, never a
+    truncated file): for data that matters, not caches. A failure leaves no part file and the old contents as they
+    were. For Kestrel's own files; a user's file in the way is replaced, never written through (fileops)."""
+    path = os.fspath(path)
+    if not new_only and os.path.islink(path):
+        path = os.path.realpath(path)
+    try:
+        fd, part = open_part((os.path.dirname(path) or ".").rstrip("/") + "/")
+    except OSError as e:   # named as the file being written (permission denied there: the admin session)
+        raise type(e)(e.errno, e.strerror, path) from None
+    try:
+        try:
+            if not new_only:
+                try:
+                    old = os.stat(path)
+                    if stat.S_ISREG(old.st_mode):
+                        os.fchmod(fd, stat.S_IMODE(old.st_mode))   # first, so fill() can still change them
+                except FileNotFoundError:
+                    pass
+            fill(fd)
+            if sync:
+                os.fsync(fd)
+        finally:
+            os.close(fd)
+        if new_only:
+            put_new(part, path)
+        else:
+            os.rename(part, path)
+    except BaseException:
+        try:
+            os.unlink(part)
+        except OSError:
+            pass
+        raise
+
+
+def put_new(part, path):
+    """A finished part (file or folder) to a name that must still be free: never replaces anything."""
+    try:
+        renameat2(-100, part, -100, path, 1)   # RENAME_NOREPLACE
+        return
+    except OSError as e:
+        if e.errno == errno.EEXIST:
+            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), path) from None
+        if e.errno != errno.EINVAL:
+            raise type(e)(e.errno, e.strerror, path) from None
+    # a filesystem without RENAME_NOREPLACE: a hard link fails if the name is taken; a folder can't be linked, so
+    # there it's check, then rename
+    if os.path.isdir(part) and not os.path.islink(part):
+        if os.path.lexists(path):
+            raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), path)
+        os.rename(part, path)
+        return
+    os.link(part, path)
+    os.unlink(part)
+
+
+def write_all(fd, data):
+    view = memoryview(data.encode() if isinstance(data, str) else data)
+    while view:
+        view = view[os.write(fd, view):]
+
+
+def write_atomic(path, data):
+    """Replace path's contents with data (str or bytes) in one step, fsynced (see write_parts)."""
+    write_parts(path, lambda fd: write_all(fd, data), sync=True)
+
+
+def write_new(path, data):
+    """Make path, which must not exist yet, with data in one step (see write_parts)."""
+    write_parts(path, lambda fd: write_all(fd, data), new_only=True)
+
+
+def copyfile(src, dst, new_only=False):
+    """Contents only, like shutil.copyfile, in one step (write_parts); new_only: only if the name is still free.
+    Fsynced when it replaces something."""
+    with open(src, "rb") as f:
+        write_parts(dst, lambda fd: _copy_fd(f, fd), new_only, sync=not new_only and os.path.lexists(dst))
+
+
+def _copy_fd(f, fd):
+    while True:
+        chunk = f.read(1 << 20)
+        if not chunk:
+            return
+        write_all(fd, chunk)
+
+
+def move(src, dst):
+    """shutil.move for a src and a dst that doesn't exist yet; between drives the copy is made whole under a hidden
+    name beside dst, renamed into place, and only then is src deleted (a failure part-way leaves src, and no
+    half-made copy)."""
+    try:
+        os.rename(src, dst)
+        return
+    except OSError as e:
+        if e.errno != errno.EXDEV:
+            raise
+    part = os.path.join(os.path.dirname(dst), part_name())
+    try:
+        if os.path.isdir(src) and not os.path.islink(src):
+            shutil.copytree(src, part, symlinks=True)
+        elif os.path.islink(src):
+            os.symlink(os.readlink(src), part)
+        else:
+            shutil.copy2(src, part)
+        os.rename(part, dst)
+    except BaseException:
+        if os.path.isdir(part) and not os.path.islink(part):
+            shutil.rmtree(part, ignore_errors=True)
+        elif os.path.lexists(part):
+            os.unlink(part)
+        raise
+    if os.path.isdir(src) and not os.path.islink(src):
+        shutil.rmtree(src)
+    else:
+        os.unlink(src)
 
 
 def unique_path(directory, name, style="copy"):
@@ -731,7 +876,7 @@ def write_bookmarks(items):
         default = unquote(os.path.basename(target.rstrip("/")) or target)
         uri = file_uri(target) if target.startswith("/") else target
         lines.append(uri + ("" if label == default else " " + label))
-    GTK_BOOKMARKS.write_text("\n".join(lines) + "\n")
+    write_atomic(GTK_BOOKMARKS, "\n".join(lines) + "\n")
     from . import atc
     atc.announce("bookmarks")
 
@@ -779,9 +924,9 @@ def ensure_desktop_entry():
             f"icons/hicolor/256x256/apps/{APP_ID}.png"
         if not QIcon.hasThemeIcon(APP_ID) and not icon.exists() and ICON_FILE.exists():
             icon.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(ICON_FILE, icon)
+            copyfile(ICON_FILE, icon)
         DESKTOP_ENTRY.parent.mkdir(parents=True, exist_ok=True)
-        DESKTOP_ENTRY.write_text(
+        write_atomic(DESKTOP_ENTRY,
             f"[Desktop Entry]\nType=Application\nName={APP_NAME}\nGenericName=File Manager\n"
             "Comment=Manage files, with archive, admin, permission and metadata tools built in\n"
             f"Exec={launcher} %U\nIcon={APP_ID}\nTerminal=false\n"
