@@ -1,17 +1,19 @@
 """Checksum files (.sfv, .md5, .sha256, SHA256SUMS…): reading them, checking the files they list, and the Verify
-Checksums dialog that opening one shows.
+Checksums dialog that opening one shows; making them (Create Checksum File…).
 
 Formats: GNU coreutils' "hash  name", BSD tags "SHA256 (name) = hash", SFV's "name crc32", or a lone hash."""
 import hashlib
 import os
 import re
+import secrets
 import zlib
 from collections import namedtuple
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QBrush
-from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QHeaderView, QLabel, QProgressBar, QTreeWidget,
-                             QTreeWidgetItem, QVBoxLayout)
+from PyQt6.QtWidgets import (QCheckBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout, QGridLayout, QGroupBox,
+                             QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QProgressBar, QPushButton,
+                             QRadioButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout)
 
 from . import fileops, util
 
@@ -142,11 +144,12 @@ def algo_label(algo):
     return "BLAKE2b" if algo == "blake2b" else algo.upper()
 
 
-def hash_file(path, algo, progress=None, check=None):
-    """The file's hash (lowercase hex). On a thread: progress(bytes done, size) after each chunk, check() between them
-    (it may raise to stop). Raises OSError if it can't be read."""
-    crc, h = 0, None if algo == "crc32" else hashlib.new(algo)
-    done = 0
+def hash_files(path, algos, progress=None, check=None):
+    """The file's hashes for several algorithms (lowercase hex, in `algos`' order), in one read of the file. On a
+    thread: progress(bytes done, size) after each chunk, check() between them (it may raise to stop). Raises OSError
+    if it can't be read."""
+    hashes = [None if a == "crc32" else hashlib.new(a) for a in algos]
+    crc, done = 0, 0
     with open(path, "rb") as f:
         size = os.fstat(f.fileno()).st_size
         while True:
@@ -155,14 +158,20 @@ def hash_file(path, algo, progress=None, check=None):
             chunk = f.read(4 << 20)
             if not chunk:
                 break
-            if h is None:
-                crc = zlib.crc32(chunk, crc)
-            else:
-                h.update(chunk)
+            for h in hashes:
+                if h is None:
+                    crc = zlib.crc32(chunk, crc)
+                else:
+                    h.update(chunk)
             done += len(chunk)
             if progress:
                 progress(done, size)
-    return f"{crc:08x}" if h is None else h.hexdigest()
+    return [f"{crc:08x}" if h is None else h.hexdigest() for h in hashes]
+
+
+def hash_file(path, algo, progress=None, check=None):
+    """The file's hash (lowercase hex); see hash_files."""
+    return hash_files(path, [algo], progress, check)[0]
 
 
 def verify(e, task=None):
@@ -358,3 +367,256 @@ def open_dialog(parent, path):
     d.raise_()
     d.activateWindow()
     return True
+
+
+# ---------------------------------------------------------------- making checksum files
+
+CREATE_ALGORITHMS = ("crc32", "md5", "sha1", "sha256", "sha512", "blake2b")   # offered, in order
+_OUT_EXT = {"crc32": ".sfv", "md5": ".md5", "sha1": ".sha1", "sha256": ".sha256", "sha512": ".sha512",
+            "blake2b": ".b2"}
+
+
+def _write_replacing(path, data):
+    """Write `data` to a new file beside `path`, then rename it over `path` (never through a symlink there)."""
+    while True:
+        part = os.path.join(os.path.dirname(path), f".{os.path.basename(path)}.kes-{secrets.randbits(32):x}.part")
+        try:
+            fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o666)
+            break
+        except FileExistsError:
+            continue
+    try:
+        with open(fd, "wb") as f:
+            f.write(data)
+        os.rename(part, path)
+    except BaseException:
+        os.unlink(part)
+        raise
+
+
+def files_in(paths, check=None):
+    """The files to checksum: files as they are, folders' files inside them (not through symlinked folders), in
+    order."""
+    out = []
+    for p in paths:
+        if not os.path.isdir(p):
+            out.append(p)
+            continue
+        for root, dirs, files in os.walk(p):
+            if check:
+                check()
+            dirs.sort()
+            out += [os.path.join(root, f) for f in sorted(files)]
+    return out
+
+
+def output_paths(dir_, stem, algos, one_file):
+    """The checksum files a job writes in `dir_`: one per algorithm (stem.sha256, stem.md5, stem.sfv for CRC32…), or
+    with one_file a single stem-CHECKSUM with every algorithm as BSD tags."""
+    if one_file:
+        return [os.path.join(dir_, stem + "-CHECKSUM")]
+    return [os.path.join(dir_, stem + _OUT_EXT[a]) for a in algos]
+
+
+def format_line(name, algo, hex_, style):
+    """One line of a checksum file: "hash  name" (md5sum's), "SHA256 (name) = hash" (bsd) or "name CRC32" (sfv); names
+    with a backslash or line break are escaped as md5sum does."""
+    if style == "sfv":
+        return f"{name} {hex_.upper()}"
+    escape = "\\" in name or "\n" in name or "\r" in name
+    n = name.replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r") if escape else name
+    prefix = "\\" if escape else ""
+    if style == "bsd":
+        return f"{prefix}{algo_label(algo)} ({n}) = {hex_}"
+    return f"{prefix}{hex_}  {n}"
+
+
+def create(task, paths, dir_, stem, algos, one_file, errors=None):
+    """Hash every file once with all the algorithms and write output_paths(); names are relative to `dir_`. Files that
+    can't be read are left out and named in `errors` (a list). Returns the files written. On a thread (task may be
+    None)."""
+    check = task.check if task else None
+    if task:
+        task.report(0, 0, "Listing files…")
+    outputs = output_paths(dir_, stem, algos, one_file)
+    skip = {os.path.normpath(o) for o in outputs}
+    files = [f for f in files_in(paths, check) if os.path.normpath(f) not in skip]  # an older copy of an output
+    if not files:
+        raise RuntimeError("There are no files to make checksums of.")
+    sizes = []
+    for f in files:
+        try:
+            sizes.append(os.stat(f).st_size)
+        except OSError:
+            sizes.append(0)
+    total, before = sum(sizes), 0
+    hashed = []   # (relative name, hashes in algos' order)
+    for f, size in zip(files, sizes):
+        name = os.path.relpath(f, dir_)
+
+        def progress(done, _size, f=f, before=before):
+            if task:
+                task.report(before + done, max(total, 1), "Hashing " + os.path.basename(f))
+        try:
+            hashed.append((name, hash_files(f, algos, progress, check)))
+        except OSError as e:
+            if errors is not None:
+                errors.append(f"{name}: {e.strerror or e}")
+        before += size
+    if not hashed:
+        raise RuntimeError("None of the files could be read.")
+    if check:
+        check()
+    if one_file:
+        text = "".join(format_line(name, a, h[i], "bsd") + "\n" for name, h in hashed for i, a in enumerate(algos))
+        _write_replacing(outputs[0], text.encode())
+    else:
+        for i, a in enumerate(algos):
+            style = "sfv" if a == "crc32" else "gnu"
+            text = "; Made by Kestrel Explorer\n" if style == "sfv" else ""
+            text += "".join(format_line(name, a, h[i], style) + "\n" for name, h in hashed)
+            _write_replacing(outputs[i], text.encode())
+    return outputs
+
+
+class CreateDialog(QDialog):
+    """Pick the algorithms, one file or one per algorithm, the name and the folder; settings remember the first
+    two."""
+
+    def __init__(self, parent, paths, settings):
+        super().__init__(parent)
+        self.paths, self.settings = paths, settings
+        self.setWindowTitle("Create Checksum File")
+        lay = QVBoxLayout(self)
+        first = paths[0].rstrip("/") or paths[0]
+        folders = any(os.path.isdir(p) for p in paths)
+        head = QLabel((f"Checksums for “{os.path.basename(first)}”." if len(paths) == 1
+                       else f"Checksums for {len(paths)} items.")
+                      + (" The files inside folders are included." if folders else ""))
+        head.setWordWrap(True)
+        lay.addWidget(head)
+
+        algo_box = QGroupBox("Algorithms")
+        grid = QGridLayout(algo_box)
+        saved = [a for a in str(settings.value("checksum_algorithms", "sha256")).split(",") if a]
+        self.boxes = {}
+        for i, a in enumerate(CREATE_ALGORITHMS):
+            b = QCheckBox("CRC32 (SFV)" if a == "crc32" else algo_label(a))
+            b.setChecked(a in saved)
+            self.boxes[a] = b
+            grid.addWidget(b, i // 3, i % 3)
+            b.toggled.connect(self._update)
+        lay.addWidget(algo_box)
+
+        files_box = QGroupBox("Checksum files")
+        fl = QVBoxLayout(files_box)
+        self.each = QRadioButton("One file for each algorithm (as md5sum, sha256sum… write them)")
+        self.single = QRadioButton("One file with every algorithm (BSD tags, like Fedora's CHECKSUM files)")
+        (self.single if settings.value("checksum_one_file", False, type=bool) else self.each).setChecked(True)
+        fl.addWidget(self.each)
+        fl.addWidget(self.single)
+        self.each.toggled.connect(self._update)
+        lay.addWidget(files_box)
+
+        form = QFormLayout()
+        self.name = QLineEdit(os.path.basename(first) if len(paths) == 1
+                              else os.path.basename(os.path.dirname(first)))
+        if not self.name.text():
+            self.name.setText("checksums")
+        form.addRow("Name:", self.name)
+        row = QHBoxLayout()
+        self.folder = QLineEdit(os.path.dirname(first))
+        browse = QPushButton("Browse…")
+        row.addWidget(self.folder, 1)
+        row.addWidget(browse)
+        form.addRow("Save in:", row)
+        lay.addLayout(form)
+        self.name.textChanged.connect(self._update)
+        self.folder.textChanged.connect(self._update)
+
+        def choose():
+            d = QFileDialog.getExistingDirectory(self, "Save Checksum File In", self.folder.text())
+            if d:
+                self.folder.setText(d)
+        browse.clicked.connect(choose)
+
+        self.preview = QLabel()
+        self.preview.setWordWrap(True)
+        self.preview.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(self.preview)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        self.create_btn = bb.button(QDialogButtonBox.StandardButton.Ok)
+        self.create_btn.setText("Create")
+        bb.accepted.connect(self._ok)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+        self._update()
+
+    def algos(self):
+        return [a for a in CREATE_ALGORITHMS if self.boxes[a].isChecked()]
+
+    def one_file(self):
+        return self.single.isChecked()
+
+    def dir(self):
+        return self.folder.text().strip()
+
+    def stem(self):
+        return self.name.text().strip()
+
+    def outputs(self):
+        return output_paths(self.dir(), self.stem(), self.algos(), self.one_file())
+
+    def _update(self):
+        problem = ""
+        if not self.algos():
+            problem = "Choose at least one algorithm."
+        elif not self.stem() or "/" in self.stem():
+            problem = "Enter a name (without “/”)."
+        elif not os.path.isdir(self.dir()):
+            problem = "The folder to save in doesn't exist."
+        self.create_btn.setEnabled(not problem)
+        if problem:
+            self.preview.setText(problem)
+            return
+        names = [os.path.basename(o) for o in self.outputs()]
+        existing = [os.path.basename(o) for o in self.outputs() if os.path.lexists(o)]
+        self.preview.setText("Creates: " + ", ".join(names)
+                             + ("\nReplaces: " + ", ".join(existing) if existing else ""))
+
+    def _ok(self):
+        existing = [os.path.basename(o) for o in self.outputs() if os.path.lexists(o)]
+        if existing and QMessageBox.question(self, "Create Checksum File", "Replace " + ", ".join(existing) + "?") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        self.settings.setValue("checksum_algorithms", ",".join(self.algos()))
+        self.settings.setValue("checksum_one_file", self.one_file())
+        self.accept()
+
+
+def create_dialog(win, paths):
+    """The context menu's Create Checksum File…: the dialog, then the job in the status bar; selects the result."""
+    dlg = CreateDialog(win, paths, win.settings)
+    if dlg.exec():
+        run_create(win, paths, dlg.dir(), dlg.stem(), dlg.algos(), dlg.one_file())
+
+
+def run_create(win, paths, dir_, stem, algos, one_file):
+    def work(task):
+        errors = []
+        return create(task, paths, dir_, stem, algos, one_file, errors), errors
+
+    def done(res):
+        if res is None:  # cancelled
+            win.statusBar().showMessage("Creating checksums cancelled", 4000)
+            return
+        written, errors = res
+        win.statusBar().showMessage("Created " + ", ".join(os.path.basename(o) for o in written), 6000)
+        if win.pane() and win.pane().dir == dir_ and written:
+            win.pane().select_later(written[0])
+        if errors:
+            shown = errors[:10] + ([f"…and {len(errors) - 10} more"] if len(errors) > 10 else [])
+            head = ("1 file couldn't be read and was left out:" if len(errors) == 1
+                    else f"{len(errors)} files couldn't be read and were left out:")
+            QMessageBox.warning(win, "Create Checksum File", head + "\n\n" + "\n".join(shown))
+    fileops.run_job(win, "Creating checksums", work, done)

@@ -276,6 +276,47 @@ for file, sums in (("hello.txt", "CHECKSUM"), ("changed.txt", "MD5SUMS"), ("hell
 check(said[0] == "✔ Matches (SHA256)." and said[1] == "✘ Doesn't match (MD5)." and "isn't a checksum file" in said[2],
       f"Properties' Checksums tab checks a file against a chosen checksum file ({' | '.join(said)})")
 
+# -- making checksum files (Create Checksum File…)
+make(P("mk/a.txt"), b"alpha\n")
+make(P("mk/back\\slash.txt"), b"back\n")
+make(P("mk/sub/inner.txt"), b"inner\n")
+make(P("mk/sub/deep/z.txt"), b"zed\n")
+mk_paths = [P("mk/a.txt"), P("mk/back\\slash.txt"), P("mk/sub")]
+
+
+def all_ok(sums):
+    return [f"{e.name}:{e.algo}:{hashcheck.verify(e).status}" for e in hashcheck.parse(sums)]
+
+
+errs = []
+made = hashcheck.create(None, mk_paths, P("mk"), "set", list(hashcheck.CREATE_ALGORITHMS), False, errs)
+listed = "a.txt:{0}:ok,back\\slash.txt:{0}:ok,sub/inner.txt:{0}:ok,sub/deep/z.txt:{0}:ok"
+check(",".join(os.path.basename(m) for m in made) == "set.sfv,set.md5,set.sha1,set.sha256,set.sha512,set.b2"
+      and not errs and all(",".join(all_ok(m)) == listed.format(a) for m, a in zip(made, hashcheck.CREATE_ALGORITHMS)),
+      "Create Checksum File makes one file per algorithm (md5sum's format, SFV for CRC32) that verify as "
+      "OK, with the files inside folders")
+made = hashcheck.create(None, mk_paths, P("mk"), "set", list(hashcheck.CREATE_ALGORITHMS), True, errs)
+bsd_lines = all_ok(P("mk/set-CHECKSUM"))
+bsd_ok = (made == [P("mk/set-CHECKSUM")] and len(bsd_lines) == 24 and all(x.endswith(":ok") for x in bsd_lines)
+          and "\\SHA256 (back\\\\slash.txt) = " in text_of(P("mk/set-CHECKSUM")))
+hashcheck.create(None, [P("mk")], P("mk"), "all", ["sha256"], True, errs)
+hashcheck.create(None, [P("mk")], P("mk"), "all", ["sha256"], True, errs)
+again = all_ok(P("mk/all-CHECKSUM"))
+check(bsd_ok and again and "all-CHECKSUM" not in ",".join(again) and all(x.endswith(":ok") for x in again),
+      "...or one file with every algorithm as BSD tags (escaped names), and making it again leaves out its own "
+      "older copy")
+make(P("mk/locked.txt"), b"locked\n")
+os.chmod(P("mk/locked.txt"), 0)
+errs = []
+hashcheck.create(None, [P("mk/a.txt"), P("mk/locked.txt")], P("mk"), "two", ["md5"], False, errs)
+two = all_ok(P("mk/two.md5"))
+os.chmod(P("mk/locked.txt"), 0o644)
+cd = hashcheck.CreateDialog(w, [P("mk/a.txt")], w.settings)
+check(two == ["a.txt:md5:ok"] and len(errs) == 1 and errs[0].startswith("locked.txt: ")
+      and cd.stem() == "a.txt" and cd.dir() == P("mk") and cd.outputs() == [P("mk/a.txt.sha256")],
+      "a file that can't be read is left out and named; the dialog starts from the item's name and folder, and SHA256")
+cd.deleteLater()
+
 # -- symlinks inside a tree: never followed, even when one is swapped in while a job runs
 victim = P("victim")  # stands for files elsewhere that a job mustn't touch
 AT_FDCWD, RENAME_EXCHANGE = -100, 2

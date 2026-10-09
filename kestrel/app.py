@@ -9,8 +9,8 @@ from PyQt6.QtGui import QAction, QGuiApplication, QKeySequence, QWindow
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox,
                              QProgressBar, QSlider, QSplitter, QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget)
 
-from . import (__version__, admin, archive, archive_ui, atc, chooser, dialogs, fileops, fm1, places, sharing, stats,
-               thumbs, undo, util, uwp)
+from . import (__version__, admin, archive, archive_ui, atc, chooser, dialogs, fileops, fm1, hashcheck, places,
+               sharing, stats, thumbs, undo, util, uwp)
 from .actions import FileActions
 from .chooser import ChooserBar
 from .incoming import handle_fm1, on_atc, open_in_tabs, report_windows, window_focused  # noqa: F401 (tests use A.on_atc)
@@ -749,6 +749,8 @@ class MainWindow(FileActions, Opening, QMainWindow):
                         lambda: archive_ui.quick_compress(self, paths))
         m.addAction(icon("package-x-generic", "archive-insert"), "Compress…",
                     lambda: archive_ui.compress_dialog(self, paths))
+        m.addAction(icon("security-high", "document-properties"), "Create Checksum File…",
+                    lambda: hashcheck.create_dialog(self, paths))
         if single and (util.is_image(single) or util.is_video(single)) and uwp.editor_open():
             m.addAction(icon("preferences-desktop-wallpaper", "video-display"), "Add to Selected UWP Monitor",
                         lambda: self._uwp_add(single))
