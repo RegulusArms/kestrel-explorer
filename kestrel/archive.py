@@ -690,74 +690,143 @@ def link_escapes(depth, target):
     return False
 
 
-def _drop_escaping_links(dirfd, depth, since_ns):
+def _open_for_sweep(dirfd, name, nofollow=True):
+    """(fd, mode to put back or None): the folder `name` in dirfd, opened to be listed. One of the user's own that
+    the archive left unreadable (GNU tar applies a folder's stored mode, 000 or 111 say, before it exits) is let in
+    first: owner rwx, set on the folder itself through /proc (never through a symlink swapped in), and its mode is put
+    back once it's swept. None if it can't be opened."""
+    nf = os.O_NOFOLLOW if nofollow else 0
+    try:
+        return os.open(name, os.O_RDONLY | os.O_DIRECTORY | nf | os.O_CLOEXEC, dir_fd=dirfd), None
+    except PermissionError:
+        pass
+    except OSError:
+        return None, None
+    try:
+        pfd = os.open(name, os.O_PATH | os.O_DIRECTORY | nf | os.O_CLOEXEC, dir_fd=dirfd)
+    except OSError:
+        return None, None
+    try:
+        st = os.fstat(pfd)
+        if st.st_uid != os.geteuid():
+            return None, None
+        mode = stat.S_IMODE(st.st_mode)
+        os.chmod(f"/proc/self/fd/{pfd}", mode | stat.S_IRWXU)
+        try:
+            return os.open(f"/proc/self/fd/{pfd}", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC), mode
+        except OSError:
+            os.chmod(f"/proc/self/fd/{pfd}", mode)
+            return None, None
+    except OSError:
+        return None, None
+    finally:
+        os.close(pfd)
+
+
+def _drop_escaping_links(dirfd, rel, depth, since_ns, report, restore=None):
     """The symlinks in an open folder (and the folders below it, on the same drive) changed since since_ns that
-    link_escapes(), removed."""
+    link_escapes(), removed. One in a folder of the user's that the archive made read-only is removed too: the folder
+    is made writable for it, and its mode put back after (restore: the mode to put back when this folder was opened
+    by _open_for_sweep). Each one is added to report as (path in the folder, target, None, or why it's still there)."""
     try:
         here = os.fstat(dirfd)
-        names = os.listdir(dirfd)
-    except OSError:
-        return
-    subdirs = []
-    for n in names:
+
+        def let_in():   # owner rwx on this folder, if it's the user's; its mode is put back below
+            nonlocal restore
+            if restore is not None or here.st_uid != os.geteuid():
+                return False
+            os.fchmod(dirfd, stat.S_IMODE(here.st_mode) | stat.S_IRWXU)
+            restore = stat.S_IMODE(here.st_mode)
+            return True
+
+        if here.st_mode & stat.S_IXUSR == 0:   # can't look anything up in it
+            let_in()
         try:
-            st = os.stat(n, dir_fd=dirfd, follow_symlinks=False)
+            names = os.listdir(dirfd)
         except OSError:
-            continue
-        if stat.S_ISDIR(st.st_mode) and st.st_dev == here.st_dev:
-            subdirs.append(n)
-        elif stat.S_ISLNK(st.st_mode) and st.st_ctime_ns >= since_ns:
+            return
+        subdirs = []
+        for n in names:
             try:
-                if link_escapes(depth, os.fsencode(os.readlink(n, dir_fd=dirfd))):
+                st = os.stat(n, dir_fd=dirfd, follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISDIR(st.st_mode) and st.st_dev == here.st_dev:
+                subdirs.append(n)
+                continue
+            if not (stat.S_ISLNK(st.st_mode) and st.st_ctime_ns >= since_ns):
+                continue
+            try:
+                target = os.readlink(n, dir_fd=dirfd)
+            except OSError:
+                continue
+            if not link_escapes(depth, os.fsencode(target)):
+                continue
+            why = None
+            try:
+                try:
                     os.unlink(n, dir_fd=dirfd)
+                except PermissionError:
+                    if not let_in():
+                        raise
+                    os.unlink(n, dir_fd=dirfd)
+            except OSError as e:
+                why = e.strerror or str(e)
+            report.append((rel + n, target, why))
+        for n in subdirs:
+            sub, mode = _open_for_sweep(dirfd, n)
+            if sub is not None:
+                try:
+                    _drop_escaping_links(sub, rel + n + "/", depth + 1, since_ns, report, mode)
+                finally:
+                    os.close(sub)
+    except OSError:
+        pass
+    finally:
+        if restore is not None:
+            try:
+                os.fchmod(dirfd, restore)
             except OSError:
                 pass
-    for n in subdirs:
-        try:
-            sub = os.open(n, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dirfd)
-        except OSError:
-            continue
-        try:
-            _drop_escaping_links(sub, depth + 1, since_ns)
-        finally:
-            os.close(sub)
 
 
 @contextlib.contextmanager
-def _escaping_link_sweep(dest, tool_name):
+def _escaping_link_sweep(dest, tool_name, report):
     """GNU tar and UnZip make an archive's symlinks as they are, also ones that lead out of the destination (7-Zip
     and unrar leave those out), and Kestrel follows a link like any other folder or file: opening, copying or deleting
     "inside" the extracted folder would reach whatever it points to. So once they're done (also after a failure or a
     cancel), the escaping links they made are removed: only links changed since the job started (a link's ctime can't
-    be set back), so the user's own links in an existing folder stay."""
+    be set back), so the user's own links in an existing folder stay. As in Python's tarfile "data" filter, an
+    absolute link goes even when it names a place inside the folder: where it leads depends on where the folder is.
+    What was removed, or couldn't be, goes in report (see _drop_escaping_links) for the user to be told."""
     since_ns = time.time_ns() - 1_000_000_000  # the filesystem's clock can lag a little behind
     try:
         yield
     finally:
         if tool_name in ("tar", "unzip"):
-            try:
-                fd = os.open(dest, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-            except OSError:
-                fd = None
+            fd, mode = _open_for_sweep(None, dest, nofollow=False)
             if fd is not None:
                 try:
-                    _drop_escaping_links(fd, 0, since_ns)
+                    _drop_escaping_links(fd, "", 0, since_ns, report, mode)
                 finally:
                     os.close(fd)
 
 
-def extract(task, path, dest, password=None, overwrite="rename", threads=0):
-    """Extract `path` into the existing folder `dest`. Raises WrongPassword, RuntimeError or Cancelled."""
+def extract(task, path, dest, password=None, overwrite="rename", threads=0, dropped_links=None):
+    """Extract `path` into the existing folder `dest`. Raises WrongPassword, RuntimeError or Cancelled. Symlinks that
+    led out of dest were removed: they're added to dropped_links (a list) as (path in dest, target, None or why one
+    is still there)."""
     path = first_volume(path)
     k, suf = kind(path)
     label = f"Extracting {os.path.basename(path)}"
+    report = dropped_links if dropped_links is not None else []
     if k == "tar":
-        with _escaping_link_sweep(dest, "tar"):
+        with _escaping_link_sweep(dest, "tar", report):
             return _extract_stream(task, path, dest, k, suf, overwrite, label)
     if k == "single":
         return _extract_stream(task, path, dest, k, suf, overwrite, label)
     t, argv, stdin, env = _extract_command(path, dest, password, overwrite, threads)
-    with _escaping_link_sweep(dest, t):
+    with _escaping_link_sweep(dest, t, report):
         return _extract_run(task, t, argv, stdin, env, label, dest)
 
 

@@ -3,8 +3,9 @@ undo between all Kestrel windows).
 
 Recorded: moves (drag and drop, cut/paste, Move To), renames (single and batch), Move to Trash, and items created by
 copy, paste, duplicate, New Folder / New File and links. Undoing a creation moves the new items to the trash, like
-GNOME Files, so nothing is lost by undoing. Not undoable: permanent deletes, merges into an existing folder, archive
-jobs and admin-session operations.
+GNOME Files, so nothing is lost by undoing. Not undoable: permanent deletes, merges into an existing folder, copies
+that replaced something, archive jobs and admin-session operations. A replace or merge that leaves nothing else to undo
+records a "none" entry: Ctrl+Z then only says it can't be undone, instead of undoing the action before it.
 """
 import json
 import os
@@ -66,9 +67,10 @@ atc.radio().reset.connect(_reset)
 
 
 def record(kind, label, items):
-    """kind "move": items [(src, dst)] · "rename": [(old, new)] · "trash": [original path] · "create": [path]."""
+    """kind "move": items [(src, dst)] · "rename": [(old, new)] · "trash": [original path] · "create": [path] ·
+    "none": [] (what was done can't be undone)."""
     items = list(items)
-    if not items:
+    if not items and kind != "none":
         return
     op = {"kind": kind, "label": label, "items": items}
     if _shared() and atc.radio().request("UndoPush", _to_json(op)) is not None:
@@ -113,6 +115,9 @@ def undo(win):
         return
     signals.changed.emit()
     kind, items, title = op["kind"], op["items"], f"Undo {op['label']}"
+    if kind == "none":
+        win.statusBar().showMessage("Can't undo that: what was replaced is gone.", 8000)
+        return
 
     def done(errors):
         win.sidebar.refresh()

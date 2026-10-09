@@ -65,7 +65,7 @@ TYPES = {
 }
 TASK_FIELDS = {"id": "str", "title": "str", "text": "str", "fraction": "num", "cancellable": "bool",
                "cancelling": "bool", "admin": "bool"}
-UNDO_KINDS = ("move", "rename", "trash", "create")
+UNDO_KINDS = ("move", "rename", "trash", "create", "none")   # none: can't be undone (items [])
 TOWER_ONLY = ("left", "open", "undo_changed")   # a flight's report of these isn't passed on
 
 

@@ -661,8 +661,9 @@ class MainWindow(FileActions, Opening, QMainWindow):
 
         single = paths[0] if len(paths) == 1 else None
         is_dir = bool(single and os.path.isdir(single))
-        in_trash = util.in_trash(paths[0])
-        if in_trash:
+        # only a selection all in the trash gets the trash's menu; a mixed one (a search, Recent, Starred) gets the
+        # usual menu, whose Move to Trash trashes the rest and asks before deleting what's already in the trash
+        if all(util.in_trash(p) for p in paths):
             m.addAction(icon("edit-undo"), "Restore", lambda: self.restore(paths))
             m.addAction(icon("edit-delete"), "Delete Permanently", lambda: self.delete_paths(paths))
             if fileops.can_shred():

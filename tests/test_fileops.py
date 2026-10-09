@@ -252,13 +252,19 @@ undo.undo(w)
 check(wait_for(lambda: bool(boxes)) and "no longer at" in boxes[-1], "undo explains what it can't put back")
 
 # a copy that replaces a file can't be undone (the old file is gone, and undoing it as a new copy would put the only
-# one left in the trash): in a batch, only the other copies are undone
+# one left in the trash): the status bar says so, Ctrl+Z only says so too (it doesn't undo the action before it), and
+# in a batch, only the other copies are undone
 undo.record("rename", "Earlier", [(P("u/earlier-a"), P("u/earlier-b"))])
 make(P("u/rep.txt"), b"new")
 make(P("u/rep-dst/rep.txt"), b"old")
 check(run_ops(w, [("copy", P("u/rep.txt"), P("u/rep-dst/rep.txt"))], "Copy")
-      and text_of(P("u/rep-dst/rep.txt")) == "new" and undo.label() == "Earlier",
-      "a copy that replaced a file isn't offered for undo")
+      and text_of(P("u/rep-dst/rep.txt")) == "new" and undo.label() == "Replace (can't be undone)"
+      and w.statusBar().currentMessage() == "Replace can't be undone: what was replaced is gone.",
+      "a copy that replaced a file isn't offered for undo, and the status bar says it can't be undone")
+undo.undo(w)
+check(undo.label() == "Earlier" and text_of(P("u/rep-dst/rep.txt")) == "new"
+      and w.statusBar().currentMessage() == "Can't undo that: what was replaced is gone.",
+      "Ctrl+Z after a replace says it can't be undone, and leaves the action before it alone")
 make(P("u/fresh.txt"), b"fresh")
 make(P("u/rep.txt"), b"newer")
 check(run_ops(w, [("copy", P("u/fresh.txt"), P("u/rep-dst/fresh.txt")), ("copy", P("u/rep.txt"), P("u/rep-dst/rep.txt"))],
@@ -309,6 +315,20 @@ check(wait_for(lambda: not os.path.lexists(P("mt/normal.txt")))
       and "Permanently delete “in-trash.txt”" in boxes[0],
       "Move to Trash on a mixed selection trashes the items outside the trash and asks only about the one in it")
 boxes[:] = earlier_boxes
+
+
+def menu_texts(paths):
+    m = w.build_menu(w.pane(), paths)
+    texts = [a.text() for a in m.actions()]
+    m.deleteLater()
+    return texts
+
+
+make(P("mt/live.txt"), b"l")
+mixed, only = menu_texts([trashed_item, P("mt/live.txt")]), menu_texts([trashed_item])
+check("Move to Trash" in mixed and "Restore" not in mixed and "Restore" in only and "Move to Trash" not in only,
+      "right-clicking a mixed selection gives the usual menu (Move to Trash), not the trash's (Restore); "
+      "a selection all in the trash gets the trash's")
 
 # ---- unique names and links
 make(P("n/a.txt"))
@@ -651,6 +671,43 @@ except Exception:
     pass
 check(os.path.islink(os.path.join(own_dest, "mine")) and not os.path.lexists(os.path.join(own_dest, "lnk")),
       "extracting into an existing folder keeps the user's own links there and drops the archive's escaping one")
+# links in folders the archive leaves read-only (555, as GNU tar applies a folder's stored mode before it exits) or
+# closed (000): they're removed too, each folder's mode is put back, and every link removed is reported (an absolute one
+# naming a place inside the folder too)
+perm_base = P("evil-perm")
+stage, perm_dest = os.path.join(perm_base, "stage"), os.path.join(perm_base, "dest")
+os.makedirs(os.path.join(stage, "ro", "sub"))
+os.makedirs(os.path.join(stage, "closed"))
+os.makedirs(perm_dest)
+os.symlink("/etc", os.path.join(stage, "ro", "abs"))
+os.symlink("../../../outside", os.path.join(stage, "ro", "sub", "up"))
+os.symlink(os.path.join(perm_dest, "ro", "sub"), os.path.join(stage, "ro", "inside"))
+os.symlink("/etc", os.path.join(stage, "closed", "abs"))
+subprocess.run(["tar", "-czf", os.path.join(perm_base, "ro.tar.gz"), "--mode=a-w", "-C", stage, "ro"], check=True)
+subprocess.run(["tar", "-czf", os.path.join(perm_base, "closed.tar.gz"), "--mode=a-rwx", "-C", stage, "closed"],
+               check=True)
+perm_dropped = []
+for name in ("ro.tar.gz", "closed.tar.gz"):
+    try:
+        archive.extract(fileops.Task("test", lambda _t: None), os.path.join(perm_base, name), perm_dest, None,
+                        "overwrite", dropped_links=perm_dropped)
+    except Exception:
+        pass
+
+
+def perm_mode(rel):
+    return stat.S_IMODE(os.lstat(os.path.join(perm_dest, rel)).st_mode)
+
+
+modes = (perm_mode("ro"), perm_mode("ro/sub"), perm_mode("closed"))
+subprocess.run(["chmod", "-R", "u+rwx", perm_dest])
+left = sorted(os.path.relpath(os.path.join(r, f), perm_dest) for r, ds, fs in os.walk(perm_dest) for f in ds + fs)
+check(modes == (0o555, 0o555, 0) and left == ["closed", "ro", "ro/sub"]
+      and sorted(perm_dropped) == sorted([("ro/abs", "/etc", None), ("ro/sub/up", "../../../outside", None),
+                                          ("ro/inside", os.path.join(perm_dest, "ro", "sub"), None),
+                                          ("closed/abs", "/etc", None)]),
+      "escaping links in folders an archive leaves read-only (555) or closed (000) are removed too, the folders' "
+      "modes are put back, and each link removed is reported (an absolute one naming a place inside too)")
 
 # -- a single compressed file (note.txt.gz → note.txt) where the destination already has a symlink named note.txt:
 # the name is replaced, never written through (a dangling link would create its target, a live one truncate it)

@@ -413,6 +413,7 @@ class _Ops:
         self.errors = []
         self.denied = []   # jobs that failed for lack of permission, to retry as administrator: (op, src, dst)
         self.completed = []   # jobs that succeeded (for undo)
+        self.replaced = self.merged = 0   # copies that replaced something and merges done: neither can be undone
         self.done = self.total = 0
         self.by_count = all(op == "delete" for op, _, _ in jobs)
 
@@ -464,7 +465,11 @@ class _Ops:
                     self._move(src, dst, merge=op == "merge_move")
                 else:
                     self._copy(src, dst, merge=op == "merge_copy")
-                if not replacing:
+                if replacing:
+                    self.replaced += 1
+                elif op in ("merge_copy", "merge_move"):
+                    self.merged += 1
+                else:
                     self.completed.append((op, src, dst))
             except Cancelled:
                 raise
@@ -770,7 +775,8 @@ def start_ops(parent, jobs, title, on_done=None, undo_label=None):
     """Copy/move/delete jobs on a thread, with progress and Cancel in the status bar. Jobs that fail for lack
     of permission can be retried as administrator. With undo_label, the moves and copies that succeed (also when
     cancelled part-way) can be undone with Ctrl+Z; merges into existing folders and copies that replaced something
-    can't (what was replaced is gone)."""
+    can't (what was replaced is gone): the status bar says so, and when nothing else in the job can be undone an entry
+    that can't be is recorded, so Ctrl+Z doesn't undo the action before it instead."""
     if not jobs:
         return
     ops = []
@@ -786,6 +792,13 @@ def start_ops(parent, jobs, title, on_done=None, undo_label=None):
                 undo.record("move", undo_label, moves)
             elif copies:
                 undo.record("create", undo_label, copies)
+            if ops[0].replaced or ops[0].merged:
+                what = "Merge" if ops[0].merged else "Replace"
+                if not moves and not copies:
+                    undo.record("none", f"{what} (can't be undone)", [])
+                win = parent.window() if parent is not None else None
+                if hasattr(win, "statusBar"):
+                    win.statusBar().showMessage(f"{what} can't be undone: what was replaced is gone.", 8000)
         if errors:
             QMessageBox.warning(parent, title, "Some items could not be processed:\n\n" + "\n".join(errors[:20]))
         if denied and errors is not None:

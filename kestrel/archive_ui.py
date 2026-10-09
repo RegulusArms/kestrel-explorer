@@ -541,6 +541,22 @@ def _collapse(out, dest_parent):
     return out
 
 
+def say_dropped_links(win, name, dropped):
+    """Tell the user which of the archive's symlinks were left out for leading outside the folder (an absolute target,
+    or one climbing out with ".."), and warn about any that couldn't be removed."""
+    removed = [f"{p} → {t}" for p, t, why in dropped if why is None]
+    stuck = [f"{p} → {t} ({why})" for p, t, why in dropped if why is not None]
+    text = ""
+    if removed:
+        text += (f"Left out {len(removed)} symbolic link{'s' if len(removed) > 1 else ''} that led outside the folder "
+                 "(an absolute target, or one climbing out with “..”):\n\n" + "\n".join(removed[:20]) + "\n\n")
+    if stuck:
+        text += ("These symbolic links lead outside the folder and couldn't be removed. Opening, copying or deleting "
+                 "through them reaches what they point to:\n\n" + "\n".join(stuck[:20]))
+    box = QMessageBox.warning if stuck else QMessageBox.information
+    box(win, f"Extracting {name}", text.strip())
+
+
 def _run_extract(win, path, opts):
     name = os.path.basename(path)
 
@@ -550,8 +566,9 @@ def _run_extract(win, path, opts):
             os.makedirs(out)
         else:
             out = opts["dest"]
+        dropped = []
         try:
-            archive.extract(task, path, out, opts["password"], opts["overwrite"])
+            archive.extract(task, path, out, opts["password"], opts["overwrite"], dropped_links=dropped)
         except archive.WrongPassword:
             if opts["subfolder"]:
                 shutil.rmtree(out, ignore_errors=True)
@@ -566,7 +583,7 @@ def _run_extract(win, path, opts):
                 util.trash(path)
             except OSError:
                 pass
-        return {"out": result}
+        return {"out": result, "dropped": dropped}
 
     def done(res):
         if res is None:  # cancelled
@@ -579,6 +596,8 @@ def _run_extract(win, path, opts):
             return
         out = res["out"]
         win.statusBar().showMessage(f"Extracted {name} to {out}", 6000)
+        if res["dropped"]:
+            say_dropped_links(win, name, res["dropped"])
         if opts["open_after"]:
             win.navigate(out)
         elif win.pane() and win.pane().dir == os.path.dirname(out):
