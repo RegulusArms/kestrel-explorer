@@ -179,6 +179,37 @@ check(copied and os.path.exists(J(W, "tree2/d1/f1")) and os.path.islink(J(W, "tr
 check(ok(h.call({"op": "move", "src": J(W, "tree2"), "dst": J(W, "tree3")}))
       and not os.path.exists(J(W, "tree2")) and os.path.exists(J(W, "tree3/d0/f0")),
       "move moves a folder")
+
+
+# the same entry as source and destination: the helper must notice (its "replace the destination" step would delete the
+# source), whatever Kestrel sends
+def contents(root):
+    """Names and file contents."""
+    out = []
+    for d, dirs, files in os.walk(root):
+        for n in dirs + files:
+            p = J(d, n)
+            out.append(os.path.relpath(p, root) + "=" + (read_file(p).decode() if os.path.isfile(p) else ""))
+    return sorted(out)
+
+
+write_file(J(W, "self.txt"), b"mine")
+tree_before = contents(J(W, "tree3"))
+h.call({"op": "move", "src": J(W, "self.txt"), "dst": J(W, "self.txt")})
+h.call({"op": "copy", "src": J(W, "self.txt"), "dst": J(W, "self.txt")})
+h.call({"op": "move", "src": J(W, "tree3"), "dst": J(W, "tree3")})
+h.call({"op": "copy", "src": J(W, "tree3"), "dst": J(W, "tree3")})
+h.call({"op": "copy", "src": J(W, "tree3"), "dst": J(W, "tree3"), "merge": True})
+check(read_file(J(W, "self.txt")) == b"mine" and tree_before and contents(J(W, "tree3")) == tree_before,
+      "moving or copying a file or folder onto itself leaves it as it was")
+into_move = h.call({"op": "move", "src": J(W, "tree3"), "dst": J(W, "tree3/d0/in")}, 10)
+into_copy = h.call({"op": "copy", "src": J(W, "tree3"), "dst": J(W, "tree3/d0/in")}, 10)
+check(into_move and not ok(into_move) and into_copy and not ok(into_copy) and contents(J(W, "tree3")) == tree_before,
+      "moving or copying a folder into itself is refused, and the folder is left as it was")
+write_file(J(W, "hl-a"), b"linked")
+os.link(J(W, "hl-a"), J(W, "hl-b"))
+h.call({"op": "move", "src": J(W, "hl-a"), "dst": J(W, "hl-b")})
+check(read_file(J(W, "hl-b")) == b"linked", "moving a file onto a hard link to it keeps the file")
 write_file(J(W, "r1"))
 check(ok(h.call({"op": "rename", "src": J(W, "r1"), "dst": J(W, "r2")})) and os.path.exists(J(W, "r2"))
       and not ok(h.call({"op": "rename", "src": J(W, "r2"), "dst": J(W, "c.txt")}))

@@ -390,11 +390,24 @@ def _run(op, req, w):
         job.remove(p.dir, p.name)
     elif op in ("copy", "move"):
         src, dst = w["src"], w["dst"]
+        merge = bool(req.get("merge"))
+        # The destination may be the source itself: the same path, a hard link to it, or the same name in another
+        # case on a drive that ignores case. Replacing it first would delete the source, so: moving a path onto
+        # itself does nothing, moving onto another name for it just renames, and anything else is refused.
+        src_st, dst_st = _stat_at(src.dir, src.name), _stat_at(dst.dir, dst.name)
+        if src_st is not None and dst_st is not None and _same_file(src_st, dst_st):
+            if op == "copy" or merge:
+                raise Failure(f"can't {op} {src.path} onto itself")
+            if src.path != dst.path:
+                os.rename(src.name, dst.name, src_dir_fd=src.dir, dst_dir_fd=dst.dir)
+            return
+        if src_st is not None and stat.S_ISDIR(src_st.st_mode) and dst.path.startswith(src.path + "/"):
+            raise Failure(f"can't {op} {src.path} into itself")
         job.total = job.count(src.dir, src.name) * (2 if op == "move" else 1)
         if op == "copy":
-            job.copy(src.dir, src.name, dst.dir, dst.name, bool(req.get("merge")))
+            job.copy(src.dir, src.name, dst.dir, dst.name, merge)
         else:
-            job.move(src, dst, bool(req.get("merge")))
+            job.move(src, dst, merge)
     elif op == "rename":
         src, dst = w["src"], w["dst"]
         if _libc.renameat2(src.dir, os.fsencode(src.name), dst.dir, os.fsencode(dst.name), RENAME_NOREPLACE) != 0:
