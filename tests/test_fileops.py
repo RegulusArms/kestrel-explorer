@@ -360,6 +360,55 @@ for ext in ("tar.gz", "zip", "7z", "rar"):
           and not os.path.lexists(os.path.join(base, "escape.txt")) and not os.path.lexists("/tmp/kestrel-evil-abs.txt"),
           label)
 
+# -- a single compressed file (note.txt.gz → note.txt) where the destination already has a symlink named note.txt:
+# the name is replaced, never written through (a dangling link would create its target, a live one truncate it)
+gz_base = P("gzlink")
+gz_dest, gz_outside = os.path.join(gz_base, "dest"), os.path.join(gz_base, "outside")
+make(os.path.join(gz_base, "note.txt"), b"new\n")
+subprocess.run(["gzip", "-k", os.path.join(gz_base, "note.txt")])
+make(os.path.join(gz_base, "bad.txt.gz"), b"not gzip at all")
+
+
+def run_extract(archive_path, overwrite):
+    try:
+        archive.extract(fileops.Task("test", lambda _t: None), archive_path, gz_dest, None, overwrite)
+        return True
+    except Exception:
+        return False
+
+
+def reset_gz(target):
+    shutil.rmtree(gz_dest, ignore_errors=True)
+    shutil.rmtree(gz_outside, ignore_errors=True)
+    os.makedirs(gz_dest)
+    os.makedirs(gz_outside)
+    if target == "keep.txt":
+        make(os.path.join(gz_outside, "keep.txt"), b"keep\n")
+    os.symlink(os.path.join(gz_outside, target), os.path.join(gz_dest, "note.txt"))
+
+
+dangling_ok = live_ok = True
+for mode in ("rename", "overwrite"):
+    reset_gz("created.txt")
+    ran = run_extract(os.path.join(gz_base, "note.txt.gz"), mode)
+    got = os.path.join(gz_dest, "note (2).txt" if mode == "rename" else "note.txt")
+    dangling_ok = (dangling_ok and ran and not os.listdir(gz_outside) and not os.path.islink(got)
+                   and text_of(got) == "new\n" and (mode == "overwrite" or os.path.islink(os.path.join(gz_dest, "note.txt"))))
+    reset_gz("keep.txt")
+    ran = run_extract(os.path.join(gz_base, "note.txt.gz"), mode)
+    live_ok = (live_ok and ran and text_of(os.path.join(gz_outside, "keep.txt")) == "keep\n"
+               and not os.path.islink(got) and text_of(got) == "new\n")
+check(dangling_ok,
+      "decompressing a single file doesn't write through a dangling symlink of that name (Keep both and Replace)")
+check(live_ok, "...or truncate the file a symlink of that name points to (Keep both and Replace)")
+shutil.rmtree(gz_dest)
+os.makedirs(gz_dest)
+make(os.path.join(gz_dest, "bad.txt"), b"old\n")
+failed = not run_extract(os.path.join(gz_base, "bad.txt.gz"), "overwrite")
+bad = os.path.join(gz_dest, "bad.txt")
+check(failed and os.path.isfile(bad) and text_of(bad) == "old\n" and os.listdir(gz_dest) == ["bad.txt"],
+      "a failed decompress leaves the file it would have replaced, and no temporary file")
+
 # -- Shred with BleachBit: `bleachbit --shred` on the chosen files and folders, and what's still there afterwards
 # reported (BleachBit reports success either way); Empty Trash with BleachBit hands it every item in the trash and its
 # record; ✕ stops it. A stand-in bleachbit here: it only touches this test's home (the trash list also has other

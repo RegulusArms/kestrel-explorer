@@ -13,6 +13,7 @@ local users could read from the process list while the job runs.
 import functools
 import os
 import re
+import secrets
 import select
 import shlex
 import shutil
@@ -663,26 +664,46 @@ def _extract_stream(task, path, dest, k, suf, overwrite, label):
         dec_argv = [tool(name), "-dc"] + (["-T0"] if name in ("xz", "zstd") else [])
     with open(path, "rb") as fi:
         if k == "single":
+            # The name itself is what gets replaced: lexists, not exists (a dangling symlink is taken), and the
+            # output goes to a new file that is then renamed over the name. Opening the name would follow a symlink
+            # there (or truncate a file hard-linked elsewhere), and a failed run would leave the old file truncated or
+            # deleted.
             out = os.path.join(dest, archive_stem(path))
-            if os.path.exists(out):
+            if os.path.lexists(out):
                 if overwrite == "skip":
                     return dest
                 if overwrite == "rename":
                     out = util.unique_path(dest, os.path.basename(out), "num")
-            with open(out, "wb") as fo:
-                dec = subprocess.Popen(dec_argv, stdin=subprocess.PIPE, stdout=fo, stderr=subprocess.PIPE,
-                                       start_new_session=True, env=_ENV)
+            while True:
+                part = os.path.join(dest, f".{os.path.basename(out)}.kes-{secrets.randbits(32):x}.part")
+                try:
+                    fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o666)
+                    break
+                except FileExistsError:
+                    continue
+            with open(fd, "wb") as fo:
+                try:
+                    dec = subprocess.Popen(dec_argv, stdin=subprocess.PIPE, stdout=fo, stderr=subprocess.PIPE,
+                                           start_new_session=True, env=_ENV)
+                except BaseException:
+                    os.unlink(part)
+                    raise
                 try:
                     _relay(task, fi, dec.stdin, total, label)
                     dec.stdin.close()
                     dec.wait()
                 except BaseException:
                     _kill(dec)
-                    os.unlink(out)
+                    os.unlink(part)
                     raise
             if dec.returncode != 0:
-                os.unlink(out)
+                os.unlink(part)
                 raise RuntimeError(_tail(dec.stderr.read().decode(errors="replace")) or "decompression failed")
+            try:
+                os.rename(part, out)
+            except BaseException:
+                os.unlink(part)
+                raise
             return dest
         policy = {"overwrite": "--overwrite", "skip": "--skip-old-files", "rename": "--backup=numbered"}[overwrite]
         tar_argv = [tool("tar"), "-xf", "-", "-C", dest, "--no-same-owner", policy]
