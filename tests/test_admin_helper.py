@@ -15,7 +15,7 @@ import subprocess
 import threading
 import time
 
-from common import ROOT, check, finish
+from common import ROOT, check, finish, skip
 
 from kestrel import admin
 
@@ -180,6 +180,30 @@ check(ok(h.call({"op": "copyfile", "src": J(W, "w.txt"), "dst": J(W, "c.txt")}))
       and read_file(J(W, "c.txt")) == b"hello"
       and not ok(h.call({"op": "copyfile", "src": J(W, "t.txt"), "dst": J(W, "c.txt")})),
       "copyfile copies a file and won't overwrite one")
+
+# what the helper makes gets the owner of the folder it's made in (run as root: the user's in their home), not the
+# helper's. Seen here through the group: a folder given another of the user's groups
+other = next((g for g in reversed(os.getgroups()) if g != os.getegid()), os.getegid())
+if other == os.getegid():
+    skip("new items get the folder's owner (the user has no other group)")
+else:
+    own, own_src = J(W, "own"), J(W, "own-src.txt")
+    os.makedirs(own, exist_ok=True)
+    os.chown(own, -1, other)
+    write_file(own_src, b"s")
+    os.chmod(own_src, 0o2755)
+    make_tree(J(W, "own-tree"), 1, 1)
+    done = (ok(h.call({"op": "copy", "src": own_src, "dst": J(own, "copy.txt")}))
+            and ok(h.call({"op": "copy", "src": J(W, "own-tree"), "dst": J(own, "tree")}))
+            and ok(h.call({"op": "mkdir", "path": J(own, "new/sub")}))
+            and ok(h.call({"op": "touch", "path": J(own, "t.txt")}))
+            and ok(h.call({"op": "write", "path": J(own, "w.txt"), "text": "w"}))
+            and ok(h.call({"op": "copyfile", "src": own_src, "dst": J(own, "cf.txt")}))
+            and ok(h.call({"op": "symlink", "target": "t.txt", "link": J(own, "l")})))
+    check(done and all(os.lstat(J(own, n)).st_gid == other for n in (
+        "copy.txt", "tree", "tree/d0", "tree/d0/f0", "new", "new/sub", "t.txt", "w.txt", "cf.txt", "l")),
+        "copies, new folders (and the parents made for them), files and links get the folder's owner")
+    check(done and mode_of(J(own, "copy.txt")) == 0o755, "a copy given another group loses its set-group-ID bit")
 
 tree = J(W, "tree")
 make_tree(tree, 2, 2)

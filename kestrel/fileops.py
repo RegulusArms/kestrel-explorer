@@ -455,6 +455,8 @@ class _Ops:
         started = stats.now_ms()
         for op, src, dst in self.jobs:
             self.task.check()
+            # a copy that replaces something can't be undone: the old item is gone, and the copy is all that's left
+            replacing = op == "copy" and os.path.lexists(dst)
             try:
                 if op == "delete":
                     self._remove(src)
@@ -462,7 +464,8 @@ class _Ops:
                     self._move(src, dst, merge=op == "merge_move")
                 else:
                     self._copy(src, dst, merge=op == "merge_copy")
-                self.completed.append((op, src, dst))
+                if not replacing:
+                    self.completed.append((op, src, dst))
             except Cancelled:
                 raise
             except PermissionError:
@@ -766,7 +769,8 @@ def retry_denied_as_admin(parent, title, denied, on_done=None):
 def start_ops(parent, jobs, title, on_done=None, undo_label=None):
     """Copy/move/delete jobs on a thread, with progress and Cancel in the status bar. Jobs that fail for lack
     of permission can be retried as administrator. With undo_label, the moves and copies that succeed (also when
-    cancelled part-way) can be undone with Ctrl+Z; merges into existing folders can't."""
+    cancelled part-way) can be undone with Ctrl+Z; merges into existing folders and copies that replaced something
+    can't (what was replaced is gone)."""
     if not jobs:
         return
     ops = []
@@ -803,6 +807,9 @@ class ConflictDialog(QDialog):
         lay = QVBoxLayout(self)
         kind = "folder" if is_dir else "file"
         lay.addWidget(QLabel(f"A {kind} named “{os.path.basename(dst)}” already exists in\n{os.path.dirname(dst)}"))
+        if is_dir:
+            lay.addWidget(QLabel("Merge puts the contents into the existing folder: files there with the same names are\n"
+                                 "replaced. A merge can't be undone."))
         self.all_box = QCheckBox("Apply this action to all conflicts")
         lay.addWidget(self.all_box)
         bb = QDialogButtonBox()

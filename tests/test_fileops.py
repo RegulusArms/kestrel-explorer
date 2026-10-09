@@ -11,11 +11,11 @@ import time
 
 from common import A, check, finish, home_path as P, setup_app, skip, spin, wait_for
 from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import QApplication, QLabel, QMessageBox
 
 from kestrel import archive, fileops, hashcheck, places, stats, undo, util
 from kestrel.archive_ui import ExtractDialog
-from kestrel.dialogs import PropertiesDialog
+from kestrel.dialogs import BatchRenameDialog, PropertiesDialog
 from gi.repository import Gio, GLib  # after kestrel, whose util picks the GLib versions
 
 boxes = []   # texts of message boxes that popped up (closed automatically)
@@ -250,6 +250,65 @@ undo.record("move", "Move", [(P("u/gone-elsewhere.txt"), P("u/missing.txt"))])
 boxes.clear()
 undo.undo(w)
 check(wait_for(lambda: bool(boxes)) and "no longer at" in boxes[-1], "undo explains what it can't put back")
+
+# a copy that replaces a file can't be undone (the old file is gone, and undoing it as a new copy would put the only
+# one left in the trash): in a batch, only the other copies are undone
+undo.record("rename", "Earlier", [(P("u/earlier-a"), P("u/earlier-b"))])
+make(P("u/rep.txt"), b"new")
+make(P("u/rep-dst/rep.txt"), b"old")
+check(run_ops(w, [("copy", P("u/rep.txt"), P("u/rep-dst/rep.txt"))], "Copy")
+      and text_of(P("u/rep-dst/rep.txt")) == "new" and undo.label() == "Earlier",
+      "a copy that replaced a file isn't offered for undo")
+make(P("u/fresh.txt"), b"fresh")
+make(P("u/rep.txt"), b"newer")
+check(run_ops(w, [("copy", P("u/fresh.txt"), P("u/rep-dst/fresh.txt")), ("copy", P("u/rep.txt"), P("u/rep-dst/rep.txt"))],
+              "Copy")
+      and undo_and_wait(w, lambda: not os.path.lexists(P("u/rep-dst/fresh.txt")))
+      and text_of(P("u/rep-dst/rep.txt")) == "newer",
+      "undoing a batch of copies leaves the one that replaced a file where it is")
+
+# ---- batch rename: a failure part-way puts every item back under its old name (a dangling symlink too, which
+# exists() wouldn't see), and a name taken meanwhile is never replaced
+os.makedirs(P("br"), exist_ok=True)
+os.symlink("/nonexistent/target", P("br/lnk"))
+make(P("br/b.txt"), b"b")
+br_dlg = BatchRenameDialog(w, [P("br/lnk"), P("br/b.txt")])
+br_dlg.tmpl.setText("[Name]-x")
+make(P("br/b-x.txt"), b"taken meanwhile")
+earlier_boxes = list(boxes)
+boxes.clear()
+br_dlg._apply()
+check(sorted(os.listdir(P("br"))) == ["b-x.txt", "b.txt", "lnk"] and os.path.islink(P("br/lnk"))
+      and text_of(P("br/b.txt")) == "b" and text_of(P("br/b-x.txt")) == "taken meanwhile" and bool(boxes),
+      "a batch rename that fails part-way puts every item back, a dangling symlink too, and replaces nothing")
+boxes[:] = earlier_boxes
+
+# ---- the conflict dialog says what Merge does to files with the same names (they're replaced, for good)
+
+
+def dialog_says(d):
+    return "".join(label.text() + "\n" for label in d.findChildren(QLabel))
+
+
+check("files there with the same names are\nreplaced. A merge can't be undone." in
+      dialog_says(fileops.ConflictDialog(w, P("dst"), True))
+      and "Merge" not in dialog_says(fileops.ConflictDialog(w, P("dst/a.txt"), False)),
+      "the conflict dialog says a merge replaces files with the same names and can't be undone")
+
+# ---- Move to Trash on a selection that holds something already in the trash: that one can only be deleted
+# permanently (it asks first: cancelled here), and the rest still goes to the trash
+make(P("mt/in-trash.txt"), b"t")
+util.trash(P("mt/in-trash.txt"))
+trashed_item = str(util.TRASH_DIR / "files" / "in-trash.txt")
+make(P("mt/normal.txt"), b"n")
+earlier_boxes = list(boxes)
+boxes.clear()
+w.trash_paths([trashed_item, P("mt/normal.txt")])
+check(wait_for(lambda: not os.path.lexists(P("mt/normal.txt")))
+      and os.path.exists(util.TRASH_DIR / "files" / "normal.txt") and os.path.exists(trashed_item) and bool(boxes)
+      and "Permanently delete “in-trash.txt”" in boxes[0],
+      "Move to Trash on a mixed selection trashes the items outside the trash and asks only about the one in it")
+boxes[:] = earlier_boxes
 
 # ---- unique names and links
 make(P("n/a.txt"))
@@ -562,6 +621,36 @@ for ext in ("tar.gz", "zip", "7z", "rar"):
     check(bool(os.listdir(os.path.join(base, "dest"))) and not os.listdir(os.path.join(base, "outside"))
           and not os.path.lexists(os.path.join(base, "escape.txt")) and not os.path.lexists("/tmp/kestrel-evil-abs.txt"),
           label)
+    escaping = False  # a symlink left in dest that leads out of it (opening it would go there)
+    dest = os.path.join(base, "dest")
+    for root, dirs, files in os.walk(dest):
+        for f in dirs + files:
+            f = os.path.join(root, f)
+            target = os.readlink(f) if os.path.islink(f) else ""
+            if target and (target.startswith("/")
+                           or not (os.path.normpath(os.path.join(os.path.dirname(f), target)) + "/").startswith(dest + "/")):
+                escaping = True
+    check(not escaping, f"a crafted {ext} archive leaves no symlink leading out of the folder it's extracted into")
+check(archive.link_escapes(0, b"../x") and archive.link_escapes(0, b"/etc") and archive.link_escapes(1, b"a/../../..")
+      and archive.link_escapes(2, b"../../../x") and not archive.link_escapes(1, b"../x")
+      and not archive.link_escapes(0, b"a/../b") and not archive.link_escapes(0, b"./a//b")
+      and not archive.link_escapes(2, b"../.."),
+      "a link target leads out of the extracted folder when it's absolute or its \"..\"s climb above it")
+# extracting into an existing folder: the user's own links there stay, also ones that lead out of it
+own_base = P("evil-own")
+own_dest = os.path.join(own_base, "dest")
+os.makedirs(own_dest, exist_ok=True)
+os.symlink("../elsewhere", os.path.join(own_dest, "mine"))
+shutil.copy(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "evil.tar.gz"),
+            os.path.join(own_base, "evil.tar.gz"))
+spin(1100)  # older than the job's start
+try:
+    archive.extract(fileops.Task("test", lambda _t: None), os.path.join(own_base, "evil.tar.gz"), own_dest, None,
+                    "overwrite")
+except Exception:
+    pass
+check(os.path.islink(os.path.join(own_dest, "mine")) and not os.path.lexists(os.path.join(own_dest, "lnk")),
+      "extracting into an existing folder keeps the user's own links there and drops the archive's escaping one")
 
 # -- a single compressed file (note.txt.gz → note.txt) where the destination already has a symlink named note.txt:
 # the name is replaced, never written through (a dangling link would create its target, a live one truncate it)

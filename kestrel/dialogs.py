@@ -1031,25 +1031,45 @@ class BatchRenameDialog(QDialog):
         self.ok.setEnabled(problems == 0)
 
     def _apply(self):
+        # Two phases, so swaps and overlaps work: every item to a hidden temporary name, then each to its new name.
+        # Names are only claimed, never replaced (put_new), so nothing that turns up meanwhile is overwritten. On a
+        # failure every item is put back under its old name (lexists: a dangling symlink is an item too), and any that
+        # can't be are named.
         names = self._new_names()
-        temps = []
+        temps = []  # (temporary, old)
+        finals = []  # the new names given so far, in temps' order
         try:
-            for p in self.paths:  # two-phase rename so swaps/overlaps work
+            for p in self.paths:
                 tmp = os.path.join(os.path.dirname(p), f".fe-rename-{os.getpid()}-{len(temps)}")
-                os.rename(p, tmp)
+                util.put_new(p, tmp)
                 temps.append((tmp, p))
             for (tmp, p), new in zip(temps, names):
-                os.rename(tmp, os.path.join(os.path.dirname(p), new))
-            from . import undo
-            undo.record("rename", f"Rename {len(names)} Items",
-                        [(p, os.path.join(os.path.dirname(p), new)) for (_, p), new in zip(temps, names) if
-                         os.path.basename(p) != new])
+                target = os.path.join(os.path.dirname(p), new)
+                util.put_new(tmp, target)
+                finals.append(target)
         except OSError as e:
+            for i in reversed(range(len(finals))):  # first free the new names: one may be another item's old name
+                if os.path.lexists(finals[i]) and not os.path.lexists(temps[i][0]):
+                    try:
+                        os.rename(finals[i], temps[i][0])
+                    except OSError:
+                        pass
+            stuck = []
             for tmp, p in temps:
-                if os.path.exists(tmp):
-                    os.rename(tmp, p)
-            QMessageBox.warning(self, "Rename", str(e))
+                if not os.path.lexists(tmp):
+                    continue
+                try:
+                    util.put_new(tmp, p)
+                except OSError:
+                    stuck.append(f"{os.path.basename(p)} is now {os.path.basename(tmp)}")
+            msg = str(e)
+            if stuck:
+                msg += "\n\nThese couldn't be put back under their old names:\n" + "\n".join(stuck)
+            QMessageBox.warning(self, "Rename", msg)
             return
+        from . import undo
+        undo.record("rename", f"Rename {len(names)} Items",
+                    [(p, target) for (_, p), new, target in zip(temps, names, finals) if os.path.basename(p) != new])
         self.accept()
 
 

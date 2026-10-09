@@ -234,7 +234,7 @@ def put_new(part, path):
             raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), path)
         os.rename(part, path)
         return
-    os.link(part, path)
+    os.link(part, path, follow_symlinks=False)  # a symlink itself, as link(2) does
     os.unlink(part)
 
 

@@ -135,6 +135,34 @@ def _trusted_link(dirfd, link):
     return link.st_uid == 0 and d.st_uid == 0 and not d.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
 
 
+class Owner:
+    """Who owns what the helper makes. A move keeps each item's owner. Anything new (a copy, a new folder, file or
+    link) gets the owner of the folder it's made in: the user's in their home, root's in /etc. Made as root, it would
+    otherwise be root's, and often of no use to the user who asked for it."""
+
+    def __init__(self, keep=False, uid=0, gid=0):
+        self.keep = keep  # each item's own (a move)
+        self.uid, self.gid = uid, gid
+
+
+def _owner_of(dirfd):
+    """The owner for something new in this folder."""
+    try:
+        st = os.fstat(dirfd)
+        return Owner(uid=st.st_uid, gid=st.st_gid)
+    except OSError:
+        return Owner(uid=os.geteuid(), gid=os.getegid())
+
+
+def _own_new(dirfd, name):
+    """Give the new `name` in dirfd (never followed if it's a symlink) the owner for that folder."""
+    o = _owner_of(dirfd)
+    try:
+        os.chown(name, o.uid, o.gid, dir_fd=dirfd, follow_symlinks=False)
+    except OSError:
+        pass
+
+
 def walk(path, make_parents=False):
     for _links in range(41):
         parts = _components(path)
@@ -149,6 +177,7 @@ def walk(path, make_parents=False):
                         raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT))
                     try:
                         os.mkdir(c, 0o777, dir_fd=dirfd)
+                        _own_new(dirfd, c)
                     except FileExistsError:
                         pass
                     st = os.stat(c, dir_fd=dirfd, follow_symlinks=False)
@@ -236,18 +265,24 @@ def _put_new(w, part):
         raise OSError(e, os.strerror(e))
 
 
-def _copy_stat_fd(fd, st, keep_owner):
-    """The permissions and times of an open file or folder (on a descriptor: never through a symlink); keep_owner
-    (a move): its owner too."""
+def _copy_stat_fd(fd, st, owner):
+    """The permissions, times and owner of an open file or folder (on a descriptor: never through a symlink)."""
     mode = stat.S_IMODE(st.st_mode)
+    uid = st.st_uid if owner.keep else owner.uid
+    gid = st.st_gid if owner.keep else owner.gid
     try:
         os.utime(fd, ns=(st.st_atime_ns, st.st_mtime_ns))
-        if keep_owner:
-            os.chown(fd, st.st_uid, st.st_gid)  # first: chown clears set-user-ID, which chmod then puts back
-        elif stat.S_ISREG(st.st_mode) and st.st_uid != os.geteuid():
-            mode &= ~(stat.S_ISUID | stat.S_ISGID)  # a copy of someone else's set-user-ID program mustn't run as us
     except OSError:
         pass
+    try:
+        os.chown(fd, uid, gid)  # first: chown clears set-user-ID, which chmod then puts back
+    except OSError:
+        pass
+    if stat.S_ISREG(st.st_mode):  # a copy of someone else's set-user/group-ID program mustn't run as its new owner
+        if st.st_uid != uid:
+            mode &= ~stat.S_ISUID
+        if st.st_gid != gid:
+            mode &= ~stat.S_ISGID
     try:
         os.chmod(fd, mode)
     except OSError:
@@ -317,7 +352,7 @@ class Job:
         else:  # a file or a symlink: the name itself
             os.unlink(name, dir_fd=dirfd)
 
-    def copy(self, src_dir, src, dst_dir, dst, merge, keep_owner=False, staged=False):
+    def copy(self, src_dir, src, dst_dir, dst, merge, owner, staged=False):
         """Copy src (in src_dir) to dst (in dst_dir). Whatever is made is built under a hidden _part_name() beside
         dst and put in its place only when complete (install), so a failure, a cancel or the session ending leaves
         dst as it was and no half-made copy. Only a merge writes into an existing folder (each file in it still
@@ -334,8 +369,9 @@ class Job:
                 dst_fd = _open_dir_at(dst_dir, dst, dst_st)
                 try:
                     for e in os.listdir(src_fd):
-                        self.copy(src_fd, e, dst_fd, e, merge, keep_owner)
-                    _copy_stat_fd(dst_fd, st, keep_owner)
+                        self.copy(src_fd, e, dst_fd, e, merge, owner)
+                    # a copy leaves the folder's owner as it was
+                    _copy_stat_fd(dst_fd, st, Owner(owner.keep, dst_st.st_uid, dst_st.st_gid))
                 finally:
                     os.close(dst_fd)
             finally:
@@ -351,8 +387,8 @@ class Job:
                 made = True
                 try:
                     os.utime(part, ns=(st.st_atime_ns, st.st_mtime_ns), dir_fd=dst_dir, follow_symlinks=False)
-                    if keep_owner:
-                        os.chown(part, st.st_uid, st.st_gid, dir_fd=dst_dir, follow_symlinks=False)
+                    os.chown(part, st.st_uid if owner.keep else owner.uid, st.st_gid if owner.keep else owner.gid,
+                             dir_fd=dst_dir, follow_symlinks=False)
                 except OSError:
                     pass
             elif stat.S_ISDIR(st.st_mode):
@@ -363,8 +399,8 @@ class Job:
                     dst_fd = _open_dir_at(dst_dir, part, os.stat(part, dir_fd=dst_dir, follow_symlinks=False))
                     try:
                         for e in os.listdir(src_fd):
-                            self.copy(src_fd, e, dst_fd, e, False, keep_owner, staged=True)
-                        _copy_stat_fd(dst_fd, st, keep_owner)
+                            self.copy(src_fd, e, dst_fd, e, False, owner, staged=True)
+                        _copy_stat_fd(dst_fd, st, owner)
                     finally:
                         os.close(dst_fd)
                 finally:
@@ -383,7 +419,7 @@ class Job:
                     made = True
                     try:
                         self.copy_bytes(in_fd, out_fd, src)
-                        _copy_stat_fd(out_fd, st, keep_owner)
+                        _copy_stat_fd(out_fd, st, owner)
                         if dst_st is not None:   # replacing something: on disk before the rename
                             os.fsync(out_fd)
                     finally:
@@ -492,7 +528,7 @@ class Job:
                 return
             if e == errno.EEXIST:
                 raise Failure(f"{dst.name} appeared while it was being replaced")
-        self.copy(src.dir, src.name, dst.dir, dst.name, merge, keep_owner=True)  # a move keeps the owner
+        self.copy(src.dir, src.name, dst.dir, dst.name, merge, Owner(keep=True))
         self.remove(src.dir, src.name)
 
 
@@ -536,7 +572,7 @@ def _run(op, req, w):
         # progress: every item, and the bytes copied; a move then deletes the items
         job.total = job.count(src.dir, src.name, True) + (job.count(src.dir, src.name) if op == "move" else 0)
         if op == "copy":
-            job.copy(src.dir, src.name, dst.dir, dst.name, merge)
+            job.copy(src.dir, src.name, dst.dir, dst.name, merge, _owner_of(dst.dir))
         else:
             job.move(src, dst, merge)
     elif op == "rename":
@@ -552,8 +588,10 @@ def _run(op, req, w):
             os.rename(src.name, dst.name, src_dir_fd=src.dir, dst_dir_fd=dst.dir)
     elif op == "mkdir":  # the parents were made by walk(); the last one must be new
         os.mkdir(w["path"].name, 0o777, dir_fd=w["path"].dir)
+        _own_new(w["path"].dir, w["path"].name)
     elif op == "touch":
         os.close(_open_new_file(w["path"]))
+        _own_new(w["path"].dir, w["path"].name)
     elif op == "copyfile":
         src, dst = w["src"], w["dst"]
         if _stat_at(dst.dir, dst.name) is not None:
@@ -564,6 +602,11 @@ def _run(op, req, w):
             try:
                 try:
                     job.copy_bytes(in_fd, out_fd, src.path)
+                    o = _owner_of(dst.dir)
+                    try:
+                        os.fchown(out_fd, o.uid, o.gid)
+                    except OSError:
+                        pass
                     os.fchmod(out_fd, 0o644)
                 finally:
                     os.close(out_fd)
@@ -575,6 +618,7 @@ def _run(op, req, w):
             os.close(in_fd)
     elif op == "symlink":
         os.symlink(req["target"], w["link"].name, dir_fd=w["link"].dir)
+        _own_new(w["link"].dir, w["link"].name)
     elif op == "hardlink":
         # the file itself, opened without following a symlink: its owner is checked, and that same file is linked
         # (through /proc/self/fd), so it can't be swapped for another between the check and the link
@@ -593,6 +637,11 @@ def _run(op, req, w):
         fd, part = _open_part(p.dir)
         try:
             try:
+                o = _owner_of(p.dir)
+                try:
+                    os.fchown(fd, o.uid, o.gid)  # before the chmod: chown clears set-user-ID
+                except OSError:
+                    pass
                 view = memoryview(req["text"].encode())
                 while view:
                     view = view[os.write(fd, view):]

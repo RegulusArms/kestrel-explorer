@@ -10,6 +10,7 @@ bytes Kestrel pipes through them, Cancel kills the whole process group, and part
 Passwords go to 7z on stdin. unrar, rar and zpaq only accept them as a command-line switch, which other
 local users could read from the process list while the job runs.
 """
+import contextlib
 import functools
 import os
 import re
@@ -17,6 +18,7 @@ import select
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import time
 
@@ -673,14 +675,93 @@ def _extract_command(path, dest, password, overwrite, threads):
 
 
 @_job_clock
+def link_escapes(depth, target):
+    """A symlink target (bytes) that leads out of the folder an archive is extracted into: an absolute one, or one
+    whose ".."s climb above it. depth: how many folders below that folder the link is."""
+    if target.startswith(b"/"):
+        return True
+    for c in target.split(b"/"):
+        if c == b"..":
+            depth -= 1
+            if depth < 0:
+                return True
+        elif c and c != b".":
+            depth += 1
+    return False
+
+
+def _drop_escaping_links(dirfd, depth, since_ns):
+    """The symlinks in an open folder (and the folders below it, on the same drive) changed since since_ns that
+    link_escapes(), removed."""
+    try:
+        here = os.fstat(dirfd)
+        names = os.listdir(dirfd)
+    except OSError:
+        return
+    subdirs = []
+    for n in names:
+        try:
+            st = os.stat(n, dir_fd=dirfd, follow_symlinks=False)
+        except OSError:
+            continue
+        if stat.S_ISDIR(st.st_mode) and st.st_dev == here.st_dev:
+            subdirs.append(n)
+        elif stat.S_ISLNK(st.st_mode) and st.st_ctime_ns >= since_ns:
+            try:
+                if link_escapes(depth, os.fsencode(os.readlink(n, dir_fd=dirfd))):
+                    os.unlink(n, dir_fd=dirfd)
+            except OSError:
+                pass
+    for n in subdirs:
+        try:
+            sub = os.open(n, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dirfd)
+        except OSError:
+            continue
+        try:
+            _drop_escaping_links(sub, depth + 1, since_ns)
+        finally:
+            os.close(sub)
+
+
+@contextlib.contextmanager
+def _escaping_link_sweep(dest, tool_name):
+    """GNU tar and UnZip make an archive's symlinks as they are, also ones that lead out of the destination (7-Zip
+    and unrar leave those out), and Kestrel follows a link like any other folder or file: opening, copying or deleting
+    "inside" the extracted folder would reach whatever it points to. So once they're done (also after a failure or a
+    cancel), the escaping links they made are removed: only links changed since the job started (a link's ctime can't
+    be set back), so the user's own links in an existing folder stay."""
+    since_ns = time.time_ns() - 1_000_000_000  # the filesystem's clock can lag a little behind
+    try:
+        yield
+    finally:
+        if tool_name in ("tar", "unzip"):
+            try:
+                fd = os.open(dest, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            except OSError:
+                fd = None
+            if fd is not None:
+                try:
+                    _drop_escaping_links(fd, 0, since_ns)
+                finally:
+                    os.close(fd)
+
+
 def extract(task, path, dest, password=None, overwrite="rename", threads=0):
     """Extract `path` into the existing folder `dest`. Raises WrongPassword, RuntimeError or Cancelled."""
     path = first_volume(path)
     k, suf = kind(path)
     label = f"Extracting {os.path.basename(path)}"
-    if k in ("tar", "single"):
+    if k == "tar":
+        with _escaping_link_sweep(dest, "tar"):
+            return _extract_stream(task, path, dest, k, suf, overwrite, label)
+    if k == "single":
         return _extract_stream(task, path, dest, k, suf, overwrite, label)
     t, argv, stdin, env = _extract_command(path, dest, password, overwrite, threads)
+    with _escaping_link_sweep(dest, t):
+        return _extract_run(task, t, argv, stdin, env, label, dest)
+
+
+def _extract_run(task, t, argv, stdin, env, label, dest):
     rc, text = _run_reporting(task, argv, label, stdin_text=stdin,
                               progress=None if t == "unzip" else "percent", env=env)  # unzip's % are ratios
     wrong = (t == "unrar" and rc == 11) or "Wrong password" in text or "password incorrect" in text or \

@@ -202,13 +202,13 @@ class FileActions:
                 undo.record("rename", "Rename", [(paths[0], target)])
                 renamed()
 
-    def trash_paths(self, paths):
+    def trash_paths(self, selected):
+        # what's already in the trash can only be deleted permanently (delete_paths asks first); the rest goes to the
+        # trash. A selection can hold both (a search, Recent, Starred).
+        paths = [p for p in selected if not util.in_trash(p)]
+        self.delete_paths([p for p in selected if util.in_trash(p)])
         if not paths:
             return
-        if util.in_trash(paths[0]):
-            self.delete_paths(paths)
-            return
-        paths = list(paths)
         trashed = []
 
         def work(task):
