@@ -1,5 +1,7 @@
 # Kestrel Explorer
 
+> **Note:** This Python version is no longer linked to the C++ version, [kes-c](https://github.com/RegulusArms/kes-c). The two were feature-identical up to 0.3.0-alpha9 and are now developed separately. Treat this one as a lightweight demo of the Kestrel program.
+
 **Version 0.3.0-alpha9.** This is an early alpha release, so expect rough edges.
 
 > **Why do Linux users still need five separate utilities and a terminal to do normal filesystem work?**
