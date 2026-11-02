@@ -1,6 +1,6 @@
 # Kestrel Explorer
 
-> **Note:** This Python version is no longer linked to the C++ version, [kes-c](https://github.com/RegulusArms/kes-c). The two were feature-identical up to 0.3.0-alpha9 and are now developed separately. Treat this one as a lightweight demo of the Kestrel program.
+> **Deprecated:** This Python version is no longer developed. All development now happens in the C++ version, [kes-c](https://github.com/RegulusArms/kes-c). The two were feature-identical up to 0.3.0-alpha9.
 
 **Version 0.3.0-alpha9.** This is an early alpha release, so expect rough edges.
 
