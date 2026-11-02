@@ -14,13 +14,6 @@ for t in "${TESTS[@]}"; do
     [[ " ${ALL[*]} " == *" $t "* ]] || { echo "Unknown test: $t (tests: ${ALL[*]})" >&2; exit 2; }
 done
 
-# the C++ version, if it's built next to this project, joins the cross-version checks in atc_tabs
-# (KESTREL_BUILD_DIR: the name of its build folder, when another machine shares these folders)
-KES_CXX=""
-CXX_BUILD="$ROOT/../kes-c/${KESTREL_BUILD_DIR:-build}"
-[[ -x "$CXX_BUILD/kes" ]] && KES_CXX="$(cd "$CXX_BUILD" && pwd)/kes"
-export KES_CXX
-
 failed=()
 for t in "${TESTS[@]}"; do
     echo

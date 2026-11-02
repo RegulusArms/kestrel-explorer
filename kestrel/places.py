@@ -82,7 +82,7 @@ def set_starred(paths, on):
     _starred = current
     try:
         STARRED_FILE.parent.mkdir(parents=True, exist_ok=True)
-        STARRED_FILE.write_text(json.dumps(current, indent=1))
+        util.write_atomic(STARRED_FILE, json.dumps(current, indent=1))
     except OSError:
         pass
     signals.starred_changed.emit()
@@ -171,14 +171,13 @@ def add_recent(paths):
                                     {"name": util.APP_NAME, "exec": f"'{util.APP_COMMAND} %u'", "count": "0"})
             app.set("modified", now)
             app.set("count", str(int(app.get("count", "0") or 0) + 1))
-    tmp = RECENT_FILE + ".kestrel-tmp"
-    try:
+    try:   # in one step, private (it lists the files you've opened)
         os.makedirs(os.path.dirname(RECENT_FILE), exist_ok=True)
-        tree.write(tmp, encoding="UTF-8", xml_declaration=True)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, RECENT_FILE)
+
+        def fill(fd):
+            os.fchmod(fd, 0o600)
+            with os.fdopen(os.dup(fd), "wb") as f:
+                tree.write(f, encoding="UTF-8", xml_declaration=True)
+        util.write_parts(RECENT_FILE, fill, sync=True)
     except OSError:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+        pass

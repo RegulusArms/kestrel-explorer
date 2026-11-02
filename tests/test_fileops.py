@@ -1,19 +1,22 @@
 """File operations: copy, move, merge, replace, delete, cancel, trash, links, unique names, and undoing them."""
 import ctypes
 import os
+import resource
 import shutil
+import signal
 import stat
 import subprocess
 import threading
 import time
 
 from common import A, check, finish, home_path as P, setup_app, skip, spin, wait_for
-from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtWidgets import QApplication, QLabel, QMessageBox
 
 from kestrel import archive, fileops, hashcheck, places, stats, undo, util
 from kestrel.archive_ui import ExtractDialog
-from kestrel.dialogs import PropertiesDialog
+from kestrel.dialogs import BatchRenameDialog, PropertiesDialog
+from gi.repository import Gio, GLib  # after kestrel, whose util picks the GLib versions
 
 boxes = []   # texts of message boxes that popped up (closed automatically)
 
@@ -25,8 +28,12 @@ def make(path, data=b"x"):
 
 
 def text_of(path):
-    with open(path, encoding="utf-8") as f:
-        return f.read()
+    """The file's text; "" if it's missing (as in the C++ tests)."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
 
 
 def run_ops(w, jobs, undo_label=None, task_out=None):
@@ -116,18 +123,120 @@ check(run_ops(w, [("delete", P("link-to-tree"), None)]) and not os.path.lexists(
 
 # ---- cancel
 BIG = 6 * 1024 * 1024   # more than one 4 MB chunk, so a file can be cancelled half-way
+LONG = 48 << 20   # the cancel test's files (sparse): long enough to be cut off part-way
 for i in range(24):
-    make(P(f"big/f{i:02d}.bin"), bytes([97 + i]) * BIG)
+    make(P(f"big/f{i:02d}.bin"), bytes([97 + i]))
+    os.truncate(P(f"big/f{i:02d}.bin"), LONG)
 state = {"gone": False}
 t = fileops.start_ops(w, [("copy", P("big"), P("big2"))], "Test")
 t.finished.connect(lambda: state.__setitem__("gone", True))
-# at once: on a fast disk (the test's home is in /tmp, often in memory) the whole copy can finish before the first
-# progress report arrives
-t.cancel()
-check(wait_for(lambda: state["gone"], 10000), "a cancelled copy stops")
-copied = os.listdir(P("big2")) if os.path.isdir(P("big2")) else []
-check(len(copied) < 24, f"cancel: stops part-way ({len(copied)} of 24 copied)")
-check(all(os.path.getsize(os.path.join(P("big2"), f)) == BIG for f in copied), "cancel: no half-copied file is left behind")
+# on the copying thread itself, at its first report on a file (reports come at most every 80 ms): a cancel in the
+# middle of copying, never before it starts or after it's done
+cut = threading.Event()
+
+
+def cut_once(_f, text):
+    if text.endswith(".bin") and not cut.is_set():
+        cut.set()
+        t.cancel()
+
+
+t.progress.connect(cut_once, Qt.ConnectionType.DirectConnection)
+check(wait_for(lambda: state["gone"], 20000), "a cancelled copy stops")
+copied = os.listdir(P("big2")) if os.path.isdir(P("big2")) else []  # hidden part files too
+check(cut.is_set() and len(copied) < 24, f"cancel: stops part-way ({len(copied)} of 24 copied)")
+check(cut.is_set() and all(os.path.getsize(os.path.join(P("big2"), f)) == LONG for f in copied)
+      and not any(n.startswith(".kes-") for n in os.listdir(P(""))),  # the folder being built beside it
+      "cancel: no half-copied file is left behind")
+shutil.rmtree(P("big2"), ignore_errors=True)
+
+# -- replacing a file: the old one stays until the new one is complete (a cancel or an error keeps it); a symlink in the
+# way is replaced, not written through; another hard link of the old file keeps its contents
+os.makedirs(P("rep"), exist_ok=True)
+
+
+def leftovers():
+    """Temporary files left in rep/."""
+    return [n for n in os.listdir(P("rep")) if n.startswith(".kes-")]
+
+
+make(P("rep/new.bin"), b"new")
+os.truncate(P("rep/new.bin"), 1 << 30)   # 1 GB (sparse): long enough to cancel
+make(P("rep/report.txt"), b"precious")
+rep_state = {}
+rt = fileops.start_ops(w, [("copy", P("rep/new.bin"), P("rep/report.txt"))], "Test", lambda: None)
+# on the copying thread itself, as soon as the copy reports progress on this file: a cancel half-way through
+rt.progress.connect(lambda _f, text: text.endswith("new.bin") and rt.cancel(), Qt.ConnectionType.DirectConnection)
+rt.finished.connect(lambda: rep_state.__setitem__("gone", True))
+wait_for(lambda: rep_state.get("gone"), 20000)
+check(text_of(P("rep/report.txt")) == "precious" and not leftovers(),
+      "replacing a file and cancelling part-way keeps the original, and leaves no temporary file")
+
+make(P("rep/big.bin"), b"b" * BIG)
+make(P("rep/keep.txt"), b"precious")
+old_lim = resource.getrlimit(resource.RLIMIT_FSIZE)
+old_handler = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+resource.setrlimit(resource.RLIMIT_FSIZE, (1 << 20, old_lim[1]))   # writes past 1 MB fail (EFBIG)
+try:
+    run_ops(w, [("copy", P("rep/big.bin"), P("rep/keep.txt"))])
+finally:
+    resource.setrlimit(resource.RLIMIT_FSIZE, old_lim)
+    signal.signal(signal.SIGXFSZ, old_handler)
+check(text_of(P("rep/keep.txt")) == "precious" and not leftovers(),
+      "a copy that fails part-way (a write error) keeps the file it would have replaced, and leaves nothing "
+      "half-written")
+
+make(P("rep/outside.txt"), b"outside")
+os.symlink(P("rep/outside.txt"), P("rep/to-outside"))
+make(P("rep/linked.txt"), b"old")
+os.link(P("rep/linked.txt"), P("rep/other-link.txt"))
+make(P("rep/small.txt"), b"new")
+run_ops(w, [("copy", P("rep/small.txt"), P("rep/to-outside")), ("copy", P("rep/small.txt"), P("rep/linked.txt"))])
+check(not os.path.islink(P("rep/to-outside")) and text_of(P("rep/to-outside")) == "new"
+      and text_of(P("rep/outside.txt")) == "outside" and text_of(P("rep/linked.txt")) == "new"
+      and text_of(P("rep/other-link.txt")) == "old" and not leftovers(),
+      "replacing a symlink replaces the link, not its target; another hard link of a replaced file keeps its "
+      "contents")
+# folders: the new one is built beside the old one and swapped in whole
+make(P("rep/newdir/a.txt"), b"a")
+make(P("rep/newdir/huge"), b"x")
+os.truncate(P("rep/newdir/huge"), 1 << 30)
+make(P("rep/olddir/keep.txt"), b"keep")
+
+
+def old_intact():
+    return os.listdir(P("rep/olddir")) == ["keep.txt"] and text_of(P("rep/olddir/keep.txt")) == "keep"
+
+
+dir_state = {}
+dt = fileops.start_ops(w, [("copy", P("rep/newdir"), P("rep/olddir"))], "Test", lambda: None)
+dt.progress.connect(lambda _f, text: text.endswith("huge") and dt.cancel(), Qt.ConnectionType.DirectConnection)
+dt.finished.connect(lambda: dir_state.__setitem__("gone", True))
+wait_for(lambda: dir_state.get("gone"), 20000)
+check(old_intact() and not leftovers(),
+      "replacing a folder and cancelling part-way keeps the old folder as it was, and leaves no half-made copy")
+os.truncate(P("rep/newdir/huge"), BIG)
+old_lim = resource.getrlimit(resource.RLIMIT_FSIZE)
+old_handler = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+resource.setrlimit(resource.RLIMIT_FSIZE, (1 << 20, old_lim[1]))
+try:
+    run_ops(w, [("copy", P("rep/newdir"), P("rep/olddir"))])
+finally:
+    resource.setrlimit(resource.RLIMIT_FSIZE, old_lim)
+    signal.signal(signal.SIGXFSZ, old_handler)
+check(old_intact() and not leftovers(),
+      "a folder copy that fails part-way (a write error) keeps the folder it would have replaced")
+os.truncate(P("rep/newdir/huge"), 10)
+make(P("rep/mvsrc/moved.txt"), b"moved")
+make(P("rep/mvdst/old.txt"), b"old")
+replaced = run_ops(w, [("copy", P("rep/newdir"), P("rep/olddir")), ("move", P("rep/mvsrc"), P("rep/mvdst"))])
+check(replaced and len(os.listdir(P("rep/olddir"))) == 2 and os.path.lexists(P("rep/olddir/huge"))
+      and not os.path.lexists(P("rep/olddir/keep.txt")) and not os.path.lexists(P("rep/mvsrc"))
+      and os.listdir(P("rep/mvdst")) == ["moved.txt"] and not leftovers(),
+      "copying or moving a folder onto another replaces it whole: the old contents are gone, nothing is left "
+      "behind")
+shutil.rmtree(P("rep"))
+boxes.clear()
 
 # ---- trash
 make(P("t/gone.txt"), b"trash me")
@@ -156,6 +265,85 @@ boxes.clear()
 undo.undo(w)
 check(wait_for(lambda: bool(boxes)) and "no longer at" in boxes[-1], "undo explains what it can't put back")
 
+# a copy that replaces a file can't be undone (the old file is gone, and undoing it as a new copy would put the only
+# one left in the trash): the status bar says so, Ctrl+Z only says so too (it doesn't undo the action before it), and
+# in a batch, only the other copies are undone
+undo.record("rename", "Earlier", [(P("u/earlier-a"), P("u/earlier-b"))])
+make(P("u/rep.txt"), b"new")
+make(P("u/rep-dst/rep.txt"), b"old")
+check(run_ops(w, [("copy", P("u/rep.txt"), P("u/rep-dst/rep.txt"))], "Copy")
+      and text_of(P("u/rep-dst/rep.txt")) == "new" and undo.label() == "Replace (can't be undone)"
+      and w.statusBar().currentMessage() == "Replace can't be undone: what was replaced is gone.",
+      "a copy that replaced a file isn't offered for undo, and the status bar says it can't be undone")
+undo.undo(w)
+check(undo.label() == "Earlier" and text_of(P("u/rep-dst/rep.txt")) == "new"
+      and w.statusBar().currentMessage() == "Can't undo that: what was replaced is gone.",
+      "Ctrl+Z after a replace says it can't be undone, and leaves the action before it alone")
+make(P("u/fresh.txt"), b"fresh")
+make(P("u/rep.txt"), b"newer")
+check(run_ops(w, [("copy", P("u/fresh.txt"), P("u/rep-dst/fresh.txt")), ("copy", P("u/rep.txt"), P("u/rep-dst/rep.txt"))],
+              "Copy")
+      and undo_and_wait(w, lambda: not os.path.lexists(P("u/rep-dst/fresh.txt")))
+      and text_of(P("u/rep-dst/rep.txt")) == "newer",
+      "undoing a batch of copies leaves the one that replaced a file where it is")
+
+# ---- batch rename: a failure part-way puts every item back under its old name (a dangling symlink too, which
+# exists() wouldn't see), and a name taken meanwhile is never replaced
+os.makedirs(P("br"), exist_ok=True)
+os.symlink("/nonexistent/target", P("br/lnk"))
+make(P("br/b.txt"), b"b")
+br_dlg = BatchRenameDialog(w, [P("br/lnk"), P("br/b.txt")])
+br_dlg.tmpl.setText("[Name]-x")
+make(P("br/b-x.txt"), b"taken meanwhile")
+earlier_boxes = list(boxes)
+boxes.clear()
+br_dlg._apply()
+check(sorted(os.listdir(P("br"))) == ["b-x.txt", "b.txt", "lnk"] and os.path.islink(P("br/lnk"))
+      and text_of(P("br/b.txt")) == "b" and text_of(P("br/b-x.txt")) == "taken meanwhile" and bool(boxes),
+      "a batch rename that fails part-way puts every item back, a dangling symlink too, and replaces nothing")
+boxes[:] = earlier_boxes
+
+# ---- the conflict dialog says what Merge does to files with the same names (they're replaced, for good)
+
+
+def dialog_says(d):
+    return "".join(label.text() + "\n" for label in d.findChildren(QLabel))
+
+
+check("files there with the same names are\nreplaced. A merge can't be undone." in
+      dialog_says(fileops.ConflictDialog(w, P("dst"), True))
+      and "Merge" not in dialog_says(fileops.ConflictDialog(w, P("dst/a.txt"), False)),
+      "the conflict dialog says a merge replaces files with the same names and can't be undone")
+
+# ---- Move to Trash on a selection that holds something already in the trash: that one can only be deleted
+# permanently (it asks first: cancelled here), and the rest still goes to the trash
+make(P("mt/in-trash.txt"), b"t")
+util.trash(P("mt/in-trash.txt"))
+trashed_item = str(util.TRASH_DIR / "files" / "in-trash.txt")
+make(P("mt/normal.txt"), b"n")
+earlier_boxes = list(boxes)
+boxes.clear()
+w.trash_paths([trashed_item, P("mt/normal.txt")])
+check(wait_for(lambda: not os.path.lexists(P("mt/normal.txt")))
+      and os.path.exists(util.TRASH_DIR / "files" / "normal.txt") and os.path.exists(trashed_item) and bool(boxes)
+      and "Permanently delete “in-trash.txt”" in boxes[0],
+      "Move to Trash on a mixed selection trashes the items outside the trash and asks only about the one in it")
+boxes[:] = earlier_boxes
+
+
+def menu_texts(paths):
+    m = w.build_menu(w.pane(), paths)
+    texts = [a.text() for a in m.actions()]
+    m.deleteLater()
+    return texts
+
+
+make(P("mt/live.txt"), b"l")
+mixed, only = menu_texts([trashed_item, P("mt/live.txt")]), menu_texts([trashed_item])
+check("Move to Trash" in mixed and "Restore" not in mixed and "Restore" in only and "Move to Trash" not in only,
+      "right-clicking a mixed selection gives the usual menu (Move to Trash), not the trash's (Restore); "
+      "a selection all in the trash gets the trash's")
+
 # ---- unique names and links
 make(P("n/a.txt"))
 check(util.unique_path(P("n"), "a.txt") == P("n/a (copy).txt"), "a copy's name: \"a (copy).txt\"")
@@ -172,6 +360,73 @@ hard = fileops.make_link(fileops.link_plan("hard", P("n/a.txt"), P("dst")))
 check(os.stat(hard).st_ino == os.stat(P("n/a.txt")).st_ino, "hard link")
 same = fileops.make_link(fileops.link_plan("sym", P("n/a.txt"), P("n")))
 check(os.path.basename(same).startswith("Link to a"), "a link in the same folder is named \"Link to …\"")
+
+# -- desktop shortcuts to items whose names hold quotes, $, `, \, % and line breaks that try to add keys of their own
+# (GLib keeps the last of a repeated key): the shortcut must still name and open exactly that item
+evil = "\"q\" $HOME `id` \\b %f %%\nExec=touch PWNED\nType=Application\n"
+sc, sc_out = P("sc"), P("sc/out")
+sc_dir, marker = os.path.join(sc, "d " + evil), P("sc-ran")
+os.makedirs(sc_out, exist_ok=True)
+os.makedirs(sc_dir, exist_ok=True)
+script, doc = os.path.join(sc_dir, "run " + evil + ".sh"), os.path.join(sc_dir, "doc " + evil + ".txt")
+make(script, f"#!/bin/sh\nprintf '%s\\n' \"$#\" \"$0\" > '{marker}'\n".encode())
+os.chmod(script, 0o755)
+make(doc, b"doc")
+
+
+def read_shortcut(path):
+    """The shortcut as GLib reads it, and the keys written (each once)."""
+    keys = [line.split("=", 1)[0] for line in text_of(path).split("\n") if "=" in line]
+    kf = GLib.KeyFile()
+    values = {}
+    try:
+        kf.load_from_file(path, GLib.KeyFileFlags.NONE)
+        names, _n = kf.get_keys("Desktop Entry")
+        values = {k: kf.get_string("Desktop Entry", k) for k in names}
+    except GLib.Error:
+        pass
+    return values, keys
+
+
+made = [fileops.make_link(fileops.link_plan("desktop", t, sc_out)) for t in (script, doc, sc_dir)]
+(appv, app_keys), (docv, doc_keys), (dirv, dir_keys) = (read_shortcut(m) for m in made)
+check(app_keys == ["Type", "Name", "Exec", "Path", "Icon", "Terminal"] and appv.get("Type") == "Application"
+      and appv.get("Name") == os.path.basename(script) and appv.get("Path") == sc_dir
+      and doc_keys == ["Type", "Name", "URL", "Icon"] and docv.get("Type") == "Link"
+      and docv.get("Name") == os.path.basename(doc) and util.uri_to_path(docv.get("URL", "")) == doc
+      and dir_keys == doc_keys and dirv.get("Type") == "Link" and util.uri_to_path(dirv.get("URL", "")) == sc_dir,
+      "a desktop shortcut keeps an item's name and path whole, whatever they hold (quotes, $, `, \\, %, line "
+      "breaks), and adds no keys")
+if not shutil.which("desktop-file-validate"):
+    skip("desktop-file-validate accepts the shortcuts (it isn't installed)")
+else:
+    complaints = ""
+    for m in made:
+        r = subprocess.run(["desktop-file-validate", m], capture_output=True, text=True)
+        if r.returncode != 0:
+            complaints += r.stdout + r.stderr
+    check(not complaints,
+          "desktop-file-validate accepts the shortcuts" + (" " + complaints.strip() if complaints else ""))
+ctl = os.path.join(sc, "bell\x07.txt")
+make(ctl, b"x")
+try:
+    fileops.link_plan("desktop", ctl, sc_out)
+    refused = False
+except RuntimeError:
+    refused = True
+check(refused, "a shortcut to an item whose name holds other control characters is refused")
+cwd = os.getcwd()
+os.chdir(sc)   # where an injected relative command would land
+try:
+    info = Gio.DesktopAppInfo.new_from_filename(made[0])
+    launched = bool(info and info.launch([], None))
+except (GLib.Error, TypeError):   # TypeError: GLib couldn't read the file
+    launched = False
+wait_for(lambda: os.path.exists(marker), 5000)
+os.chdir(cwd)
+pwned = any("PWNED" in files for _root, _dirs, files in os.walk(util.HOME))
+check(launched and text_of(marker) == "0\n" + script + "\n" and not pwned,
+      "opening the program's shortcut runs that program alone, with no arguments, and nothing else")
 check(A.location_arg("trash:///") == str(util.TRASH_DIR / "files") and A.location_arg("recent:///") == places.RECENT,
       "trash:/// and recent:/// from other apps open the right places")
 check(len(boxes) == 1, f"no error boxes besides that one ({' | '.join(boxes)})")
@@ -276,6 +531,47 @@ for file, sums in (("hello.txt", "CHECKSUM"), ("changed.txt", "MD5SUMS"), ("hell
 check(said[0] == "✔ Matches (SHA256)." and said[1] == "✘ Doesn't match (MD5)." and "isn't a checksum file" in said[2],
       f"Properties' Checksums tab checks a file against a chosen checksum file ({' | '.join(said)})")
 
+# -- making checksum files (Create Checksum File…)
+make(P("mk/a.txt"), b"alpha\n")
+make(P("mk/back\\slash.txt"), b"back\n")
+make(P("mk/sub/inner.txt"), b"inner\n")
+make(P("mk/sub/deep/z.txt"), b"zed\n")
+mk_paths = [P("mk/a.txt"), P("mk/back\\slash.txt"), P("mk/sub")]
+
+
+def all_ok(sums):
+    return [f"{e.name}:{e.algo}:{hashcheck.verify(e).status}" for e in hashcheck.parse(sums)]
+
+
+errs = []
+made = hashcheck.create(None, mk_paths, P("mk"), "set", list(hashcheck.CREATE_ALGORITHMS), False, errs)
+listed = "a.txt:{0}:ok,back\\slash.txt:{0}:ok,sub/inner.txt:{0}:ok,sub/deep/z.txt:{0}:ok"
+check(",".join(os.path.basename(m) for m in made) == "set.sfv,set.md5,set.sha1,set.sha256,set.sha512,set.b2"
+      and not errs and all(",".join(all_ok(m)) == listed.format(a) for m, a in zip(made, hashcheck.CREATE_ALGORITHMS)),
+      "Create Checksum File makes one file per algorithm (md5sum's format, SFV for CRC32) that verify as "
+      "OK, with the files inside folders")
+made = hashcheck.create(None, mk_paths, P("mk"), "set", list(hashcheck.CREATE_ALGORITHMS), True, errs)
+bsd_lines = all_ok(P("mk/set-CHECKSUM"))
+bsd_ok = (made == [P("mk/set-CHECKSUM")] and len(bsd_lines) == 24 and all(x.endswith(":ok") for x in bsd_lines)
+          and "\\SHA256 (back\\\\slash.txt) = " in text_of(P("mk/set-CHECKSUM")))
+hashcheck.create(None, [P("mk")], P("mk"), "all", ["sha256"], True, errs)
+hashcheck.create(None, [P("mk")], P("mk"), "all", ["sha256"], True, errs)
+again = all_ok(P("mk/all-CHECKSUM"))
+check(bsd_ok and again and "all-CHECKSUM" not in ",".join(again) and all(x.endswith(":ok") for x in again),
+      "...or one file with every algorithm as BSD tags (escaped names), and making it again leaves out its own "
+      "older copy")
+make(P("mk/locked.txt"), b"locked\n")
+os.chmod(P("mk/locked.txt"), 0)
+errs = []
+hashcheck.create(None, [P("mk/a.txt"), P("mk/locked.txt")], P("mk"), "two", ["md5"], False, errs)
+two = all_ok(P("mk/two.md5"))
+os.chmod(P("mk/locked.txt"), 0o644)
+cd = hashcheck.CreateDialog(w, [P("mk/a.txt")], w.settings)
+check(two == ["a.txt:md5:ok"] and len(errs) == 1 and errs[0].startswith("locked.txt: ")
+      and cd.stem() == "a.txt" and cd.dir() == P("mk") and cd.outputs() == [P("mk/a.txt.sha256")],
+      "a file that can't be read is left out and named; the dialog starts from the item's name and folder, and SHA256")
+cd.deleteLater()
+
 # -- symlinks inside a tree: never followed, even when one is swapped in while a job runs
 victim = P("victim")  # stands for files elsewhere that a job mustn't touch
 AT_FDCWD, RENAME_EXCHANGE = -100, 2
@@ -359,6 +655,207 @@ for ext in ("tar.gz", "zip", "7z", "rar"):
     check(bool(os.listdir(os.path.join(base, "dest"))) and not os.listdir(os.path.join(base, "outside"))
           and not os.path.lexists(os.path.join(base, "escape.txt")) and not os.path.lexists("/tmp/kestrel-evil-abs.txt"),
           label)
+    escaping = False  # a symlink left in dest that leads out of it (opening it would go there)
+    dest = os.path.join(base, "dest")
+    for root, dirs, files in os.walk(dest):
+        for f in dirs + files:
+            f = os.path.join(root, f)
+            target = os.readlink(f) if os.path.islink(f) else ""
+            if target and (target.startswith("/")
+                           or not (os.path.normpath(os.path.join(os.path.dirname(f), target)) + "/").startswith(dest + "/")):
+                escaping = True
+    check(not escaping, f"a crafted {ext} archive leaves no symlink leading out of the folder it's extracted into")
+check(archive.link_escapes(0, b"../x") and archive.link_escapes(0, b"/etc") and archive.link_escapes(1, b"a/../../..")
+      and archive.link_escapes(2, b"../../../x") and not archive.link_escapes(1, b"../x")
+      and not archive.link_escapes(0, b"a/../b") and not archive.link_escapes(0, b"./a//b")
+      and not archive.link_escapes(2, b"../.."),
+      "a link target leads out of the extracted folder when it's absolute or its \"..\"s climb above it")
+# extracting into an existing folder: the user's own links there stay, also ones that lead out of it
+own_base = P("evil-own")
+own_dest = os.path.join(own_base, "dest")
+os.makedirs(own_dest, exist_ok=True)
+os.symlink("../elsewhere", os.path.join(own_dest, "mine"))
+shutil.copy(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "evil.tar.gz"),
+            os.path.join(own_base, "evil.tar.gz"))
+spin(1100)  # older than the job's start
+try:
+    archive.extract(fileops.Task("test", lambda _t: None), os.path.join(own_base, "evil.tar.gz"), own_dest, None,
+                    "overwrite")
+except Exception:
+    pass
+check(os.path.islink(os.path.join(own_dest, "mine")) and not os.path.lexists(os.path.join(own_dest, "lnk")),
+      "extracting into an existing folder keeps the user's own links there and drops the archive's escaping one")
+# links in folders the archive leaves read-only (555, as GNU tar applies a folder's stored mode before it exits) or
+# closed (000): they're removed too, each folder's mode is put back, and every link removed is reported (an absolute one
+# naming a place inside the folder too)
+perm_base = P("evil-perm")
+stage, perm_dest = os.path.join(perm_base, "stage"), os.path.join(perm_base, "dest")
+os.makedirs(os.path.join(stage, "ro", "sub"))
+os.makedirs(os.path.join(stage, "closed"))
+os.makedirs(perm_dest)
+os.symlink("/etc", os.path.join(stage, "ro", "abs"))
+os.symlink("../../../outside", os.path.join(stage, "ro", "sub", "up"))
+os.symlink(os.path.join(perm_dest, "ro", "sub"), os.path.join(stage, "ro", "inside"))
+os.symlink("/etc", os.path.join(stage, "closed", "abs"))
+subprocess.run(["tar", "-czf", os.path.join(perm_base, "ro.tar.gz"), "--mode=a-w", "-C", stage, "ro"], check=True)
+subprocess.run(["tar", "-czf", os.path.join(perm_base, "closed.tar.gz"), "--mode=a-rwx", "-C", stage, "closed"],
+               check=True)
+perm_dropped = []
+for name in ("ro.tar.gz", "closed.tar.gz"):
+    try:
+        archive.extract(fileops.Task("test", lambda _t: None), os.path.join(perm_base, name), perm_dest, None,
+                        "overwrite", dropped_links=perm_dropped)
+    except Exception:
+        pass
+
+
+def perm_mode(rel):
+    return stat.S_IMODE(os.lstat(os.path.join(perm_dest, rel)).st_mode)
+
+
+modes = (perm_mode("ro"), perm_mode("ro/sub"), perm_mode("closed"))
+subprocess.run(["chmod", "-R", "u+rwx", perm_dest])
+left = sorted(os.path.relpath(os.path.join(r, f), perm_dest) for r, ds, fs in os.walk(perm_dest) for f in ds + fs)
+check(modes == (0o555, 0o555, 0) and left == ["closed", "ro", "ro/sub"]
+      and sorted(perm_dropped) == sorted([("ro/abs", "/etc", None), ("ro/sub/up", "../../../outside", None),
+                                          ("ro/inside", os.path.join(perm_dest, "ro", "sub"), None),
+                                          ("closed/abs", "/etc", None)]),
+      "escaping links in folders an archive leaves read-only (555) or closed (000) are removed too, the folders' "
+      "modes are put back, and each link removed is reported (an absolute one naming a place inside too)")
+
+# -- a single compressed file (note.txt.gz → note.txt) where the destination already has a symlink named note.txt:
+# the name is replaced, never written through (a dangling link would create its target, a live one truncate it)
+gz_base = P("gzlink")
+gz_dest, gz_outside = os.path.join(gz_base, "dest"), os.path.join(gz_base, "outside")
+make(os.path.join(gz_base, "note.txt"), b"new\n")
+subprocess.run(["gzip", "-k", os.path.join(gz_base, "note.txt")])
+make(os.path.join(gz_base, "bad.txt.gz"), b"not gzip at all")
+
+
+def run_extract(archive_path, overwrite):
+    try:
+        archive.extract(fileops.Task("test", lambda _t: None), archive_path, gz_dest, None, overwrite)
+        return True
+    except Exception:
+        return False
+
+
+def reset_gz(target):
+    shutil.rmtree(gz_dest, ignore_errors=True)
+    shutil.rmtree(gz_outside, ignore_errors=True)
+    os.makedirs(gz_dest)
+    os.makedirs(gz_outside)
+    if target == "keep.txt":
+        make(os.path.join(gz_outside, "keep.txt"), b"keep\n")
+    os.symlink(os.path.join(gz_outside, target), os.path.join(gz_dest, "note.txt"))
+
+
+dangling_ok = live_ok = True
+for mode in ("rename", "overwrite"):
+    reset_gz("created.txt")
+    ran = run_extract(os.path.join(gz_base, "note.txt.gz"), mode)
+    got = os.path.join(gz_dest, "note (2).txt" if mode == "rename" else "note.txt")
+    dangling_ok = (dangling_ok and ran and not os.listdir(gz_outside) and not os.path.islink(got)
+                   and text_of(got) == "new\n" and (mode == "overwrite" or os.path.islink(os.path.join(gz_dest, "note.txt"))))
+    reset_gz("keep.txt")
+    ran = run_extract(os.path.join(gz_base, "note.txt.gz"), mode)
+    live_ok = (live_ok and ran and text_of(os.path.join(gz_outside, "keep.txt")) == "keep\n"
+               and not os.path.islink(got) and text_of(got) == "new\n")
+check(dangling_ok,
+      "decompressing a single file doesn't write through a dangling symlink of that name (Keep both and Replace)")
+check(live_ok, "...or truncate the file a symlink of that name points to (Keep both and Replace)")
+shutil.rmtree(gz_dest)
+os.makedirs(gz_dest)
+make(os.path.join(gz_dest, "bad.txt"), b"old\n")
+failed = not run_extract(os.path.join(gz_base, "bad.txt.gz"), "overwrite")
+bad = os.path.join(gz_dest, "bad.txt")
+check(failed and os.path.isfile(bad) and text_of(bad) == "old\n" and os.listdir(gz_dest) == ["bad.txt"],
+      "a failed decompress leaves the file it would have replaced, and no temporary file")
+
+# -- failure-atomic everywhere else Kestrel writes (CLAUDE.md): compressing over an archive, its own files, new files,
+# moves between drives. A file-size limit stands for a full disk.
+def small_disk(fn):
+    old_lim = resource.getrlimit(resource.RLIMIT_FSIZE)
+    old_handler = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (1 << 20, old_lim[1]))   # writes past 1 MB fail (EFBIG)
+    try:
+        fn()
+    except Exception:
+        pass
+    finally:
+        resource.setrlimit(resource.RLIMIT_FSIZE, old_lim)
+        signal.signal(signal.SIGXFSZ, old_handler)
+
+
+def fa_leftovers(d):
+    return [n for n in os.listdir(d) if n.startswith(".kes-")]
+
+
+make(P("fa/src/big.bin"), b"b" * BIG)
+make(P("fa/src/small.txt"), b"small")
+make(P("fa/arc.tar"), b"the old archive")
+tar_fmt = next(f for f in archive.formats() if f["id"] == "tar")
+
+
+def fa_compress(rel):
+    archive.compress(fileops.Task("test", lambda _t: None),
+                     {"format": tar_fmt, "tool": "tar", "base": P("fa/src"), "rels": [rel], "out": P("fa/arc.tar"),
+                      "total": BIG})
+
+
+small_disk(lambda: fa_compress("big.bin"))
+kept = text_of(P("fa/arc.tar")) == "the old archive" and not fa_leftovers(P("fa"))
+fa_compress("small.txt")
+listing = subprocess.run(["tar", "tf", P("fa/arc.tar")], capture_output=True, text=True).stdout.strip()
+check(kept and listing == "small.txt" and not fa_leftovers(P("fa")),
+      "compressing over an archive that fails part-way keeps the old archive and no half-made one; one that "
+      "succeeds replaces it")
+
+make(P("fa/state.json"), b"old")
+os.chmod(P("fa/state.json"), 0o600)
+small_disk(lambda: util.write_atomic(P("fa/state.json"), b"n" * (2 << 20)))
+state_kept = text_of(P("fa/state.json")) == "old" and not fa_leftovers(P("fa"))
+util.write_atomic(P("fa/state.json"), "new")
+make(P("fa/dotfiles/bookmarks"), b"old")
+os.symlink(P("fa/dotfiles/bookmarks"), P("fa/bookmarks"))
+util.write_atomic(P("fa/bookmarks"), "new")
+check(state_kept and text_of(P("fa/state.json")) == "new" and stat.S_IMODE(os.stat(P("fa/state.json")).st_mode) == 0o600
+      and os.path.islink(P("fa/bookmarks")) and text_of(P("fa/dotfiles/bookmarks")) == "new"
+      and not fa_leftovers(P("fa")),
+      "Kestrel's own files are written in one step: a write that fails part-way keeps the old contents; they "
+      "keep their permissions, and a symlinked one stays a symlink")
+
+make(P("fa/taken.txt"), b"mine")
+refused_copy = refused_new = False
+try:
+    util.copyfile(P("fa/src/small.txt"), P("fa/taken.txt"), new_only=True)
+except OSError:
+    refused_copy = True
+try:
+    util.write_new(P("fa/taken.txt"), b"")
+except OSError:
+    refused_new = True
+small_disk(lambda: util.copyfile(P("fa/src/big.bin"), P("fa/new-from-template.bin"), new_only=True))
+check(refused_copy and refused_new and text_of(P("fa/taken.txt")) == "mine"
+      and not os.path.lexists(P("fa/new-from-template.bin")) and not fa_leftovers(P("fa")),
+      "a new file (from a template, or pasted) never replaces one that's there, and one that fails part-way "
+      "leaves nothing")
+
+# moves between drives (undo, restoring from the trash): /dev/shm is another filesystem
+other = f"/dev/shm/kestrel-test-{os.getpid()}"
+if not os.path.isdir("/dev/shm") or os.stat("/dev/shm").st_dev == os.stat(P("fa")).st_dev:
+    skip("moving between drives copies whole before deleting (no second filesystem here)")
+else:
+    os.makedirs(other, exist_ok=True)
+    small_disk(lambda: util.move(P("fa/src/big.bin"), os.path.join(other, "big.bin")))
+    src_kept = (os.path.getsize(P("fa/src/big.bin")) == BIG and not os.path.lexists(os.path.join(other, "big.bin"))
+                and not fa_leftovers(other))
+    util.move(P("fa/src"), os.path.join(other, "src"))
+    check(src_kept and not os.path.lexists(P("fa/src")) and os.path.getsize(os.path.join(other, "src/big.bin")) == BIG
+          and not fa_leftovers(other),
+          "moving between drives copies whole before deleting: a failure part-way keeps the original and no "
+          "half-made copy")
+    shutil.rmtree(other)
 
 # -- Shred with BleachBit: `bleachbit --shred` on the chosen files and folders, and what's still there afterwards
 # reported (BleachBit reports success either way); Empty Trash with BleachBit hands it every item in the trash and its

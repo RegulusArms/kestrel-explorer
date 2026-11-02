@@ -502,7 +502,7 @@ def tag_db():
     _tag_db = db
     try:
         cache.parent.mkdir(parents=True, exist_ok=True)
-        cache.write_text(json.dumps(db))
+        util.write_atomic(cache, json.dumps(db))
     except OSError:
         pass
     return db

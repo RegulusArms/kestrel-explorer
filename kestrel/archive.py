@@ -10,6 +10,7 @@ bytes Kestrel pipes through them, Cancel kills the whole process group, and part
 Passwords go to 7z on stdin. unrar, rar and zpaq only accept them as a command-line switch, which other
 local users could read from the process list while the job runs.
 """
+import contextlib
 import functools
 import os
 import re
@@ -17,6 +18,7 @@ import select
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import time
 
@@ -480,10 +482,19 @@ def _job_clock(fn):
 
 
 @_job_clock
-def compress(task, spec):
-    """Create the archive described by spec (see archive_ui.CompressDialog.spec()). Returns the output path."""
-    fmt, out = spec["format"], spec["out"]
-    label = f"Compressing {os.path.basename(out)}"
+def compress(task, spec_in):
+    """Create the archive described by spec (see archive_ui.CompressDialog.spec()). Returns the output path.
+
+    The archive is made under a hidden name beside spec["out"] that keeps the format's extension (some tools go by
+    it), and its file (or volumes) renamed into place only when the tool has succeeded: a failure or a cancel leaves
+    an older archive of that name as it was, and no half-made one. zip, which adds to an archive that already exists,
+    starts from nothing this way too."""
+    final_out = spec_in["out"]
+    fmt, d = spec_in["format"], os.path.dirname(final_out)
+    ext = fmt["ext"] if final_out.endswith(fmt["ext"]) else ""
+    out = os.path.join(d, util.part_name() + ext)
+    spec = dict(spec_in, out=out)
+    label = f"Compressing {os.path.basename(final_out)}"
     try:
         if fmt.get("stream"):
             _compress_stream(task, spec, label)
@@ -498,6 +509,7 @@ def compress(task, spec):
                 ok = rc == 0 or (spec["tool"] in ("7z", "rar") and rc == 1)  # 1 = warnings (e.g. a locked file)
                 if not ok:
                     raise RuntimeError(_tail(text) or f"{os.path.basename(argv[0])} failed (exit code {rc})")
+        task.check()
     except BaseException:
         for f in [out] + _volume_files(out):
             try:
@@ -505,10 +517,39 @@ def compress(task, spec):
             except OSError:
                 pass
         raise
-    if not os.path.exists(out):
-        vols = sorted(_volume_files(out))
-        return vols[0] if vols else out
-    return out
+    # into place: each file renamed over the name it's for ("<hidden>.7z.002" → "<name>.7z.002"); then the parts of
+    # an older archive of that name that the new one doesn't have are deleted
+    cut = len(ext)
+    hidden_stem = os.path.basename(out)[:len(os.path.basename(out)) - cut]
+    final_stem = os.path.basename(final_out)[:len(os.path.basename(final_out)) - cut]
+    made = sorted([out] if os.path.exists(out) else _volume_files(out))
+    old = _volume_files(final_out) + ([final_out] if os.path.lexists(final_out) else [])
+    placed = []
+    try:
+        for m in made:
+            target = os.path.join(d, final_stem + os.path.basename(m)[len(hidden_stem):])
+            if old:   # replacing an older archive: on disk before the rename
+                fd = os.open(m, os.O_RDONLY | os.O_CLOEXEC)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            os.rename(m, target)
+            placed.append(target)
+    except BaseException:
+        for m in made:
+            try:
+                os.unlink(m)
+            except OSError:
+                pass
+        raise
+    for o in old:
+        if o not in placed:
+            try:
+                os.unlink(o)
+            except OSError:
+                pass
+    return placed[0] if placed else final_out
 
 
 def _compress_tar_plain(task, argv, cwd, out, total, label):
@@ -634,14 +675,162 @@ def _extract_command(path, dest, password, overwrite, threads):
 
 
 @_job_clock
-def extract(task, path, dest, password=None, overwrite="rename", threads=0):
-    """Extract `path` into the existing folder `dest`. Raises WrongPassword, RuntimeError or Cancelled."""
+def link_escapes(depth, target):
+    """A symlink target (bytes) that leads out of the folder an archive is extracted into: an absolute one, or one
+    whose ".."s climb above it. depth: how many folders below that folder the link is."""
+    if target.startswith(b"/"):
+        return True
+    for c in target.split(b"/"):
+        if c == b"..":
+            depth -= 1
+            if depth < 0:
+                return True
+        elif c and c != b".":
+            depth += 1
+    return False
+
+
+def _open_for_sweep(dirfd, name, nofollow=True):
+    """(fd, mode to put back or None): the folder `name` in dirfd, opened to be listed. One of the user's own that
+    the archive left unreadable (GNU tar applies a folder's stored mode, 000 or 111 say, before it exits) is let in
+    first: owner rwx, set on the folder itself through /proc (never through a symlink swapped in), and its mode is put
+    back once it's swept. None if it can't be opened."""
+    nf = os.O_NOFOLLOW if nofollow else 0
+    try:
+        return os.open(name, os.O_RDONLY | os.O_DIRECTORY | nf | os.O_CLOEXEC, dir_fd=dirfd), None
+    except PermissionError:
+        pass
+    except OSError:
+        return None, None
+    try:
+        pfd = os.open(name, os.O_PATH | os.O_DIRECTORY | nf | os.O_CLOEXEC, dir_fd=dirfd)
+    except OSError:
+        return None, None
+    try:
+        st = os.fstat(pfd)
+        if st.st_uid != os.geteuid():
+            return None, None
+        mode = stat.S_IMODE(st.st_mode)
+        os.chmod(f"/proc/self/fd/{pfd}", mode | stat.S_IRWXU)
+        try:
+            return os.open(f"/proc/self/fd/{pfd}", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC), mode
+        except OSError:
+            os.chmod(f"/proc/self/fd/{pfd}", mode)
+            return None, None
+    except OSError:
+        return None, None
+    finally:
+        os.close(pfd)
+
+
+def _drop_escaping_links(dirfd, rel, depth, since_ns, report, restore=None):
+    """The symlinks in an open folder (and the folders below it, on the same drive) changed since since_ns that
+    link_escapes(), removed. One in a folder of the user's that the archive made read-only is removed too: the folder
+    is made writable for it, and its mode put back after (restore: the mode to put back when this folder was opened
+    by _open_for_sweep). Each one is added to report as (path in the folder, target, None, or why it's still there)."""
+    try:
+        here = os.fstat(dirfd)
+
+        def let_in():   # owner rwx on this folder, if it's the user's; its mode is put back below
+            nonlocal restore
+            if restore is not None or here.st_uid != os.geteuid():
+                return False
+            os.fchmod(dirfd, stat.S_IMODE(here.st_mode) | stat.S_IRWXU)
+            restore = stat.S_IMODE(here.st_mode)
+            return True
+
+        if here.st_mode & stat.S_IXUSR == 0:   # can't look anything up in it
+            let_in()
+        try:
+            names = os.listdir(dirfd)
+        except OSError:
+            return
+        subdirs = []
+        for n in names:
+            try:
+                st = os.stat(n, dir_fd=dirfd, follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISDIR(st.st_mode) and st.st_dev == here.st_dev:
+                subdirs.append(n)
+                continue
+            if not (stat.S_ISLNK(st.st_mode) and st.st_ctime_ns >= since_ns):
+                continue
+            try:
+                target = os.readlink(n, dir_fd=dirfd)
+            except OSError:
+                continue
+            if not link_escapes(depth, os.fsencode(target)):
+                continue
+            why = None
+            try:
+                try:
+                    os.unlink(n, dir_fd=dirfd)
+                except PermissionError:
+                    if not let_in():
+                        raise
+                    os.unlink(n, dir_fd=dirfd)
+            except OSError as e:
+                why = e.strerror or str(e)
+            report.append((rel + n, target, why))
+        for n in subdirs:
+            sub, mode = _open_for_sweep(dirfd, n)
+            if sub is not None:
+                try:
+                    _drop_escaping_links(sub, rel + n + "/", depth + 1, since_ns, report, mode)
+                finally:
+                    os.close(sub)
+    except OSError:
+        pass
+    finally:
+        if restore is not None:
+            try:
+                os.fchmod(dirfd, restore)
+            except OSError:
+                pass
+
+
+@contextlib.contextmanager
+def _escaping_link_sweep(dest, tool_name, report):
+    """GNU tar and UnZip make an archive's symlinks as they are, also ones that lead out of the destination (7-Zip
+    and unrar leave those out), and Kestrel follows a link like any other folder or file: opening, copying or deleting
+    "inside" the extracted folder would reach whatever it points to. So once they're done (also after a failure or a
+    cancel), the escaping links they made are removed: only links changed since the job started (a link's ctime can't
+    be set back), so the user's own links in an existing folder stay. As in Python's tarfile "data" filter, an
+    absolute link goes even when it names a place inside the folder: where it leads depends on where the folder is.
+    What was removed, or couldn't be, goes in report (see _drop_escaping_links) for the user to be told."""
+    since_ns = time.time_ns() - 1_000_000_000  # the filesystem's clock can lag a little behind
+    try:
+        yield
+    finally:
+        if tool_name in ("tar", "unzip"):
+            fd, mode = _open_for_sweep(None, dest, nofollow=False)
+            if fd is not None:
+                try:
+                    _drop_escaping_links(fd, "", 0, since_ns, report, mode)
+                finally:
+                    os.close(fd)
+
+
+def extract(task, path, dest, password=None, overwrite="rename", threads=0, dropped_links=None):
+    """Extract `path` into the existing folder `dest`. Raises WrongPassword, RuntimeError or Cancelled. Symlinks that
+    led out of dest were removed: they're added to dropped_links (a list) as (path in dest, target, None or why one
+    is still there)."""
     path = first_volume(path)
     k, suf = kind(path)
     label = f"Extracting {os.path.basename(path)}"
-    if k in ("tar", "single"):
+    report = dropped_links if dropped_links is not None else []
+    if k == "tar":
+        with _escaping_link_sweep(dest, "tar", report):
+            return _extract_stream(task, path, dest, k, suf, overwrite, label)
+    if k == "single":
         return _extract_stream(task, path, dest, k, suf, overwrite, label)
     t, argv, stdin, env = _extract_command(path, dest, password, overwrite, threads)
+    with _escaping_link_sweep(dest, t, report):
+        return _extract_run(task, t, argv, stdin, env, label, dest)
+
+
+def _extract_run(task, t, argv, stdin, env, label, dest):
     rc, text = _run_reporting(task, argv, label, stdin_text=stdin,
                               progress=None if t == "unzip" else "percent", env=env)  # unzip's % are ratios
     wrong = (t == "unrar" and rc == 11) or "Wrong password" in text or "password incorrect" in text or \
@@ -663,26 +852,46 @@ def _extract_stream(task, path, dest, k, suf, overwrite, label):
         dec_argv = [tool(name), "-dc"] + (["-T0"] if name in ("xz", "zstd") else [])
     with open(path, "rb") as fi:
         if k == "single":
+            # The name itself is what gets replaced: lexists, not exists (a dangling symlink is taken), and the
+            # output goes to a new file that is then renamed over the name. Opening the name would follow a symlink
+            # there (or truncate a file hard-linked elsewhere), and a failed run would leave the old file truncated or
+            # deleted.
             out = os.path.join(dest, archive_stem(path))
-            if os.path.exists(out):
+            if os.path.lexists(out):
                 if overwrite == "skip":
                     return dest
                 if overwrite == "rename":
                     out = util.unique_path(dest, os.path.basename(out), "num")
-            with open(out, "wb") as fo:
-                dec = subprocess.Popen(dec_argv, stdin=subprocess.PIPE, stdout=fo, stderr=subprocess.PIPE,
-                                       start_new_session=True, env=_ENV)
+            fd, part = util.open_part(dest.rstrip("/") + "/")
+            with open(fd, "wb") as fo:
+                try:
+                    dec = subprocess.Popen(dec_argv, stdin=subprocess.PIPE, stdout=fo, stderr=subprocess.PIPE,
+                                           start_new_session=True, env=_ENV)
+                except BaseException:
+                    os.unlink(part)
+                    raise
                 try:
                     _relay(task, fi, dec.stdin, total, label)
                     dec.stdin.close()
                     dec.wait()
                 except BaseException:
                     _kill(dec)
-                    os.unlink(out)
+                    os.unlink(part)
                     raise
             if dec.returncode != 0:
-                os.unlink(out)
+                os.unlink(part)
                 raise RuntimeError(_tail(dec.stderr.read().decode(errors="replace")) or "decompression failed")
+            try:
+                if os.path.lexists(out):   # replacing something: on disk before the rename (the decompressor wrote it)
+                    sfd = os.open(part, os.O_RDONLY | os.O_CLOEXEC)
+                    try:
+                        os.fsync(sfd)
+                    finally:
+                        os.close(sfd)
+                os.rename(part, out)
+            except BaseException:
+                os.unlink(part)
+                raise
             return dest
         policy = {"overwrite": "--overwrite", "skip": "--skip-old-files", "rename": "--backup=numbered"}[overwrite]
         tar_argv = [tool("tar"), "-xf", "-", "-C", dest, "--no-same-owner", policy]

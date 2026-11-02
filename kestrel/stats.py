@@ -1,7 +1,6 @@
 """Performance counters, for KESTREL_STATS=1 (off otherwise: each call is one check). Kestrel then prints a summary to
 stderr when it quits: folder listing times, thumbnail cache use and queue length, copy speed, archive job times, tower
-message delay, and the most tasks at once. The same counters and output as the C++ version (stats.cpp); bench/ can
-collect them. Thread-safe: thumbnail workers and file-operation tasks report from their own threads."""
+message delay, and the most tasks at once. bench/ can collect them. Thread-safe: thumbnail workers and file-operation tasks report from their own threads."""
 import os
 import sys
 import threading

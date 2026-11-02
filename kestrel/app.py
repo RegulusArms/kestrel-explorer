@@ -9,8 +9,8 @@ from PyQt6.QtGui import QAction, QGuiApplication, QKeySequence, QWindow
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox,
                              QProgressBar, QSlider, QSplitter, QTabWidget, QToolBar, QToolButton, QVBoxLayout, QWidget)
 
-from . import (__version__, admin, archive, archive_ui, atc, chooser, dialogs, fileops, fm1, places, sharing, stats,
-               thumbs, undo, util, uwp)
+from . import (__version__, admin, archive, archive_ui, atc, chooser, dialogs, fileops, fm1, hashcheck, places,
+               sharing, stats, thumbs, undo, util, uwp)
 from .actions import FileActions
 from .chooser import ChooserBar
 from .incoming import handle_fm1, on_atc, open_in_tabs, report_windows, window_focused  # noqa: F401 (tests use A.on_atc)
@@ -661,8 +661,9 @@ class MainWindow(FileActions, Opening, QMainWindow):
 
         single = paths[0] if len(paths) == 1 else None
         is_dir = bool(single and os.path.isdir(single))
-        in_trash = util.in_trash(paths[0])
-        if in_trash:
+        # only a selection all in the trash gets the trash's menu; a mixed one (a search, Recent, Starred) gets the
+        # usual menu, whose Move to Trash trashes the rest and asks before deleting what's already in the trash
+        if all(util.in_trash(p) for p in paths):
             m.addAction(icon("edit-undo"), "Restore", lambda: self.restore(paths))
             m.addAction(icon("edit-delete"), "Delete Permanently", lambda: self.delete_paths(paths))
             if fileops.can_shred():
@@ -749,6 +750,8 @@ class MainWindow(FileActions, Opening, QMainWindow):
                         lambda: archive_ui.quick_compress(self, paths))
         m.addAction(icon("package-x-generic", "archive-insert"), "Compress…",
                     lambda: archive_ui.compress_dialog(self, paths))
+        m.addAction(icon("security-high", "document-properties"), "Create Checksum File…",
+                    lambda: hashcheck.create_dialog(self, paths))
         if single and (util.is_image(single) or util.is_video(single)) and uwp.editor_open():
             m.addAction(icon("preferences-desktop-wallpaper", "video-display"), "Add to Selected UWP Monitor",
                         lambda: self._uwp_add(single))

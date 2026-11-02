@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the crafted archives the fileops test extracts (R14 in the roadmap): each holds entries that try to write
-# outside the folder it's extracted into. Kept in the repo (the same files in both projects); run this only to rebuild
+# outside the folder it's extracted into. Kept in the repo; run this only to rebuild
 # them (needs python3, 7z and rar).
 #   ../escape.txt               a path that climbs out of the destination
 #   /tmp/kestrel-evil-abs.txt   an absolute path

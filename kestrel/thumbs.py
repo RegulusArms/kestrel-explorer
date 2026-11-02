@@ -16,8 +16,8 @@ import threading
 import time
 from collections import OrderedDict
 
-from PyQt6.QtCore import (QBuffer, QByteArray, QObject, QRectF, QRunnable, QSize, Qt, QThread, QThreadPool, QTimer,
-                          pyqtSignal)
+from PyQt6.QtCore import (QBuffer, QByteArray, QIODevice, QObject, QRectF, QRunnable, QSize, Qt, QThread, QThreadPool,
+                          QTimer, pyqtSignal)
 from PyQt6.QtGui import QColor, QIcon, QImage, QImageReader, QPainter, QPainterPath, QPixmap
 
 from . import atc, stats, util
@@ -421,14 +421,23 @@ def folder_thumb(path, mtime, size, opts):
         cache.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         pass
+    def save(im):
+        """Saved whole under a hidden name, then renamed over the old one: another Kestrel never reads half a PNG."""
+        buf = QBuffer()
+        buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        if im.save(buf, "PNG"):
+            try:
+                util.write_parts(cache, lambda fd: util.write_all(fd, bytes(buf.data())))
+            except OSError:
+                pass
     if not images:
         marker = QImage(1, 1, QImage.Format.Format_ARGB32)
         marker.setText("FE::Tag", "empty|" + tag)
-        marker.save(str(cache), "PNG")
+        save(marker)
         return None
     img = compose_folder(images, size, color, videos)
     img.setText("FE::Tag", tag)
-    img.save(str(cache), "PNG")
+    save(img)
     stats.count("folder previews made")
     return img
 
@@ -665,7 +674,7 @@ class ThumbnailManager(QObject):
                 self.styles.pop(f, None)
         try:
             STYLES_FILE.parent.mkdir(parents=True, exist_ok=True)
-            STYLES_FILE.write_text(json.dumps(self.styles, indent=1))
+            util.write_atomic(STYLES_FILE, json.dumps(self.styles, indent=1))
         except OSError:
             pass
         for f in folders:
@@ -705,7 +714,7 @@ class ThumbnailManager(QObject):
         else:
             self.covers.pop(folder, None)
         COVERS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        COVERS_FILE.write_text(json.dumps(self.covers, indent=1))
+        util.write_atomic(COVERS_FILE, json.dumps(self.covers, indent=1))
         self.invalidate(folder)
         atc.announce("folders", paths=[folder])
 

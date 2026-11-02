@@ -544,7 +544,7 @@ class PathBar(QWidget):
 
 # ---------------------------------------------------------------- sidebar
 
-# ---------------------------------------------------------------- sidebar order (shared with the C++ version)
+# ---------------------------------------------------------------- sidebar order
 # settings: sidebar_sections, sidebar_collapsed, sidebar_places_order, sidebar_devices_order; the bookmarks' order is
 # the GTK bookmarks file's
 

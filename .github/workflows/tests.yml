@@ -1,6 +1,5 @@
 # Runs the test suite (tests/run.sh) on Ubuntu 24.04, the oldest supported system, with the system's Python and PyQt6,
-# on every push and pull request. The C++ version's CI (kes-c, .github/workflows/deb.yml) runs the same tests there.
-# Skipped here: the checks that need rar, and the cross-version checks that need the C++ version's build next to this.
+# on every push and pull request. Skipped here: the checks that need rar.
 name: Tests
 
 on:

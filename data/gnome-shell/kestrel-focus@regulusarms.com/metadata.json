@@ -3,5 +3,5 @@
   "name": "Kestrel Explorer drop focus",
   "description": "Lets Kestrel Explorer give focus to the window a file was dropped into. GNOME on Wayland doesn't let an app focus another app's window itself.",
   "shell-version": ["45", "46", "47", "48", "49", "50"],
-  "url": "https://github.com/RegulusArms/kes-c"
+  "url": "https://github.com/RegulusArms/kestrel-explorer"
 }

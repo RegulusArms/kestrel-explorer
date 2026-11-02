@@ -1,11 +1,11 @@
 #!/usr/bin/python3
-"""Benchmark Kestrel Explorer (Python and C++) against GNOME Files, or Nemo on Linux Mint. See README.md.
+"""Benchmark Kestrel Explorer (Python) against GNOME Files, or Nemo on Linux Mint. See README.md.
 
-  bench/run.sh                      build, generate the data (first time), run everything, print the tables
+  bench/run.sh                      generate the data (first time), run everything, print the tables
   bench/run.sh --runs 5             more runs per measurement (medians are reported)
   bench/run.sh --only startup,copy  re-run only some measurements (the rest are kept from the last run)
   bench/run.sh --report             rebuild the tables from the last results without running anything
-The tables are printed and written to bench/results.md, as Performance sections ready to paste into the READMEs.
+The tables are printed and written to bench/results.md, as Performance sections ready to paste into the README.
 
 Every run happens on a headless X server (Xvfb) with a fresh home folder and a private D-Bus session bus on which
 only the desktop's settings (dconf) and virtual file system (gvfs) services can start, so caches are empty and no
@@ -26,15 +26,8 @@ import time
 import urllib.parse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(HERE)
-if os.path.exists(os.path.join(ROOT, "kestrel", "app.py")):
-    PY_ROOT, CXX_ROOT = ROOT, os.path.join(os.path.dirname(ROOT), "kes-c")
-else:
-    PY_ROOT, CXX_ROOT = os.path.join(os.path.dirname(ROOT), "kestrel-explorer"), ROOT
-PY_ROOT, CXX_ROOT = os.path.realpath(PY_ROOT), os.path.realpath(CXX_ROOT)
+ROOT = os.path.realpath(os.path.dirname(HERE))
 DATA = os.environ.get("KESTREL_BENCH_DATA", "/tmp/kestrel-bench-data")
-CMAKE = "/usr/bin/cmake" if os.access("/usr/bin/cmake", os.X_OK) else "cmake"
-BUILD = os.environ.get("KESTREL_BUILD_DIR", "build")  # build folder name (another machine sharing these folders)
 # The file managers Kestrel is compared with; the ones installed are measured (GNOME Files on Ubuntu, Nemo on Linux
 # Mint). File operations go through each one's D-Bus file-operations service, as other apps use it: "service" starts
 # it, "ops" is (bus name, object path, interface), and "settings" are set in the throwaway home first (gsettings).
@@ -56,7 +49,7 @@ OTHERS = {
              "helpers": "separate helper processes", "search": "", "whole_folder": False,
              "thumbnails": False},
 }
-APPS = ("python", "cxx") + tuple(OTHERS)
+APPS = ("kestrel",) + tuple(OTHERS)
 # measured the same way for every app
 COMMON = ("startup", "open_gallery", "videos", "pdfs", "copy", "move_xdev", "trash", "windows", "idle")
 # Kestrel only: its "open folders as tabs" setting, and features the other file managers have no equivalent of
@@ -80,8 +73,7 @@ def app_command(app, folder=None):
     if app in OTHERS:
         cmd = list(OTHERS[app]["cmd"])
     else:
-        cmd = {"python": ["/usr/bin/python3", os.path.join(PY_ROOT, "kes")],
-               "cxx": [os.path.join(CXX_ROOT, BUILD, "kes")]}[app]
+        cmd = ["/usr/bin/python3", os.path.join(ROOT, "kes")]
     return cmd + ([folder] if folder else [])
 
 
@@ -444,12 +436,9 @@ def measure_idle(app):
 
 
 def harness(app, test, arg=None):
-    """A measurement inside the app (kestrel_py.py / kestrel_cpp)."""
+    """A measurement inside the app (kestrel_py.py)."""
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
-    if app == "python":
-        cmd = ["/usr/bin/python3", os.path.join(HERE, "kestrel_py.py"), PY_ROOT, test, DATA]
-    else:
-        cmd = [os.path.join(HERE, BUILD, "kestrel_cpp"), test, DATA]
+    cmd = ["/usr/bin/python3", os.path.join(HERE, "kestrel_py.py"), ROOT, test, DATA]
     out = subprocess.run(cmd + ([arg] if arg else []), env=env, capture_output=True, text=True, timeout=900)
     line = next((ln for ln in out.stdout.splitlines() if ln.startswith("{")), None)
     if line is None:
@@ -581,7 +570,7 @@ TIMED = [("Startup (launch to window shown)", "startup", "s"),
 def tables(res, other):
     """The tables comparing Kestrel with `other` (a key of OTHERS), the summary for the README text, and notes on what
     `other` couldn't be timed on."""
-    apps = ("python", "cxx", other)
+    apps = ("kestrel", other)
     if not OTHERS[other]["thumbnails"]:   # also drops results saved before its folder tests were skipped
         res = {k: v for k, v in res.items() if not (k[0] == other and k[1] in FOLDER_TESTS)}
 
@@ -589,7 +578,7 @@ def tables(res, other):
         vals = [r[key] for r in res.get((app, test), []) if r.get(key) is not None]
         return statistics.median(vals) if vals else None
 
-    t1 = [f"| Test | Kestrel (Python) | Kestrel (C++) | {OTHERS[other]['label']} |", "|---|---|---|---|"]
+    t1 = [f"| Test | Kestrel | {OTHERS[other]['label']} |", "|---|---|---|"]
     for label, test, key in TIMED:
         t1.append(f"| {label} | {' | '.join(secs(med(a, test, key)) for a in apps)} |")
 
@@ -612,20 +601,19 @@ def tables(res, other):
     t1.append(f"| CPU time used in {IDLE_SECONDS} s with a folder open, idle | {' | '.join(idle(a) for a in apps)} |")
 
     def row2(label, test):
-        a, b = med("python", test), med("cxx", test)
-        return f"| {label} | {secs(a)} | {secs(b)} | {ratio(a, b)} |"
+        return f"| {label} | {secs(med('kestrel', test))} |"
 
     def bg(app):
         vals = [med(app, t, "rss_mb") for t in ("bulk_thumbs", "mosaics", "search", "metadata", "copy")]
         vals = [v for v in vals if v is not None]
         return f"{round(min(vals))}–{round(max(vals))} MB" if vals else "—"
 
-    t2 = ["| Test | Python | C++ | C++ speed-up |", "|---|---|---|---|",
+    t2 = ["| Test | Kestrel |", "|---|---|",
           row2("Thumbnail all 600 images (\"Generate Previews\")", "bulk_thumbs"),
           row2("Build 150 folder mosaics", "mosaics"),
           row2("Recursive search over 50,000 files", "search"),
           row2("Read EXIF / image-generation prompts for 400 images", "metadata"),
-          f"| Peak memory (background jobs) | {bg('python')} | {bg('cxx')} | |"]
+          f"| Peak memory (background jobs) | {bg('kestrel')} |"]
 
     vs = []
     for label, test, key in TIMED:
@@ -634,10 +622,10 @@ def tables(res, other):
                  "move_xdev": "moving to another drive"}.get(test, "moving to the trash" if key == "s" else
                                                               "emptying the trash")
         if med(other, test, key) is not None:
-            vs.append(f"- {short}: {ratio(med(other, test, key), med('cxx', test, key))};")
+            vs.append(f"- {short}: {ratio(med(other, test, key), med('kestrel', test, key))};")
     if vs:
         vs[-1] = vs[-1][:-1] + "."
-    gallery_n, kes_n = med(other, "open_gallery", "n"), med("cxx", "open_gallery", "n")
+    gallery_n, kes_n = med(other, "open_gallery", "n"), med("kestrel", "open_gallery", "n")
     ops = {"copy": "copy files", "move_xdev": "move files to another drive", "trash": "move files to the trash"}
     runs_of = lambda test: res.get((other, test), [])   # noqa: E731
     stuck = [phrase for test, phrase in ops.items() if runs_of(test) and all(r.get("stuck") for r in runs_of(test))]
@@ -655,11 +643,11 @@ def tables(res, other):
                "files_n": round(gallery_n) if gallery_n else None,
                "files_all": secs(med(other, "open_gallery", "all_s")),
                "kestrel_n": round(kes_n) if kes_n else None,
-               "kestrel_all": secs(med("cxx", "bulk_thumbs")),
-               "procs": round(med("cxx", "windows", "procs") or 0),
+               "kestrel_all": secs(med("kestrel", "bulk_thumbs")),
+               "procs": round(med("kestrel", "windows", "procs") or 0),
                "untimed": untimed, "stuck": stuck}
     # idle CPU far above Kestrel's: worth a word of caution (Nemo kept a fifth of a core busy in the Mint VM)
-    busy, calm = med(other, "idle", "cpu_ms"), med("cxx", "idle", "cpu_ms")
+    busy, calm = med(other, "idle", "cpu_ms"), med("kestrel", "idle", "cpu_ms")
     summary["busy_idle"] = busy / (IDLE_SECONDS * 10) if busy and busy > 1000 and busy > 10 * (calm or 0) else None
     return t1, t2, summary
 
@@ -688,9 +676,7 @@ def machine(other):
 def section(t1, t2, summary, runs, other):
     cpu, threads, version, distro = machine(other)
     label = OTHERS[other]["label"]
-    # absolute links, so the section reads the same pasted into either README (the Python one is also PyPI's page)
-    gh = "https://github.com/RegulusArms"
-    py_link, cxx_link, bench_link = f"{gh}/kestrel-explorer", f"{gh}/kes-c", f"{gh}/kes-c/tree/main/bench"
+    bench_link = "https://github.com/RegulusArms/kestrel-explorer/tree/main/bench"
     owns = label + ("'" if label.endswith("s") else "'s")   # GNOME Files', Nemo's
     if not OTHERS[other]["thumbnails"]:
         thumbs = f"{label} wasn't timed on this (see below)."
@@ -728,15 +714,15 @@ def section(t1, t2, summary, runs, other):
                     f"rows show —.")
     return f"""{OTHERS[other]["heading"]}
 
-Kestrel Explorer exists in two versions with the same features: the original [Python/PyQt6 version]({py_link}) and the [C++/Qt 6 port]({cxx_link}). They share settings, bookmarks and caches, so you can switch between them. Both are compared here with {version}, the file manager they replace.
+Kestrel Explorer is compared here with {version}, the file manager it replaces.
 
 **Test machine:** {cpu} ({threads} threads), {distro}. The test data is on a RAM disk: 600 JPEGs at 1600×1200 with camera EXIF, 40 videos, 40 PDFs, 150 folders of 4 images, a tree of 50,000 files, 20,000 small files plus 250 MB, a folder of 10,000 files, and 200 PNGs with Stable Diffusion prompts.
 
-**How it was measured:** each test ran {runs} times, and the tables show medians. Every run started with a fresh home folder, so the thumbnail cache was empty. All three apps ran on a headless X server with software rendering (Qt's raster engine, GTK's cairo renderer), on a private session bus where only the desktop's settings and virtual file system (gvfs) services could start, so no file indexer ran. The benchmark is in [bench/]({bench_link}) and is run with `bench/run.sh`.
+**How it was measured:** each test ran {runs} times, and the tables show medians. Every run started with a fresh home folder, so the thumbnail cache was empty. Both apps ran on a headless X server with software rendering (Qt's raster engine, GTK's cairo renderer), on a private session bus where only the desktop's settings and virtual file system (gvfs) services could start, so no file indexer ran. The benchmark is in [bench/]({bench_link}) and is run with `bench/run.sh`.
 
 ### Compared with {label}
 
-All three apps are measured in the same way:
+Both apps are measured in the same way:
 - **Startup:** timed until the window is on screen.
 - **Opening a folder:** timed from launch until the first {FIRST} files' thumbnails are in the shared thumbnail cache.
 - **File operations:** Kestrel runs them with its own copy and trash code, the same code its menus use. {label} receives them through its D-Bus file-operations service, as when another app asks it to.
@@ -746,31 +732,29 @@ All three apps are measured in the same way:
 
 {chr(10).join(t1)}
 
-Kestrel (C++) compared with {label}:
+Kestrel compared with {label}:
 {summary['vs']}
 
 **Limits of this comparison:**
 - **Opening a folder:** the two apps don't do the same amount of work.
   - {thumbs}
   - Kestrel makes them only for what's on screen ({summary['kestrel_n']} images here), and the rest as you scroll.
-  - To thumbnail a whole folder at once, Kestrel has "Generate Previews": {summary['kestrel_all']} for these 600 images in the C++ version (table below).
+  - To thumbnail a whole folder at once, Kestrel has "Generate Previews": {summary['kestrel_all']} for these 600 images (table below).
 - **File operations:** {owns} D-Bus service returns straight away, so its times were measured by watching the files until the operation had finished, to within about 50 ms.{untimed}
 - **Memory:** {label} makes thumbnails in {OTHERS[other]['helpers']}, whose memory isn't counted in its figures. Kestrel makes them inside the app.
 - **Search:** {owns} search can't be timed from outside{OTHERS[other]['search']}, so it isn't compared.
 
-### Kestrel's own features (Python vs C++)
+### Kestrel's own features
 
 These are measured inside the app, because {label} has no equivalent ("Generate Previews", folder mosaics, metadata panels) or can't be timed from outside (search).
 
 {chr(10).join(t2)}
-
-Thumbnails and mosaics take about as long in both versions, because both decode images with the same Qt C++ code, which the Python version already runs on several threads. The C++ version is much faster where the Python version does the work in Python itself, such as reading metadata, searching and copying, and it uses about half the memory.
 """
 
 
 def write_results(sections):
     """bench/results.md: a README Performance section for each app compared with ("Kestrel vs GNOME Files", and/or
-    "Kestrel vs Nemo" from a run on Linux Mint), to paste into both READMEs."""
+    "Kestrel vs Nemo" from a run on Linux Mint), to paste into the README."""
     path = os.path.join(HERE, "results.md")
     with open(path, "w") as f:
         f.write("\n".join(sections))
@@ -778,17 +762,6 @@ def write_results(sections):
 
 
 # ---------------------------------------------------------------- main
-
-def build():
-    print("Building the C++ version and its benchmark harness…", flush=True)
-    log = open(os.path.join(HERE, "build.log"), "w")
-    for cmd in ([CMAKE, "-S", CXX_ROOT, "-B", os.path.join(CXX_ROOT, BUILD), "-DCMAKE_BUILD_TYPE=Release"],
-                [CMAKE, "--build", os.path.join(CXX_ROOT, BUILD), f"-j{os.cpu_count()}"],
-                [CMAKE, "-S", HERE, "-B", os.path.join(HERE, BUILD), f"-DKES_SRC={CXX_ROOT}/src"],
-                [CMAKE, "--build", os.path.join(HERE, BUILD), f"-j{os.cpu_count()}"]):
-        if subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT).returncode:
-            sys.exit(f"Build failed (log: {os.path.join(HERE, 'build.log')})")
-
 
 def runs_for(test, runs):
     if test == "startup":
@@ -839,16 +812,12 @@ def main():
     missing = [t for t in ("Xvfb", "xdotool", "dbus-run-session") if not shutil.which(t)]
     if missing:
         sys.exit(f"Missing: {', '.join(missing)} (sudo apt install xvfb xdotool dbus-daemon)")
-    for need in (os.path.join(PY_ROOT, "kes"), os.path.join(CXX_ROOT, "CMakeLists.txt")):
-        if not os.path.exists(need):
-            sys.exit(f"Both projects are needed side by side; not found: {need}")
     apps = [a for a in APPS if a not in OTHERS or shutil.which(OTHERS[a]["cmd"][0])]
     only = [t for t in args.only.split(",") if t]
     unknown = [t for t in only if t not in COMMON + KESTREL_ONLY]
     if unknown:
         sys.exit(f"Unknown test(s): {', '.join(unknown)} (tests: {', '.join(COMMON + KESTREL_ONLY)})")
     tests = [t for t in COMMON + KESTREL_ONLY if not only or t in only]
-    build()
     subprocess.run(["/usr/bin/python3", os.path.join(HERE, "make_data.py"), DATA], check=True)
 
     box = Sandbox()

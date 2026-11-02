@@ -1,10 +1,10 @@
 """MainWindow's file actions: the clipboard (cut, copy, paste), drops, Move To / Copy To, duplicate, new folders and
 files, rename, Move to Trash, delete, restore from the trash, empty the trash, and links. MainWindow (app.py) inherits
 them; the window itself (tabs, menus, opening files) is there."""
+import errno
 import os
-import shutil
 
-from PyQt6.QtCore import QMimeData, Qt, QTimer
+from PyQt6.QtCore import QBuffer, QIODevice, QMimeData, Qt, QTimer
 from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import QInputDialog, QMenu, QMessageBox
 
@@ -66,9 +66,16 @@ class FileActions:
             md = QGuiApplication.clipboard().mimeData()
             if md is not None and md.hasImage():
                 dst = util.unique_path(target, "Pasted image.png", "num")
-                if QGuiApplication.clipboard().image().save(dst, "PNG"):
+                buf = QBuffer()
+                buf.open(QIODevice.OpenModeFlag.WriteOnly)
+                try:   # made whole under a hidden name, then given the new name (write_parts)
+                    if not QGuiApplication.clipboard().image().save(buf, "PNG"):
+                        raise OSError(errno.EIO, "Couldn't save the pasted image")
+                    util.write_new(dst, bytes(buf.data()))
                     undo.record("create", "Paste", [dst])
-                self.pane().select_later(dst)
+                    self.pane().select_later(dst)
+                except OSError as e:
+                    QMessageBox.warning(self, "Paste", e.strerror or str(e))
             return
         if as_link:
             self.make_links(paths, target, "sym")
@@ -153,9 +160,9 @@ class FileActions:
                 return
             try:
                 if template:
-                    shutil.copyfile(template, p)
+                    util.copyfile(template, p, new_only=True)
                 else:
-                    open(p, "x").close()
+                    util.write_new(p, b"")
                 undo.record("create", "New File", [p])
                 self.pane().select_later(p)
             except PermissionError:
@@ -195,13 +202,13 @@ class FileActions:
                 undo.record("rename", "Rename", [(paths[0], target)])
                 renamed()
 
-    def trash_paths(self, paths):
+    def trash_paths(self, selected):
+        # what's already in the trash can only be deleted permanently (delete_paths asks first); the rest goes to the
+        # trash. A selection can hold both (a search, Recent, Starred).
+        paths = [p for p in selected if not util.in_trash(p)]
+        self.delete_paths([p for p in selected if util.in_trash(p)])
         if not paths:
             return
-        if util.in_trash(paths[0]):
-            self.delete_paths(paths)
-            return
-        paths = list(paths)
         trashed = []
 
         def work(task):
@@ -271,7 +278,7 @@ class FileActions:
                 try:
                     os.makedirs(os.path.dirname(dest), exist_ok=True)
                     info = util.trash_info_path(p)
-                    shutil.move(p, dest)
+                    util.move(p, dest)
                     if info and os.path.exists(info):
                         os.unlink(info)
                 except OSError as e:
@@ -351,13 +358,16 @@ class FileActions:
             QMessageBox.warning(self, "Create Link", str(e))
             return
         for p in paths:
-            plan = fileops.link_plan(kind, p, dest)
+            plan = None
             try:
+                plan = fileops.link_plan(kind, p, dest)
                 made.append(fileops.make_link(plan))
             except PermissionError:
                 denied.append(plan)
             except OSError as e:
                 errors.append(f"{os.path.basename(p)}: {e}")
+            except RuntimeError as e:   # a name a shortcut can't hold
+                errors.append(str(e))
         if errors:
             QMessageBox.warning(self, "Create Link", "\n".join(errors))
 
